@@ -8,7 +8,13 @@ import pytest
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError as JsonSchemaError
 
-from poker_core.schema_export import SCHEMA_MODELS, build_schemas, main, write_schemas
+from poker_core.schema_export import (
+    SCHEMA_MODELS,
+    STRUCTURAL_SCHEMA_NOTE,
+    build_schemas,
+    main,
+    write_schemas,
+)
 
 
 def test_build_schemas_covers_all_contracts():
@@ -20,12 +26,18 @@ def test_build_schemas_covers_all_contracts():
         assert schema["type"] == "object"
 
 
+def test_exported_schemas_carry_structural_note():
+    for schema in build_schemas().values():
+        assert schema["$comment"] == STRUCTURAL_SCHEMA_NOTE
+
+
 def test_write_schemas_emits_files(tmp_path):
     written = write_schemas(tmp_path)
     assert {p.name for p in written} == {
         "decision_provenance_log.schema.json",
         "run_manifest.schema.json",
         "reason_ontology.schema.json",
+        "strategy_table.schema.json",
     }
     for path in written:
         loaded = json.loads(path.read_text(encoding="utf-8"))
@@ -37,6 +49,7 @@ def test_cli_main_writes_to_out_dir(tmp_path, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "decision_provenance_log.schema.json" in out
+    assert "canonical validator" in out  # the structural-schema note is printed
     assert (tmp_path / "run_manifest.schema.json").exists()
 
 
@@ -61,6 +74,26 @@ def test_exported_dpl_schema_rejects_extra_property(valid_dpl):
         Draft202012Validator(schema).validate(valid_dpl)
 
 
+def test_exported_dpl_schema_enforces_leak_namespace(valid_dpl):
+    # the ^LEAK_ pattern is exported, so jsonschema catches a TRG_ id here too
+    schema = build_schemas()["decision_provenance_log"]
+    valid_dpl["detected_leaks"][0]["reason_id"] = "TRG_R001"
+    with pytest.raises(JsonSchemaError):
+        Draft202012Validator(schema).validate(valid_dpl)
+
+
+def test_exported_dpl_schema_enforces_trigger_namespace(valid_dpl):
+    schema = build_schemas()["decision_provenance_log"]
+    valid_dpl["trigger_reasons"] = ["LEAK_R001"]
+    with pytest.raises(JsonSchemaError):
+        Draft202012Validator(schema).validate(valid_dpl)
+
+
 def test_exported_manifest_schema_validates_example(valid_manifest):
     schema = build_schemas()["run_manifest"]
     Draft202012Validator(schema).validate(valid_manifest)
+
+
+def test_exported_strategy_table_schema_validates_example(valid_strategy_table):
+    schema = build_schemas()["strategy_table"]
+    Draft202012Validator(schema).validate(valid_strategy_table)

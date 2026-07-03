@@ -1,4 +1,4 @@
-"""Tests for the Decision Provenance Log schema v1 (ADR-0001, ADR-0006, ADR-0008)."""
+"""Tests for the Decision Provenance Log schema v1 (ADR-0001, ADR-0005/0006/0008)."""
 
 from __future__ import annotations
 
@@ -16,6 +16,8 @@ def test_valid_dpl_round_trips(valid_dpl):
     dpl = DecisionProvenanceLog.model_validate(valid_dpl)
     assert dpl.schema_version == DPL_SCHEMA_VERSION
     assert dpl.selected_action in dpl.final_policy
+    assert dpl.mix_reasons == ["MIX_R001"]
+    assert dpl.hero_combo == "AhKh"
     # JSON round-trip preserves the record
     again = DecisionProvenanceLog.model_validate_json(dpl.model_dump_json())
     assert again == dpl
@@ -43,32 +45,62 @@ def test_policy_probability_out_of_range_rejected(valid_dpl):
         DecisionProvenanceLog.model_validate(valid_dpl)
 
 
+# --- alpha-mixing consistency (Spec 6.8) ----------------------------------
+
+
+def test_final_policy_must_equal_alpha_mix(valid_dpl):
+    # base/exploit/alpha imply final {CHECK:0.4, BET_75:0.6}; store a wrong final.
+    valid_dpl["final_policy"] = {"CHECK": 0.5, "BET_75": 0.5}
+    with pytest.raises(ValidationError, match="alpha-mix"):
+        DecisionProvenanceLog.model_validate(valid_dpl)
+
+
+def test_mixing_checked_over_union_of_actions(valid_dpl):
+    # exploit introduces an action absent from base/final; mix would require it.
+    valid_dpl["exploit_policy"] = {"CHECK": 0.2, "BET_75": 0.6, "BET_150": 0.2}
+    with pytest.raises(ValidationError, match="alpha-mix"):
+        DecisionProvenanceLog.model_validate(valid_dpl)
+
+
+def test_selected_action_must_be_in_final_policy(valid_dpl):
+    valid_dpl["selected_action"] = "FOLD"
+    with pytest.raises(ValidationError, match="not a key of final_policy"):
+        DecisionProvenanceLog.model_validate(valid_dpl)
+
+
+def test_selected_action_needs_positive_probability(valid_dpl):
+    valid_dpl["final_policy"] = {"CHECK": 0.4, "BET_75": 0.6, "FOLD": 0.0}
+    valid_dpl["selected_action"] = "FOLD"
+    with pytest.raises(ValidationError, match="positive probability"):
+        DecisionProvenanceLog.model_validate(valid_dpl)
+
+
 # --- reason-id namespace separation (ADR-0001) ----------------------------
 
 
 def test_trg_id_in_detected_leaks_rejected(valid_dpl):
     """A TRG_ id must not appear in detected_leaks (LEAK_-only field)."""
     valid_dpl["detected_leaks"][0]["reason_id"] = "TRG_R001"
-    with pytest.raises(ValidationError, match="LEAK_ reason id"):
+    with pytest.raises(ValidationError, match="LEAK_"):
         DecisionProvenanceLog.model_validate(valid_dpl)
 
 
 def test_mix_id_in_detected_leaks_rejected(valid_dpl):
     valid_dpl["detected_leaks"][0]["reason_id"] = "MIX_R001"
-    with pytest.raises(ValidationError, match="LEAK_ reason id"):
+    with pytest.raises(ValidationError, match="LEAK_"):
         DecisionProvenanceLog.model_validate(valid_dpl)
 
 
 def test_leak_id_in_trigger_reasons_rejected(valid_dpl):
     """A LEAK_ id must not appear in trigger_reasons (TRG_-only field)."""
     valid_dpl["trigger_reasons"] = ["LEAK_R001"]
-    with pytest.raises(ValidationError, match="TRG_ reason id"):
+    with pytest.raises(ValidationError, match="TRG_"):
         DecisionProvenanceLog.model_validate(valid_dpl)
 
 
-def test_mix_id_in_trigger_reasons_rejected(valid_dpl):
-    valid_dpl["trigger_reasons"] = ["MIX_R001"]
-    with pytest.raises(ValidationError, match="TRG_ reason id"):
+def test_non_mix_id_in_mix_reasons_rejected(valid_dpl):
+    valid_dpl["mix_reasons"] = ["LEAK_R001"]
+    with pytest.raises(ValidationError, match="MIX_"):
         DecisionProvenanceLog.model_validate(valid_dpl)
 
 
@@ -79,15 +111,38 @@ def test_unknown_reason_id_rejected(valid_dpl):
         DecisionProvenanceLog.model_validate(valid_dpl)
 
 
+def test_unknown_mix_reason_rejected(valid_dpl):
+    valid_dpl["mix_reasons"] = ["MIX_R999"]
+    valid_dpl["allowed_reason_ids"] = ["LEAK_R001", "TRG_R001", "TRG_R002", "TRG_R003"]
+    with pytest.raises(ValidationError, match="unknown reason id"):
+        DecisionProvenanceLog.model_validate(valid_dpl)
+
+
 def test_leak_type_must_match_ontology_label(valid_dpl):
     valid_dpl["detected_leaks"][0]["leak_type"] = "wrong_label"
     with pytest.raises(ValidationError, match="does not match ontology label"):
         DecisionProvenanceLog.model_validate(valid_dpl)
 
 
+def test_duplicate_trigger_reason_rejected(valid_dpl):
+    valid_dpl["trigger_reasons"] = ["TRG_R001", "TRG_R001"]
+    with pytest.raises(ValidationError, match="duplicate reason id"):
+        DecisionProvenanceLog.model_validate(valid_dpl)
+
+
+# --- closed-world allowed_reason_ids (ADR-0001; Spec 6.10) -----------------
+
+
 def test_allowed_reason_ids_reject_unknown(valid_dpl):
     valid_dpl["allowed_reason_ids"].append("TRG_R999")
     with pytest.raises(ValidationError, match="unknown reason id"):
+        DecisionProvenanceLog.model_validate(valid_dpl)
+
+
+def test_allowed_reason_ids_must_be_backed(valid_dpl):
+    # LEAK_R002 exists in the ontology but is not recorded on this decision.
+    valid_dpl["allowed_reason_ids"].append("LEAK_R002")
+    with pytest.raises(ValidationError, match="not backed by any recorded reason"):
         DecisionProvenanceLog.model_validate(valid_dpl)
 
 
@@ -97,19 +152,7 @@ def test_allowed_reason_ids_accept_all_three_namespaces(valid_dpl):
     assert prefixes == {"LEAK", "TRG", "MIX"}
 
 
-def test_duplicate_trigger_reason_rejected(valid_dpl):
-    valid_dpl["trigger_reasons"] = ["TRG_R001", "TRG_R001"]
-    with pytest.raises(ValidationError, match="duplicate reason id"):
-        DecisionProvenanceLog.model_validate(valid_dpl)
-
-
 # --- cross-field integrity ------------------------------------------------
-
-
-def test_selected_action_must_be_in_final_policy(valid_dpl):
-    valid_dpl["selected_action"] = "FOLD"
-    with pytest.raises(ValidationError, match="not a key of final_policy"):
-        DecisionProvenanceLog.model_validate(valid_dpl)
 
 
 def test_nodelock_source_requires_solver_result_id(valid_dpl):
@@ -124,6 +167,12 @@ def test_nodelock_source_with_solver_result_id_ok(valid_dpl):
     valid_dpl["solver_result_id"] = "solve_abc123"
     dpl = DecisionProvenanceLog.model_validate(valid_dpl)
     assert dpl.solver_result_id == "solve_abc123"
+
+
+def test_hero_combo_required(valid_dpl):
+    valid_dpl["hero_combo"] = ""
+    with pytest.raises(ValidationError):
+        DecisionProvenanceLog.model_validate(valid_dpl)
 
 
 def test_extra_field_forbidden(valid_dpl):
@@ -157,8 +206,11 @@ def test_detected_leak_rate_out_of_range_rejected(valid_dpl):
 
 
 def test_no_leaks_is_valid(valid_dpl):
+    # A decision with no recorded reasons and an empty explanation whitelist.
     valid_dpl["detected_leaks"] = []
     valid_dpl["trigger_reasons"] = []
+    valid_dpl["mix_reasons"] = []
+    valid_dpl["allowed_reason_ids"] = []
     dpl = DecisionProvenanceLog.model_validate(valid_dpl)
     assert dpl.detected_leaks == []
 

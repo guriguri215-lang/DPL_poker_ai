@@ -8,15 +8,29 @@ change with an ADR and a ``schema_version`` bump (ADR-0006).
 
 Key contracts encoded here:
 
-* Reason ids are namespace-separated (ADR-0001). ``detected_leaks[].reason_id``
-  must be ``LEAK_*`` and ``trigger_reasons`` must be ``TRG_*``; every id is
-  resolved against :mod:`poker_core.reason_ontology`.
+* Reason ids are namespace-separated (ADR-0001), stored in three separate fields:
+  ``detected_leaks[].reason_id`` (``LEAK_*``), ``trigger_reasons`` (``TRG_*``) and
+  ``mix_reasons`` (``MIX_*``, the execution reasons of Spec 6.9). Every id is
+  resolved against :mod:`poker_core.reason_ontology`. ``allowed_reason_ids`` is the
+  closed-world explanation whitelist and must be a subset of the reasons actually
+  recorded in those three fields -- an explanation can only cite a reason the
+  decision actually rests on.
+* The realised policy is a genuine safety mix: ``final_policy`` must equal
+  ``(1 - safety_alpha) * base_policy + safety_alpha * exploit_policy`` over the
+  union of actions (within :data:`MIXING_ABS_TOL`), and ``selected_action`` must be
+  an action carried with positive probability by ``final_policy`` (Spec 6.8/6.9).
+* Both the ``hand_bucket`` and the concrete ``hero_combo`` are recorded (ADR-0005;
+  ``hero_combo`` is a string until Phase 1 introduces a typed card/combo model).
 * EV provenance is explicit (ADR-0008). ``ev_estimate.ev_source`` is required and
   **only** ``solver_exact`` EVs are cleared for use in explanations. Use
   :meth:`EvEstimate.explanation_values` / :meth:`DecisionProvenanceLog.ev_for_explanation`
   to obtain the EV payload an explanation is allowed to cite; a heuristic or
   estimate source yields ``None`` so no unverifiable number can reach the reader.
 * Policies (base / exploit / final) are proper distributions that sum to 1.0.
+
+The exported JSON Schema captures structure, enums, ranges and the reason-id
+namespace patterns, but the cross-field semantics above are enforced only by this
+pydantic model, which is the canonical validator.
 """
 
 from __future__ import annotations
@@ -41,12 +55,23 @@ DPL_SCHEMA_VERSION = "1.0.0"
 #: Absolute tolerance for the "policy probabilities sum to 1.0" check.
 POLICY_SUM_TOL = 1e-6
 
+#: Absolute tolerance for the "final == alpha-mix of base and exploit" check.
+MIXING_ABS_TOL = 1e-6
+
 HandBucket = Literal["nuts", "strong_value", "marginal", "weak_showdown", "air"]
 ExploitSource = Literal["rule_based", "nodelock_solver"]
 EvSource = Literal["solver_exact", "solver_estimate", "heuristic"]
 
 #: The only ``ev_source`` whose EV values may appear in an explanation (ADR-0008).
 EXPLANATION_SAFE_EV_SOURCE = "solver_exact"
+
+# Reason-id string types carrying the namespace prefix as a JSON-Schema pattern
+# (ADR-0001). The pattern gives structural namespace enforcement that survives
+# export to JSON Schema; membership in the ontology is checked separately.
+LeakReasonId = Annotated[str, Field(pattern=r"^LEAK_")]
+TrgReasonId = Annotated[str, Field(pattern=r"^TRG_")]
+MixReasonId = Annotated[str, Field(pattern=r"^MIX_")]
+AnyReasonId = Annotated[str, Field(pattern=r"^(?:LEAK|TRG|MIX)_")]
 
 
 def _check_policy(policy: dict[str, float]) -> dict[str, float]:
@@ -66,20 +91,20 @@ def _check_policy(policy: dict[str, float]) -> dict[str, float]:
 Policy = Annotated[dict[str, float], AfterValidator(_check_policy)]
 
 
-def _validate_reason_ids(
-    reason_ids: list[str], namespace: str | None, field_name: str
-) -> list[str]:
-    """Reject unknown ids, wrong-namespace ids and duplicates."""
+def _validate_known_unique(reason_ids: list[str], field_name: str) -> list[str]:
+    """Reject unknown (not in ontology) reason ids and duplicates.
+
+    Namespace membership is enforced by the field's string pattern; this checks
+    that each id is actually defined and appears at most once.
+    """
     ontology = get_ontology()
     seen: set[str] = set()
     for rid in reason_ids:
         if rid in seen:
             raise ValueError(f"{field_name} contains duplicate reason id {rid!r}")
         seen.add(rid)
-        if not ontology.is_valid(rid, namespace=namespace):
-            if not ontology.has(rid):
-                raise ValueError(f"{field_name} contains unknown reason id {rid!r}")
-            raise ValueError(f"{field_name} requires a {namespace}_ reason id but got {rid!r}")
+        if not ontology.has(rid):
+            raise ValueError(f"{field_name} contains unknown reason id {rid!r}")
     return reason_ids
 
 
@@ -88,7 +113,7 @@ class DetectedLeak(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    reason_id: str
+    reason_id: LeakReasonId
     leak_type: str
     situation_key: str
     observed_rate: float = Field(ge=0.0, le=1.0)
@@ -99,13 +124,11 @@ class DetectedLeak(BaseModel):
 
     @model_validator(mode="after")
     def _reason_id_is_known_leak(self) -> DetectedLeak:
+        # The ``^LEAK_`` pattern already guarantees the namespace; here we check
+        # the id exists and that leak_type matches its ontology label.
         ontology = get_ontology()
         if not ontology.has(self.reason_id):
             raise ValueError(f"unknown reason id {self.reason_id!r}")
-        if not ontology.is_valid(self.reason_id, namespace="LEAK"):
-            raise ValueError(
-                f"detected_leaks requires a LEAK_ reason id but got {self.reason_id!r}"
-            )
         expected_label = ontology.get(self.reason_id).label
         if self.leak_type != expected_label:
             raise ValueError(
@@ -184,11 +207,13 @@ class DecisionProvenanceLog(BaseModel):
     state_cluster: str
     cluster_def_version: str
     hand_bucket: HandBucket
+    hero_combo: str = Field(min_length=1)
 
     # --- policies and adjustment ---
     base_policy: Policy
     detected_leaks: list[DetectedLeak] = Field(default_factory=list)
-    trigger_reasons: list[str] = Field(default_factory=list)
+    trigger_reasons: list[TrgReasonId] = Field(default_factory=list)
+    mix_reasons: list[MixReasonId] = Field(default_factory=list)
     exploit_policy: Policy
     exploit_source: ExploitSource
     solver_result_id: str | None = None
@@ -201,7 +226,7 @@ class DecisionProvenanceLog(BaseModel):
 
     # --- valuation and explanation contract ---
     ev_estimate: EvEstimate
-    allowed_reason_ids: list[str]
+    allowed_reason_ids: list[AnyReasonId]
     baseline_table_version: str
 
     @field_validator("schema_version")
@@ -216,15 +241,18 @@ class DecisionProvenanceLog(BaseModel):
 
     @field_validator("trigger_reasons")
     @classmethod
-    def _trigger_reasons_are_trg(cls, value: list[str]) -> list[str]:
-        return _validate_reason_ids(value, namespace="TRG", field_name="trigger_reasons")
+    def _trigger_reasons_known(cls, value: list[str]) -> list[str]:
+        return _validate_known_unique(value, field_name="trigger_reasons")
+
+    @field_validator("mix_reasons")
+    @classmethod
+    def _mix_reasons_known(cls, value: list[str]) -> list[str]:
+        return _validate_known_unique(value, field_name="mix_reasons")
 
     @field_validator("allowed_reason_ids")
     @classmethod
     def _allowed_reason_ids_known(cls, value: list[str]) -> list[str]:
-        # allowed_reason_ids is the closed-world whitelist for the explanation
-        # generator (Spec 6.10); ids may come from any namespace but must exist.
-        return _validate_reason_ids(value, namespace=None, field_name="allowed_reason_ids")
+        return _validate_known_unique(value, field_name="allowed_reason_ids")
 
     @model_validator(mode="after")
     def _cross_field_checks(self) -> DecisionProvenanceLog:
@@ -232,11 +260,53 @@ class DecisionProvenanceLog(BaseModel):
             raise ValueError(
                 "solver_result_id is required when exploit_source is 'nodelock_solver'"
             )
+        self._check_selected_action()
+        self._check_mixing_consistency()
+        self._check_allowed_reason_ids_backed()
+        return self
+
+    def _check_selected_action(self) -> None:
         if self.selected_action not in self.final_policy:
             raise ValueError(
                 f"selected_action {self.selected_action!r} is not a key of final_policy"
             )
-        return self
+        if self.final_policy[self.selected_action] <= 0.0:
+            raise ValueError(
+                f"selected_action {self.selected_action!r} must have positive probability "
+                f"in final_policy (got {self.final_policy[self.selected_action]})"
+            )
+
+    def _check_mixing_consistency(self) -> None:
+        # final must be the alpha-mixture of base and exploit over the union of
+        # actions (missing actions treated as probability 0), Spec 6.8.
+        alpha = self.safety_alpha
+        actions = set(self.base_policy) | set(self.exploit_policy) | set(self.final_policy)
+        for action in actions:
+            expected = (1.0 - alpha) * self.base_policy.get(action, 0.0) + alpha * (
+                self.exploit_policy.get(action, 0.0)
+            )
+            actual = self.final_policy.get(action, 0.0)
+            if abs(actual - expected) > MIXING_ABS_TOL:
+                raise ValueError(
+                    f"final_policy[{action!r}]={actual} does not match the alpha-mix "
+                    f"{expected} of base/exploit at safety_alpha={alpha}"
+                )
+
+    def _check_allowed_reason_ids_backed(self) -> None:
+        # Closed-world: an explanation may only cite reasons the decision records
+        # (ADR-0001; Spec 6.10). allowed_reason_ids must be backed by an actually
+        # recorded LEAK/TRG/MIX reason.
+        recorded = (
+            {leak.reason_id for leak in self.detected_leaks}
+            | set(self.trigger_reasons)
+            | set(self.mix_reasons)
+        )
+        unbacked = [rid for rid in self.allowed_reason_ids if rid not in recorded]
+        if unbacked:
+            raise ValueError(
+                f"allowed_reason_ids {unbacked} are not backed by any recorded reason "
+                f"(detected_leaks / trigger_reasons / mix_reasons)"
+            )
 
     def ev_for_explanation(self) -> dict[str, float | None] | None:
         """EV payload the explanation may cite, or ``None`` (ADR-0008)."""
