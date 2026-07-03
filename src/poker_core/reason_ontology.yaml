@@ -1,0 +1,112 @@
+# Reason Ontology v1 (ADR-0001: three-layer namespace separation)
+#
+# Single source of truth for every reason_id that may appear in a Decision
+# Provenance Log (DPL) or in a generated explanation. The explanation
+# generator and the Explanation Verifier MUST resolve reason ids against this
+# file so that faithfulness (Reason Validity) is measured against one shared
+# definition (REV-20260702 H-1).
+#
+# Three disjoint namespaces:
+#   LEAK_*  opponent leak hypotheses (deviations from the baseline strategy).
+#   TRG_*   adjustment trigger conditions (thresholds on EV, confidence, risk).
+#   MIX_*   policy execution reasons (mixed-strategy sampling).
+#
+# Crosswalk from the original specification (Poker AI Specification):
+#   Spec 6.6 leak types R001..R008 -> LEAK_R001..LEAK_R008.
+#   Spec 6.10 catalog R001..R006 (opponent leaks)   -> LEAK_R001..LEAK_R006.
+#   Spec 6.10 catalog R007 (EV delta over threshold) -> TRG_R001.
+#   Spec 6.10 catalog R008 (leak confidence over threshold) -> TRG_R002.
+#   Spec 6.10 catalog R009 (misestimation risk within tolerance) -> TRG_R003.
+#   Spec 6.10 catalog R010 (action present in mixed policy) -> MIX_R001.
+# Example: the spec's allowed_reason_ids ["R001","R007","R008","R009","R010"]
+#   becomes ["LEAK_R001","TRG_R001","TRG_R002","TRG_R003","MIX_R001"].
+
+schema_version: "1.0.0"
+ontology_version: "1.0.0"
+
+namespaces:
+  LEAK:
+    description: >-
+      Opponent leak hypotheses: observed behaviour deviates from the baseline
+      strategy in a specific, named way. Detected by the Leak Detector and
+      stored in DPL.detected_leaks.
+  TRG:
+    description: >-
+      Adjustment trigger conditions: threshold checks (EV gain, leak
+      confidence, misestimation risk) that gate whether an exploit adjustment
+      is applied. Stored in DPL.trigger_reasons.
+  MIX:
+    description: >-
+      Policy execution reasons: why a concrete action was realised from the
+      mixed final policy. These are execution reasons, not policy reasons
+      (Spec 6.9). Referenced via DPL.allowed_reason_ids.
+
+reasons:
+  # --- LEAK namespace (Poker AI Specification 6.6) ---
+  - id: LEAK_R001
+    namespace: LEAK
+    label: river_large_bet_overfold
+    description: Opponent folds too often (above baseline) facing a large river bet.
+    source_ref: "AI Spec 6.6 R001 / 6.10 R001"
+  - id: LEAK_R002
+    namespace: LEAK
+    label: river_large_bet_overcall
+    description: Opponent calls too often (above baseline) facing a large river bet.
+    source_ref: "AI Spec 6.6 R002 / 6.10 R002"
+  - id: LEAK_R003
+    namespace: LEAK
+    label: river_small_bet_overfold
+    description: Opponent folds too often (above baseline) facing a small river bet.
+    source_ref: "AI Spec 6.6 R003 / 6.10 R003"
+  - id: LEAK_R004
+    namespace: LEAK
+    label: river_small_bet_overcall
+    description: Opponent calls too often (above baseline) facing a small river bet.
+    source_ref: "AI Spec 6.6 R004 / 6.10 R004"
+  - id: LEAK_R005
+    namespace: LEAK
+    label: river_raise_underbluff
+    description: Opponent's river raises contain too few bluffs (value-heavy) versus baseline.
+    source_ref: "AI Spec 6.6 R005 / 6.10 R005"
+  - id: LEAK_R006
+    namespace: LEAK
+    label: river_raise_overbluff
+    description: Opponent's river raises contain too many bluffs versus baseline.
+    source_ref: "AI Spec 6.6 R006 / 6.10 R006"
+  - id: LEAK_R007
+    namespace: LEAK
+    label: check_back_too_often
+    description: Opponent checks back in position too often, missing value and protection bets.
+    source_ref: "AI Spec 6.6 R007"
+  - id: LEAK_R008
+    namespace: LEAK
+    label: bet_too_often_when_checked_to
+    description: Opponent bets too often when checked to, beyond the baseline frequency.
+    source_ref: "AI Spec 6.6 R008"
+
+  # --- TRG namespace (Poker AI Specification 6.10 R007-R009) ---
+  - id: TRG_R001
+    namespace: TRG
+    label: ev_delta_over_threshold
+    description: The exploit policy's EV gain over the base policy exceeds the activation threshold.
+    source_ref: "AI Spec 6.10 R007"
+  - id: TRG_R002
+    namespace: TRG
+    label: leak_confidence_over_threshold
+    description: The estimated leak confidence exceeds the activation threshold.
+    source_ref: "AI Spec 6.10 R008"
+  - id: TRG_R003
+    namespace: TRG
+    label: misestimation_risk_within_tolerance
+    description: The worst-case penalty under misestimation stays within the configured risk tolerance.
+    source_ref: "AI Spec 6.10 R009"
+
+  # --- MIX namespace (Poker AI Specification 6.10 R010) ---
+  - id: MIX_R001
+    namespace: MIX
+    label: action_sampled_from_mixed_policy
+    description: >-
+      The selected action was drawn from the final mixed policy at its assigned
+      frequency. This is an execution reason (why this action this time), not a
+      policy reason (why the action is in the policy at all).
+    source_ref: "AI Spec 6.10 R010 / 6.9"
