@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Experiment / solver artifacts (large, regenerable; only manifests and
+# summary stats are tracked in git)
+experiments_output/
+solver_outputs/
+logs/
+
+# Generated JSON Schemas (produced by cli/export_schemas.py; derivable)
+docs/schemas/
+
+# Personal play logs (privacy: never commit)
+data/user_logs/
+
+# Secrets (never commit, even while the repo is private)
+.env
+.env.*
+*.key
+*.pem
+secrets/
+
+# Editors / OS
+.claude/
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Temporary files
+*.tmp
+*.bak
+~$*
