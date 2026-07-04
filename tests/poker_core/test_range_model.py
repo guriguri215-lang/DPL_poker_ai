@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from poker_core.card import parse_cards
@@ -16,6 +18,16 @@ def test_construction_canonicalises_keys():
 def test_negative_weight_rejected():
     with pytest.raises(ValueError, match=">= 0"):
         Range({"AsKh": -0.1})
+
+
+def test_nan_weight_rejected():
+    with pytest.raises(ValueError, match="finite"):
+        Range({"AsKh": math.nan})
+
+
+def test_inf_weight_rejected():
+    with pytest.raises(ValueError, match="finite"):
+        Range({"AsKh": math.inf})
 
 
 def test_duplicate_combo_rejected():

@@ -24,6 +24,8 @@ class Range:
     def __init__(self, weights: Mapping[str, float]) -> None:
         canonical: dict[str, float] = {}
         for key, weight in weights.items():
+            if not math.isfinite(weight):
+                raise ValueError(f"combo weight must be a finite number, got {weight} for {key!r}")
             if weight < 0:
                 raise ValueError(f"combo weight must be >= 0, got {weight} for {key!r}")
             combo = Combo.from_str(key)

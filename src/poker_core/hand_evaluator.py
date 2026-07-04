@@ -57,11 +57,14 @@ def _pack(category: HandCategory, tiebreaks: tuple[int, ...]) -> int:
     return key
 
 
-def evaluate_five(cards: tuple[Card, ...] | list[Card]) -> int:
-    """Strength of exactly five cards as a comparable integer."""
-    if len(cards) != 5:
-        raise ValueError(f"evaluate_five needs exactly 5 cards, got {len(cards)}")
+def _require_unique(cards: tuple[Card, ...] | list[Card]) -> None:
+    """Reject a hand that repeats a card; a duplicate would be an impossible hand."""
+    if len({card.index for card in cards}) != len(cards):
+        raise ValueError("hand contains duplicate cards")
 
+
+def _evaluate_five(cards: tuple[Card, ...] | list[Card]) -> int:
+    """Strength of five valid, distinct cards (no input validation)."""
     values = sorted((card.value for card in cards), reverse=True)
     counts = Counter(values)
     # Groups ordered by count desc, then rank desc: this ordering is exactly the
@@ -92,14 +95,23 @@ def evaluate_five(cards: tuple[Card, ...] | list[Card]) -> int:
     return _pack(HandCategory.HIGH_CARD, tuple(values))
 
 
+def evaluate_five(cards: tuple[Card, ...] | list[Card]) -> int:
+    """Strength of exactly five distinct cards as a comparable integer."""
+    if len(cards) != 5:
+        raise ValueError(f"evaluate_five needs exactly 5 cards, got {len(cards)}")
+    _require_unique(cards)
+    return _evaluate_five(cards)
+
+
 def evaluate_best(cards: tuple[Card, ...] | list[Card]) -> int:
-    """Strength of the best five-card hand out of five or more cards."""
+    """Strength of the best five-card hand out of five to seven distinct cards."""
     cards = tuple(cards)
-    if len(cards) < 5:
-        raise ValueError(f"evaluate_best needs at least 5 cards, got {len(cards)}")
+    if not (5 <= len(cards) <= 7):
+        raise ValueError(f"evaluate_best needs 5 to 7 cards, got {len(cards)}")
+    _require_unique(cards)
     if len(cards) == 5:
-        return evaluate_five(cards)
-    return max(evaluate_five(five) for five in combinations(cards, 5))
+        return _evaluate_five(cards)
+    return max(_evaluate_five(five) for five in combinations(cards, 5))
 
 
 def hand_strength(hole: Combo, board: tuple[Card, ...] | list[Card]) -> int:

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from poker_core.card import parse_cards
+from poker_core.card import Card, parse_cards
 from poker_core.combo import Combo
 from poker_core.hand_evaluator import (
     HandCategory,
@@ -102,6 +102,29 @@ def test_evaluate_five_requires_five_cards():
         evaluate_five(parse_cards("As Ks Qs Js"))
 
 
-def test_evaluate_best_requires_at_least_five():
-    with pytest.raises(ValueError, match="at least 5"):
-        evaluate_best(parse_cards("As Ks Qs Js"))
+def test_evaluate_best_requires_five_to_seven_cards():
+    with pytest.raises(ValueError, match="5 to 7"):
+        evaluate_best(parse_cards("As Ks Qs Js"))  # 4 cards
+    with pytest.raises(ValueError, match="5 to 7"):
+        evaluate_best(parse_cards("As Ks Qs Js Ts 9s 8s 7s"))  # 8 cards
+
+
+def test_evaluate_five_rejects_duplicate_cards():
+    # Cards built directly can repeat; a duplicate is an impossible hand.
+    hand = [Card("A", "s"), Card("A", "s"), Card("K", "h"), Card("Q", "d"), Card("J", "c")]
+    with pytest.raises(ValueError, match="duplicate"):
+        evaluate_five(hand)
+
+
+def test_evaluate_best_rejects_duplicate_cards():
+    hand = [
+        Card("A", "s"),
+        Card("A", "s"),
+        Card("K", "h"),
+        Card("Q", "d"),
+        Card("J", "c"),
+        Card("9", "h"),
+        Card("2", "d"),
+    ]
+    with pytest.raises(ValueError, match="duplicate"):
+        evaluate_best(hand)

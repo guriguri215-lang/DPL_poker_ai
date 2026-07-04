@@ -7,6 +7,7 @@ determinism, seeded Monte Carlo reproducibility, and the performance target.
 
 from __future__ import annotations
 
+import math
 import time
 from itertools import combinations
 
@@ -133,6 +134,45 @@ def test_empty_range_raises():
 def test_negative_pot_raises():
     with pytest.raises(ValueError, match="pot"):
         showdown_ev(Range({"QhQd": 1.0}), Range({"3h3c": 1.0}), TRIPS_BOARD, pot=-1.0)
+
+
+def test_non_river_board_rejected():
+    # A flop/turn board (not exactly 5 cards) must fail fast, not return a number.
+    hero, opponent = Range({"QhQd": 1.0}), Range({"3h3c": 1.0})
+    four_card_board = parse_cards("Qs Jd 9h 4c")
+    with pytest.raises(ValueError, match="exactly 5"):
+        showdown_equity(hero, opponent, four_card_board)
+    with pytest.raises(ValueError, match="exactly 5"):
+        showdown_ev(hero, opponent, four_card_board, pot=10.0)
+    with pytest.raises(ValueError, match="exactly 5"):
+        estimate_showdown_equity(hero, opponent, four_card_board, samples=10)
+
+
+def test_duplicate_board_card_rejected():
+    # Board with a repeated card (built directly) is an impossible river.
+    dup_board = (
+        Card("Q", "s"),
+        Card("Q", "s"),
+        Card("9", "h"),
+        Card("4", "c"),
+        Card("2", "s"),
+    )
+    with pytest.raises(ValueError, match="duplicate"):
+        showdown_equity(Range({"AhAd": 1.0}), Range({"3h3c": 1.0}), dup_board)
+
+
+@pytest.mark.parametrize("bad_pot", [math.nan, math.inf, -math.inf])
+def test_non_finite_pot_rejected(bad_pot):
+    with pytest.raises(ValueError, match="finite"):
+        showdown_ev(Range({"QhQd": 1.0}), Range({"3h3c": 1.0}), TRIPS_BOARD, pot=bad_pot)
+
+
+def test_monte_carlo_raises_when_it_cannot_reach_samples():
+    # Identical single-combo ranges: every draw collides, so no valid matchup can
+    # be sampled. The estimator must raise rather than return a short sample.
+    same = Range({"AhKh": 1.0})
+    with pytest.raises(ValueError, match="non-colliding"):
+        estimate_showdown_equity(same, same, TRIPS_BOARD, samples=10, seed=1)
 
 
 @pytest.mark.parametrize("_run", range(1))
