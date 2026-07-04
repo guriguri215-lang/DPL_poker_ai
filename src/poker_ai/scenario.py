@@ -1,4 +1,4 @@
-"""River scenario schema and deterministic generator -- Q3 proposal (REV M-5).
+"""River scenario schema and deterministic generator -- Q3 frozen 0.1.0 (REV M-5).
 
 A :class:`Scenario` is the fully specified pre-action river spot the vertical slice
 runs a single decision on (ADR-0007): the board, Hero's position, the dead-money pot,
@@ -9,10 +9,11 @@ for the ``hand_bucket`` percentile, ADR-0005) and the opponent's assumed range
 scenario: it is produced by the stub opponent's action in the environment, so Hero
 only ever observes the resulting facing bet.
 
-This schema is an **opus4.8 proposal for Q3** and is versioned so it can be pinned in
-a RunManifest; adopting/freezing it needs human confirmation + an ADR (it is not
-one of the Phase-0 frozen contracts). :func:`generate_scenarios` builds a session's
-scenarios deterministically from a seed, so a run is reproducible.
+This schema is **frozen at ``0.1.0``** (Q3, ADR-0014, human-approved 2026-07-04) and
+is versioned so it can be pinned in a RunManifest. It is not one of the Phase-0
+frozen contracts (ADR-0006); changing its fields or invariants now requires a new
+ADR and a version bump. :func:`generate_scenarios` builds a session's scenarios
+deterministically from a seed, so a run is reproducible.
 """
 
 from __future__ import annotations
@@ -28,8 +29,9 @@ from poker_core.card import RANKS, SUITS, Card, parse_cards
 from poker_core.combo import Combo
 from poker_core.range_model import Range
 
-#: Version of this proposed scenario schema (pending Q3 human confirmation + ADR).
-SCENARIO_SCHEMA_VERSION = "0.1.0-draft"
+#: Version of the frozen scenario schema (Q3, ADR-0014). Bump on any field/invariant
+#: change; a new version needs its own ADR.
+SCENARIO_SCHEMA_VERSION = "0.1.0"
 
 #: Number of river board cards.
 RIVER_BOARD_SIZE = 5
@@ -38,7 +40,7 @@ Position = Literal["IP", "OOP"]
 
 
 class Scenario(BaseModel):
-    """One fully specified river spot for a single Hero decision (Q3 proposal)."""
+    """One fully specified river spot for a single Hero decision (Q3, ADR-0014)."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 

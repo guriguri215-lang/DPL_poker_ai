@@ -6,10 +6,12 @@ relative-strength *percentile within Hero's own range* on the board. This module
 computes that percentile with the exact hand evaluator and maps it to a class via a
 declarative, versioned band definition (:mod:`hand_bucket.yaml`).
 
-The band definition is a **draft** (``bucket_def_version`` ends with ``-draft``,
-Q5); its thresholds are provisional and must be frozen via an ADR before any
-persisted table is keyed on them. The five class names are kept identical to the
-frozen DPL ``hand_bucket`` enum so the two cannot drift.
+The band definition is **frozen at ``0.1.0``** (Q5, ADR-0015, human-approved
+2026-07-04); changing a threshold now requires a new ADR + version bump. A bucket is
+a strict-CDF / reach-percentile band *within Hero's own range*, not an absolute hand
+category: ``nuts`` is the top reach-percentile band, so for a small or highly
+concentrated range the upper bands can be empty (ADR-0015). The five class names are
+kept identical to the frozen DPL ``hand_bucket`` enum so the two cannot drift.
 """
 
 from __future__ import annotations
@@ -114,7 +116,7 @@ def get_bucket_definition() -> BucketDefinition:
 
 
 def bucket_def_version() -> str:
-    """The packaged bucket definition's version (ends with ``-draft`` for Q5)."""
+    """The packaged bucket definition's frozen version (Q5, ADR-0015)."""
     return get_bucket_definition().bucket_def_version
 
 

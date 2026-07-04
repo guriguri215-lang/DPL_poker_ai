@@ -29,8 +29,9 @@ def test_names_match_frozen_dpl_enum():
     assert get_bucket_definition().buckets[-1].name == "nuts"
 
 
-def test_version_is_draft():
-    assert bucket_def_version().endswith("-draft")
+def test_version_is_frozen():
+    # Q5 frozen at 0.1.0 (ADR-0015): no longer a -draft proposal.
+    assert bucket_def_version() == "0.1.0"
 
 
 @pytest.mark.parametrize(
