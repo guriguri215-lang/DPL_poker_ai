@@ -1,0 +1,37 @@
+# Hand-bucket percentile thresholds -- DRAFT proposal (Q5, ADR-0005; ADR pending).
+#
+# ADR-0005 adds `hand_bucket` (five classes) to the Hero strategy key so that a
+# river policy can depend on hand strength. The class is computed deterministically
+# on the river as the combo's *relative strength percentile within Hero's own
+# range* on the board (ADR-0005). This file declares the percentile bands, ordered
+# weakest -> strongest; each band gives the exclusive upper percentile bound, and
+# the strongest band is open (`max_percentile: null`).
+#
+# The five names are exactly the frozen DPL `hand_bucket` enum
+# (nuts / strong_value / marginal / weak_showdown / air, DPL schema v1) and MUST
+# stay in sync with it. The thresholds below are an initial engineering proposal
+# (Q5, owner opus4.8 -> human confirmation) and MUST be reviewed and frozen via an
+# ADR before this version drops "-draft".
+#
+# `percentile(combo)` is the range-reach-weighted fraction of the range that is
+# *strictly weaker* than `combo` on the board, so it lies in [0, 1): the nut combo
+# approaches 1.0 and the weakest combo is 0.0.
+
+bucket_def_version: "0.1.0-draft"
+description: >
+  Draft hand-bucket percentile bands for the River MVP. Boundaries are
+  provisional (Q5) and pending an ADR before any persisted table is keyed on them.
+
+# Ordered weakest -> strongest. `max_percentile` is the exclusive upper bound of
+# the band; the last (strongest) band must be open (null).
+buckets:
+  - name: air
+    max_percentile: 0.20
+  - name: weak_showdown
+    max_percentile: 0.45
+  - name: marginal
+    max_percentile: 0.70
+  - name: strong_value
+    max_percentile: 0.90
+  - name: nuts
+    max_percentile: null

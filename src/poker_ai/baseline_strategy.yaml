@@ -1,0 +1,27 @@
+# Stub base strategy -- PLACEHOLDER, not a solved equilibrium (task 3, ADR-0007).
+#
+# Task 3 is a vertical slice: it wires scenario -> lookup -> mixer -> DPL together
+# before the CFR solver exists (Phase 3). This base strategy is therefore a
+# hand-authored placeholder, keyed by facing state and then by `hand_bucket`
+# (ADR-0005). It is intentionally state_cluster / position-agnostic for now -- those
+# components are still recorded in the situation key and will be refined once the
+# solver produces per-combo equilibria (Phase 3). The `-stub` version suffix marks
+# that these frequencies are NOT game-theoretic; no downstream analysis may treat
+# them as a baseline equilibrium.
+#
+# Each profile is a policy over the legal facing-all-in actions (FOLD / CALL): the
+# stronger the bucket, the more it calls. Policies are proper distributions
+# (probabilities sum to 1) and only cite legal actions.
+
+baseline_table_version: "0.0.1-stub"
+description: >
+  Placeholder facing-all-in base policies per hand_bucket for the task-3 vertical
+  slice. Not an equilibrium; pending the CFR solver (Phase 3).
+
+profiles:
+  facing_all_in:
+    nuts: { CALL: 1.0 }
+    strong_value: { CALL: 0.9, FOLD: 0.1 }
+    marginal: { CALL: 0.5, FOLD: 0.5 }
+    weak_showdown: { CALL: 0.2, FOLD: 0.8 }
+    air: { FOLD: 1.0 }

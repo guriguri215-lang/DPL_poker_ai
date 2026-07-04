@@ -32,6 +32,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 poker_core = ["*.yaml"]
+poker_ai = ["*.yaml"]
 
 [tool.ruff]
 line-length = 100
