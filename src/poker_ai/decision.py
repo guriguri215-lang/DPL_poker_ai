@@ -121,7 +121,9 @@ class HeroAgent:
         legal = legal_actions(facing_bet=obs.facing_bet > 0.0, bet_is_all_in=True)
 
         state_cluster = classify_board(obs.board)
-        hand_bucket = classify_combo(obs.hero_combo, obs.hero_range, obs.board)
+        hand_bucket = classify_combo(
+            obs.hero_combo, obs.hero_range, obs.board, bucket_def=self.bucket_def
+        )
         situation_key = build_situation_key(state_cluster, obs.position, FACING_ALL_IN)
 
         base_policy = self.baseline.policy_for(FACING_ALL_IN, hand_bucket)

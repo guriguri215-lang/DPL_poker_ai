@@ -72,6 +72,21 @@ class Scenario(BaseModel):
             legal = rng.drop_zero_weight().without_blockers(board)
             if len(legal) == 0:
                 raise ValueError(f"{name} has no board-legal, positive-weight combo")
+
+        # Every showdown pits Hero's *exact* combo against the opponent range, so the
+        # opponent range must keep a combo once both the board and Hero's cards are
+        # removed as blockers. Otherwise the scenario passes schema validation but
+        # DPL generation fails later when showdown_equity() finds no legal matchup.
+        opponent_playable = (
+            opponent_range.drop_zero_weight()
+            .without_blockers(board)
+            .without_conflicts(hero_combo.cards)
+        )
+        if len(opponent_playable) == 0:
+            raise ValueError(
+                f"opponent_range has no combo compatible with hero_combo "
+                f"{self.hero_combo} and the board (every showdown matchup is blocked)"
+            )
         return self
 
     def board_cards(self) -> tuple[Card, ...]:

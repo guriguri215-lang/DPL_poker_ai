@@ -160,10 +160,18 @@ def classify_combo(
     combo: Combo,
     hero_range: Range,
     board: tuple[Card, ...] | list[Card],
+    *,
+    bucket_def: BucketDefinition | None = None,
 ) -> HandBucket:
-    """Return the ``hand_bucket`` class of ``combo`` within ``hero_range``."""
+    """Return the ``hand_bucket`` class of ``combo`` within ``hero_range``.
+
+    ``bucket_def`` selects the percentile bands; it defaults to the packaged
+    definition. Pass an explicit definition to classify against alternative
+    thresholds (e.g. a proposed Q5 revision) without mutating global state.
+    """
     percentile = strength_percentile(combo, hero_range, board)
     # Guard against a percentile of exactly 1.0 from floating error (impossible by
     # definition, but classify() requires [0, 1)).
     percentile = min(percentile, math.nextafter(1.0, 0.0))
-    return get_bucket_definition().classify(percentile)
+    definition = bucket_def if bucket_def is not None else get_bucket_definition()
+    return definition.classify(percentile)

@@ -134,7 +134,7 @@ def build_strategy_table(
 
     entries: list[StrategyEntry] = []
     for combo, weight in legal:
-        bucket = classify_combo(combo, hero_range, board)
+        bucket = classify_combo(combo, hero_range, board, bucket_def=bucket_def)
         policy = baseline.policy_for(facing_state, bucket)
         entries.append(
             StrategyEntry(

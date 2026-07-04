@@ -84,3 +84,13 @@ def test_scenario_rejects_negative_stack():
     kwargs["effective_stack"] = -1.0
     with pytest.raises(ValueError):
         Scenario(**kwargs)
+
+
+def test_scenario_rejects_opponent_range_fully_colliding_with_hero():
+    # Board-legal but every opponent combo shares a card with Hero's exact combo:
+    # schema validation used to pass, yet DPL generation would fail because no
+    # showdown matchup survives hero-card removal. The scenario must be rejected.
+    kwargs = _valid_kwargs()
+    kwargs["opponent_range"] = {kwargs["hero_combo"]: 1.0}
+    with pytest.raises(ValueError, match="hero_combo"):
+        Scenario(**kwargs)
