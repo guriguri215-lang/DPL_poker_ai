@@ -1,8 +1,8 @@
-"""Tests for the draft state-cluster classifier (REV-20260702 H-9, Q4).
+"""Tests for the frozen MVP state-cluster classifier (REV-20260702 H-9, Q4).
 
-The taxonomy is a draft, but two structural guarantees are not: every board maps
-to exactly one cluster (total coverage via the trailing fallback, exclusivity via
-first-match), and each of the six clusters is reachable.
+The taxonomy is frozen for the MVP at v0.1.0. Every board maps to exactly one
+cluster (total coverage via the trailing fallback, exclusivity via first-match),
+and each of the six clusters is reachable.
 """
 
 from __future__ import annotations
@@ -34,9 +34,9 @@ _EXAMPLES = [
 ]
 
 
-def test_version_is_draft():
-    # Draft taxonomy must not masquerade as frozen (Q4, ADR pending).
-    assert cluster_def_version().endswith("-draft")
+def test_version_is_frozen():
+    # Q4 frozen at 0.1.0 (ADR-0016): no longer a -draft proposal.
+    assert cluster_def_version() == "0.1.0"
 
 
 @pytest.mark.parametrize("board,expected", _EXAMPLES)

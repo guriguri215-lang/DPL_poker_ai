@@ -3,8 +3,8 @@
 Phase 0 freezes the project's contracts here (ADR-0006): the Decision
 Provenance Log schema, the Reason Ontology, the StrategyTable, and the
 RunManifest. Phase 1 (task 2) adds the shared card model, hand evaluation,
-weighted ranges, the range-vs-range showdown EV evaluator, and a draft
-state-cluster classifier (taxonomy pending ADR, Q4).
+weighted ranges, the range-vs-range showdown EV evaluator, and the frozen MVP
+state-cluster classifier (Q4, ADR-0016).
 """
 
 from __future__ import annotations

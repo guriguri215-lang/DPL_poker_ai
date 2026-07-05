@@ -23,6 +23,6 @@ Shared contracts and primitives for the whole project, so that `poker_ai` and
 - `showdown_ev.py` — exact range-vs-range showdown equity and Hero EV with
   blocker removal (Solver spec Phase S0), plus a seeded Monte Carlo estimator.
 - `state_cluster.py` + `state_cluster.yaml` — the single board-texture
-  classifier driven by a declarative, versioned rule set (H-9). The taxonomy is
-  a **draft** (`cluster_def_version` ends with `-draft`, Q4) and must be frozen
-  via an ADR before any persisted table is keyed on it.
+  classifier driven by a declarative, versioned rule set (H-9). The MVP taxonomy
+  is frozen at `cluster_def_version = 0.1.0` (Q4, ADR-0016); future refinements
+  require a new ADR and version bump.

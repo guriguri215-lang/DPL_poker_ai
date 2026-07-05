@@ -42,9 +42,9 @@ Scenario → stub opponent public action → observation tracking → lookup str
 
 Run it: `python cli/run_session.py --seed 20260704 --hands 200`.
 
-## Frozen at 0.1.0 (Q3 / Q5)
+## Frozen at 0.1.0 (Q3 / Q4 / Q5)
 
-`scenario.py` (Q3, ADR-0014) and `hand_bucket.yaml` (Q5, ADR-0015) are frozen at
-`0.1.0` (human-approved 2026-07-04). They are not among the Phase-0 frozen contracts
-(ADR-0006), but changing their fields, invariants or thresholds now requires a new ADR
-and a version bump. The Q4 `state_cluster` definition remains `0.1.0-draft`.
+`scenario.py` (Q3, ADR-0014), `state_cluster.yaml` (Q4, ADR-0016), and
+`hand_bucket.yaml` (Q5, ADR-0015) are frozen at `0.1.0`. They are not among the
+Phase-0 frozen contracts (ADR-0006), but changing their fields, invariants,
+precedence, or thresholds now requires a new ADR and a version bump.

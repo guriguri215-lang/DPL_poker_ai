@@ -109,7 +109,7 @@ def test_versions_are_stamped_on_every_log():
     default_detector = LeakDetector()
     for log in iter_session_logs(20260704, HANDS):
         assert log.cluster_def_version == cluster_def_version()
-        assert log.cluster_def_version.endswith("-draft")
+        assert log.cluster_def_version == "0.1.0"
         assert log.baseline_table_version == default_detector.baseline_table_version
         assert log.baseline_table_version.endswith("-stub")
 
