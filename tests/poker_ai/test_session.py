@@ -6,6 +6,7 @@ import json
 import math
 
 from poker_ai.baseline_strategy import baseline_table_version
+from poker_ai.exploit import RuleExploitResult
 from poker_ai.leak import (
     BET_ACTIONS,
     ActionBaselineTable,
@@ -75,6 +76,29 @@ def test_positive_leak_fixture_is_written_to_dpl_closed_world():
         DecisionProvenanceLog.model_validate(log.model_dump(mode="json"))
 
 
+def test_positive_alpha_writes_rule_exploit_reasons_closed_world():
+    result = run_session(
+        20260704,
+        1,
+        leak_detector=_positive_fixture_detector(),
+        safety_alpha=1.0,
+        exploit_provider=_StaticExploitProvider(),
+    )
+    log = result.logs[0]
+
+    assert log.detected_leaks
+    assert log.safety_alpha == 1.0
+    assert log.exploit_policy == {"CALL": 1.0}
+    assert log.final_policy["CALL"] == 1.0
+    assert all(prob == 0.0 for action, prob in log.final_policy.items() if action != "CALL")
+    assert log.trigger_reasons == ["TRG_R001", "TRG_R002"]
+    assert log.mix_reasons == ["MIX_R001"]
+    assert log.allowed_reason_ids == ["LEAK_R008", "TRG_R001", "TRG_R002", "MIX_R001"]
+    assert log.ev_estimate.final_ev == log.ev_estimate.exploit_ev
+    assert "safety_alpha=1.0" in result.manifest.description
+    DecisionProvenanceLog.model_validate(log.model_dump(mode="json"))
+
+
 def test_custom_leak_baseline_version_is_stamped_on_manifest_and_logs():
     leak_detector = _positive_fixture_detector()
     result = run_session(20260704, 1, leak_detector=leak_detector)
@@ -103,6 +127,15 @@ def _positive_fixture_detector() -> LeakDetector:
             min_confidence=0.5,
         ),
     )
+
+
+class _StaticExploitProvider:
+    def build(self, **_kwargs) -> RuleExploitResult:
+        return RuleExploitResult(
+            policy={"CALL": 1.0},
+            applied_leak_reason_ids=("LEAK_R008",),
+            trigger_reasons=("TRG_R001", "TRG_R002"),
+        )
 
 
 def test_versions_are_stamped_on_every_log():

@@ -1,12 +1,12 @@
-"""poker_ai: observation, lookup strategy, leak detection, mixer and sessions.
+"""poker_ai: observation, lookup strategy, leak detection, exploitation and sessions.
 
 Phase 2 implements the river MVP (ADR-0007): a river scenario is generated
 deterministically, the stub opponent acts, public action observations feed an
 action-only LeakDetector, Hero looks up its base policy by situation and
-``hand_bucket`` (ADR-0005), the SafetyMixer runs at ``alpha = 0`` (no exploitation),
+``hand_bucket`` (ADR-0005), optional rule exploitation feeds the SafetyMixer,
 an action is sampled, and the decision is assembled into a frozen Decision
 Provenance Log with an exact ``solver_exact`` EV (ADR-0008). Node-lock exploitation
-(``alpha > 0``), CFR and the LLM layer are later phases.
+is a later phase.
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ from .decision import (
     call_fold_action_evs,
     policy_ev,
 )
+from .exploit import RuleExploitConfig, RuleExploitProvider, RuleExploitResult
 from .hand_bucket import (
     BUCKET_NAMES_WEAK_TO_STRONG,
     BucketDefinition,
@@ -83,6 +84,9 @@ __all__ = [
     "Observation",
     "ObservationTracker",
     "OpponentAction",
+    "RuleExploitConfig",
+    "RuleExploitProvider",
+    "RuleExploitResult",
     "Scenario",
     "SessionResult",
     "StubOpponent",

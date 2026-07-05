@@ -6,10 +6,11 @@ into a frozen :class:`~poker_core.dpl_schema.DecisionProvenanceLog`. Phase 2 now
 records action-only public observations and runs a minimal leak detector. The default
 stub baseline matches the stub opponent, so the normal CLI run remains leak-free, but
 positive fixtures can inject a stricter baseline and produce DPL ``DetectedLeak``
-records without reading hidden strategy. The Hero still runs at ``safety_alpha = 0``:
-``exploit_policy == base_policy`` and every EV is exact ``solver_exact``. A
-:class:`~poker_core.run_manifest.RunManifest` pins the versions, seed and config
-hashes so the run is reproducible (M-7).
+records without reading hidden strategy. The Hero can run the rule-based exploit
+provider behind the DPL safety mixer; the default session keeps ``safety_alpha = 0``
+for baseline compatibility, while positive-alpha fixtures exercise the boundary.
+Every EV is exact ``solver_exact``. A :class:`~poker_core.run_manifest.RunManifest`
+pins the versions, seed and config hashes so the run is reproducible (M-7).
 
 The DPLs are written as JSONL (one decision per line); the manifest is written as a
 sidecar JSON. Both live under a gitignored output directory.
@@ -35,14 +36,17 @@ from poker_core.run_manifest import (
     OpponentRef,
     RunManifest,
 )
-from poker_core.state_cluster import CLUSTER_DEF_PATH, cluster_def_version
+from poker_core.state_cluster import CLUSTER_DEF_PATH, classify_board, cluster_def_version
 
 from .baseline_strategy import (
     BASELINE_PATH,
+    FACING_ALL_IN,
     baseline_table_version,
+    build_situation_key,
     get_baseline_strategy,
 )
-from .decision import NO_EXPLOIT_SOURCE, HeroAgent, Observation
+from .decision import HeroAgent, Observation
+from .exploit import RuleExploitProvider
 from .hand_bucket import BUCKET_DEF_PATH, bucket_def_version, get_bucket_definition
 from .leak import LeakDetector
 from .observation import ObservationTracker
@@ -77,6 +81,8 @@ def _build_dpl(
     *,
     tracker: ObservationTracker,
     leak_detector: LeakDetector,
+    safety_alpha: float,
+    exploit_provider: RuleExploitProvider | None,
 ) -> DecisionProvenanceLog:
     """Run one decision and assemble its validated DPL."""
     opponent = StubOpponent(
@@ -100,17 +106,40 @@ def _build_dpl(
         hero_range=scenario.hero_range_obj(),
         opponent_assumed_range=Range(scenario.opponent_range),
     )
-    agent = HeroAgent(get_baseline_strategy(), get_bucket_definition())
-    result = agent.decide(observation)
+    situation_key = build_situation_key(
+        classify_board(observation.board),
+        observation.position,
+        FACING_ALL_IN,
+    )
     tracker.record_opponent_action(
-        situation_key=result.situation_key,
+        situation_key=situation_key,
         action=opponent_action.action,
     )
     detected_leaks = leak_detector.detect_for_situation(
         tracker.snapshot(),
-        result.situation_key,
+        situation_key,
     )
-    allowed_reason_ids = list(dict.fromkeys(leak.reason_id for leak in detected_leaks))
+    agent = HeroAgent(
+        get_baseline_strategy(),
+        get_bucket_definition(),
+        safety_alpha=safety_alpha,
+        exploit_provider=exploit_provider,
+    )
+    result = agent.decide(observation, detected_leaks=detected_leaks)
+    leak_reason_ids = (
+        result.applied_leak_reason_ids
+        if result.mix_reasons
+        else [leak.reason_id for leak in detected_leaks]
+    )
+    allowed_reason_ids = list(
+        dict.fromkeys(
+            [
+                *leak_reason_ids,
+                *result.trigger_reasons,
+                *result.mix_reasons,
+            ]
+        )
+    )
 
     ev = EvEstimate(
         base_ev=result.base_ev,
@@ -130,12 +159,12 @@ def _build_dpl(
         hero_combo=scenario.hero_combo,
         base_policy=result.base_policy,
         detected_leaks=detected_leaks,
-        trigger_reasons=[],
-        mix_reasons=[],
+        trigger_reasons=result.trigger_reasons,
+        mix_reasons=result.mix_reasons,
         exploit_policy=result.exploit_policy,
-        exploit_source=NO_EXPLOIT_SOURCE,
+        exploit_source=result.exploit_source,
         solver_result_id=None,
-        safety_alpha=0.0,
+        safety_alpha=safety_alpha,
         final_policy=result.final_policy,
         selected_action=result.selected_action,
         sampling_seed=result.sampling_seed,
@@ -150,6 +179,8 @@ def iter_session_logs(
     num_hands: int,
     *,
     leak_detector: LeakDetector | None = None,
+    safety_alpha: float = 0.0,
+    exploit_provider: RuleExploitProvider | None = None,
 ) -> Iterator[DecisionProvenanceLog]:
     """Yield one validated DPL per generated hand (deterministic for a seed)."""
     session_id = _session_id_for(seed)
@@ -163,6 +194,8 @@ def iter_session_logs(
             session_id,
             tracker=tracker,
             leak_detector=detector,
+            safety_alpha=safety_alpha,
+            exploit_provider=exploit_provider,
         )
 
 
@@ -178,6 +211,7 @@ def build_manifest(
     git_commit: str = "unknown",
     output_paths: list[str] | None = None,
     leak_detector: LeakDetector | None = None,
+    safety_alpha: float = 0.0,
 ) -> RunManifest:
     """Build the RunManifest pinning versions, the seed and config hashes (M-7)."""
     detector = leak_detector or LeakDetector()
@@ -203,7 +237,8 @@ def build_manifest(
         run_id=_session_id_for(seed),
         description=(
             f"task-3 vertical slice; scenario_schema={SCENARIO_SCHEMA_VERSION}, "
-            f"hand_bucket_def={bucket_def_version()}, hands={num_hands}"
+            f"hand_bucket_def={bucket_def_version()}, hands={num_hands}, "
+            f"safety_alpha={safety_alpha}"
         ),
         code=code,
         versions=versions,
@@ -225,11 +260,27 @@ def run_session(
     *,
     git_commit: str = "unknown",
     leak_detector: LeakDetector | None = None,
+    safety_alpha: float = 0.0,
+    exploit_provider: RuleExploitProvider | None = None,
 ) -> SessionResult:
     """Run a full session in memory: validated DPLs plus the manifest."""
     detector = leak_detector or LeakDetector()
-    logs = list(iter_session_logs(seed, num_hands, leak_detector=detector))
-    manifest = build_manifest(seed, num_hands, git_commit=git_commit, leak_detector=detector)
+    logs = list(
+        iter_session_logs(
+            seed,
+            num_hands,
+            leak_detector=detector,
+            safety_alpha=safety_alpha,
+            exploit_provider=exploit_provider,
+        )
+    )
+    manifest = build_manifest(
+        seed,
+        num_hands,
+        git_commit=git_commit,
+        leak_detector=detector,
+        safety_alpha=safety_alpha,
+    )
     return SessionResult(_session_id_for(seed), logs, manifest)
 
 

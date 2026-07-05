@@ -7,9 +7,9 @@ SafetyMixer, ActionSelector and the session runner. Phase 2 implements the river
 ## Task 3 vertical slice
 
 Scenario → stub opponent public action → observation tracking → lookup strategy
-(with `hand_bucket`) → minimal action-only LeakDetector → SafetyMixer (`alpha = 0`)
-→ Decision Provenance Log (JSONL) → schema validation. Node-lock exploitation
-(`alpha > 0`), CFR, showdown-required leaks and the LLM layer are later phases.
+(with `hand_bucket`) → minimal action-only LeakDetector → rule exploit provider →
+SafetyMixer → Decision Provenance Log (JSONL) → schema validation. Node-lock
+exploitation, CFR, showdown-required leaks and the LLM layer are later phases.
 
 - `actions.py` — the river action vocabulary; task 3 realises only facing an all-in
   (`FOLD` / `CALL`), whose terminals are showdown-determined so every EV is exact.
@@ -32,6 +32,9 @@ Scenario → stub opponent public action → observation tracking → lookup str
 - `leak.py` — MVP action-rate LeakDetector for `LEAK_R007` / `LEAK_R008`, producing
   frozen DPL `DetectedLeak` records from public observations only. The default stub
   baseline matches the stub opponent, so the normal CLI run has no detected leaks.
+- `exploit.py` — rule-based exploit provider. The MVP reacts to actionable
+  `LEAK_R008` records by shifting fold mass into calls only when exact per-action EV
+  improves over the base policy.
 - `mixer.py` — the SafetyMixer (`final = (1-alpha)*base + alpha*exploit`, the DPL
   mixing contract) and the seeded ActionSelector.
 - `decision.py` — Hero's decision on the public `Observation`, with the exact
@@ -41,6 +44,7 @@ Scenario → stub opponent public action → observation tracking → lookup str
   directory.
 
 Run it: `python cli/run_session.py --seed 20260704 --hands 200`.
+To exercise a positive safety mix: `python cli/run_session.py --safety-alpha 0.5`.
 
 ## Frozen at 0.1.0 (Q3 / Q4 / Q5)
 

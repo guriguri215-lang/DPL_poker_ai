@@ -6,8 +6,9 @@ Usage::
 
 Generates ``--hands`` river decisions deterministically from ``--seed``, validates
 each against the frozen DPL schema, includes action-only public leak detection,
-writes them as JSONL, and writes a RunManifest sidecar. Output goes under a
-gitignored directory (``experiments_output/`` by default). Requires
+optional rule-based exploitation behind the SafetyMixer, writes them as JSONL, and
+writes a RunManifest sidecar. Output goes under a gitignored directory
+(``experiments_output/`` by default). Requires
 ``pip install -e .``.
 """
 
@@ -42,6 +43,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--hands", type=int, default=200, help="number of hands (default: 200)")
     parser.add_argument(
+        "--safety-alpha",
+        type=float,
+        default=0.0,
+        help="SafetyMixer alpha in [0, 1] (default: 0.0)",
+    )
+    parser.add_argument(
         "--out-dir",
         type=Path,
         default=Path("experiments_output/task3_vertical_slice"),
@@ -49,7 +56,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    result = run_session(args.seed, args.hands, git_commit=_current_git_commit())
+    result = run_session(
+        args.seed,
+        args.hands,
+        git_commit=_current_git_commit(),
+        safety_alpha=args.safety_alpha,
+    )
     jsonl_path = write_jsonl(result.logs, args.out_dir / f"{result.session_id}.dpl.jsonl")
     manifest_path = write_manifest(
         result.manifest, args.out_dir / f"{result.session_id}.manifest.json"

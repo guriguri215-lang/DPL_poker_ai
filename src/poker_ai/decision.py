@@ -1,4 +1,4 @@
-"""Hero decision: lookup base policy -> safety mix (alpha=0) -> select + exact EV.
+"""Hero decision: lookup base policy -> rule exploit -> safety mix -> exact EV.
 
 Hero receives an :class:`Observation` -- only *public* information (board, pot,
 facing bet, position, its own combo and range, and the opponent's *assumed range*).
@@ -28,13 +28,14 @@ from dataclasses import dataclass
 
 from poker_core.card import Card
 from poker_core.combo import Combo
-from poker_core.dpl_schema import HandBucket
+from poker_core.dpl_schema import MIXING_ABS_TOL, DetectedLeak, HandBucket
 from poker_core.range_model import Range
 from poker_core.showdown_ev import DEFAULT_EV_UNIT, ShowdownEquity, showdown_equity
 from poker_core.state_cluster import classify_board, cluster_def_version
 
 from .actions import legal_actions
 from .baseline_strategy import FACING_ALL_IN, BaselineStrategy, build_situation_key
+from .exploit import RuleExploitProvider
 from .hand_bucket import BucketDefinition, classify_combo
 from .mixer import ActionSelector, safety_mix
 
@@ -79,6 +80,10 @@ class DecisionResult:
     final_ev: float
     ev_unit: str
     ev_definition: str
+    applied_leak_reason_ids: list[str]
+    trigger_reasons: list[str]
+    mix_reasons: list[str]
+    exploit_source: str
 
 
 def call_fold_action_evs(
@@ -98,7 +103,7 @@ def policy_ev(policy: dict[str, float], action_ev: dict[str, float]) -> float:
 
 
 class HeroAgent:
-    """Looks up the base policy, mixes at alpha=0, samples, and scores EV exactly."""
+    """Looks up the base policy, applies rule exploitation, samples and scores EV."""
 
     def __init__(
         self,
@@ -106,16 +111,21 @@ class HeroAgent:
         bucket_def: BucketDefinition,
         *,
         safety_alpha: float = 0.0,
+        exploit_provider: RuleExploitProvider | None = None,
     ) -> None:
-        if safety_alpha != 0.0:
-            # Task 3 is baseline-only: leak detection / exploitation (alpha > 0) is
-            # out of scope. The mixer supports alpha > 0, but the agent must not.
-            raise ValueError("HeroAgent runs at safety_alpha=0 in task 3 (no exploitation)")
+        if not math.isfinite(safety_alpha) or not 0.0 <= safety_alpha <= 1.0:
+            raise ValueError(f"safety_alpha must be finite and in [0, 1], got {safety_alpha}")
         self.baseline = baseline
         self.bucket_def = bucket_def
         self.safety_alpha = safety_alpha
+        self.exploit_provider = exploit_provider or RuleExploitProvider()
 
-    def decide(self, obs: Observation) -> DecisionResult:
+    def decide(
+        self,
+        obs: Observation,
+        *,
+        detected_leaks: tuple[DetectedLeak, ...] | list[DetectedLeak] = (),
+    ) -> DecisionResult:
         """Produce the base/exploit/final policies, selected action and exact EVs."""
         # Legal set for facing an all-in bet: {FOLD, CALL} (validates the branch).
         legal = legal_actions(facing_bet=obs.facing_bet > 0.0, bet_is_all_in=True)
@@ -129,12 +139,6 @@ class HeroAgent:
         base_policy = self.baseline.policy_for(FACING_ALL_IN, hand_bucket)
         if set(base_policy) - set(legal):
             raise ValueError(f"base policy cites actions outside the legal set {legal}")
-        # No exploitation in task 3: exploit == base, so final == base at alpha=0.
-        exploit_policy = dict(base_policy)
-        final_policy = safety_mix(base_policy, exploit_policy, self.safety_alpha)
-
-        sampling_seed = _sampling_seed_for(obs.session_id, obs.hand_id)
-        selected_action = ActionSelector(sampling_seed).select(final_policy)
 
         equity = showdown_equity(
             Range({obs.hero_combo.canonical(): 1.0}),
@@ -142,6 +146,24 @@ class HeroAgent:
             obs.board,
         )
         action_ev = call_fold_action_evs(equity, obs.pot, obs.facing_bet)
+
+        exploit = self.exploit_provider.build(
+            base_policy=base_policy,
+            detected_leaks=detected_leaks if self.safety_alpha > 0.0 else (),
+            legal_actions=legal,
+            action_ev=action_ev,
+        )
+        exploit_policy = exploit.policy
+        final_policy = safety_mix(base_policy, exploit_policy, self.safety_alpha)
+        mix_reasons = (
+            ["MIX_R001"]
+            if self.safety_alpha > 0.0 and not _policies_equal(base_policy, final_policy)
+            else []
+        )
+        trigger_reasons = list(exploit.trigger_reasons) if mix_reasons else []
+
+        sampling_seed = _sampling_seed_for(obs.session_id, obs.hand_id)
+        selected_action = ActionSelector(sampling_seed).select(final_policy)
 
         return DecisionResult(
             state_cluster=state_cluster,
@@ -158,6 +180,10 @@ class HeroAgent:
             final_ev=policy_ev(final_policy, action_ev),
             ev_unit=DEFAULT_EV_UNIT,
             ev_definition=EV_DEFINITION,
+            applied_leak_reason_ids=list(exploit.applied_leak_reason_ids) if mix_reasons else [],
+            trigger_reasons=trigger_reasons,
+            mix_reasons=mix_reasons,
+            exploit_source=NO_EXPLOIT_SOURCE,
         )
 
 
@@ -169,3 +195,11 @@ def _sampling_seed_for(session_id: str, hand_id: str) -> int:
     """
     digest = hashlib.sha256(f"{session_id}:{hand_id}".encode()).digest()
     return int.from_bytes(digest[:8], "big")
+
+
+def _policies_equal(first: dict[str, float], second: dict[str, float]) -> bool:
+    actions = set(first) | set(second)
+    return all(
+        abs(first.get(action, 0.0) - second.get(action, 0.0)) <= MIXING_ABS_TOL
+        for action in actions
+    )
