@@ -9,9 +9,9 @@ board features and returns the first cluster whose ``when`` constraints hold; th
 rule set ends with an empty-``when`` fallback so every board maps to exactly one
 cluster.
 
-The taxonomy is a **draft** (``cluster_def_version`` ends with ``-draft``, Q4).
-Its precedence and thresholds are provisional and must be frozen via an ADR
-before any persisted table is keyed on it.
+The MVP taxonomy is frozen at ``cluster_def_version == "0.1.0"`` by ADR-0016.
+Future, more granular board-texture taxonomies require a new ADR and a version
+bump so persisted tables remain auditable.
 """
 
 from __future__ import annotations
@@ -161,5 +161,5 @@ def classify_board(board: tuple[Card, ...] | list[Card]) -> str:
 
 
 def cluster_def_version() -> str:
-    """The packaged cluster definition's version (ends with ``-draft`` for Q4)."""
+    """The packaged cluster definition's version."""
     return get_cluster_definition().cluster_def_version

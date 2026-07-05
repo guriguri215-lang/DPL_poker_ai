@@ -1,4 +1,4 @@
-# River board-texture clusters -- DRAFT taxonomy (Q4, ADR pending).
+# River board-texture clusters -- frozen MVP taxonomy (Q4, ADR-0016).
 #
 # `state_cluster` is the single board-texture key shared by base-strategy
 # lookup, leak detection and node-lock matching (REV-20260702 H-9). To keep the
@@ -9,10 +9,9 @@
 # first-match ordering makes the mapping exclusive.
 #
 # The six cluster names come from Poker AI Specification 6.1. The spec lists the
-# names as examples and allows manual assignment; the concrete precedence and
-# thresholds below are a provisional engineering draft (Q4, owner human+opus4.8)
-# and MUST be reviewed and frozen via an ADR before this version drops "-draft"
-# and any downstream table is keyed on it.
+# names as examples and allows manual assignment; ADR-0016 freezes the concrete
+# precedence and thresholds below as the reproducible MVP taxonomy. Future,
+# more granular taxonomies require a new ADR and a version bump.
 #
 # Feature vocabulary the classifier provides (see state_cluster.py):
 #   max_suit_count    int  largest number of board cards sharing one suit
@@ -26,11 +25,11 @@
 #   min_suit_count, min_window_ranks, min_top_rank, max_top_rank (integer bounds)
 #   is_paired                                                    (boolean equality)
 
-cluster_def_version: "0.1.0-draft"
+cluster_def_version: "0.1.0"
 description: >
-  Draft River board-texture clusters. Precedence: flush texture, then straight
-  board, then paired, then unpaired high-and-connected, then low, with a dry
-  high-card fallback. Thresholds are provisional (Q4) and pending an ADR.
+  Frozen MVP River board-texture clusters. Precedence: flush texture, then
+  straight board, then paired, then unpaired high-and-connected, then low, with
+  a dry high-card fallback. Future refinements require a new ADR and version bump.
 
 clusters:
   - name: river_flush_complete
