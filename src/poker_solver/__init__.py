@@ -1,12 +1,12 @@
 """poker_solver: the game-theoretic solver and its independent verifier.
 
-Phase 3 builds this package as: P3-1 (this milestone) the *verification layer* --
+Phase 3 builds this package as: P3-1 the *verification layer* --
 an extensive-form game tree, an exact strategy-profile EV evaluator, and a
 best-response / exploitability module that is deliberately independent of any CFR
-code (ADR-0017 sec.4). The CFR core (P3-2), CFR+ (P3-3) and BaselineTable generation
-(P3-4) build on top of these measuring instruments.
+code (ADR-0017 sec.4). P3-2 adds full-tree vanilla CFR on top of those measuring
+instruments. CFR+ (P3-3) and BaselineTable generation (P3-4) follow.
 
-Public API (P3-1)::
+Public API (P3-2)::
 
     from poker_solver import (
         Game, Terminal, Chance, Decision,          # game tree
@@ -14,6 +14,7 @@ Public API (P3-1)::
         expected_value, expected_value_by_leaves,  # exact EV
         leaf_reaches, total_reach,                 # reach decomposition
         best_response_value, best_response_strategy, nash_conv, exploitability,
+        VanillaCFR, regret_matching, solve_vanilla_cfr,
     )
 """
 
@@ -25,6 +26,7 @@ from .best_response import (
     exploitability,
     nash_conv,
 )
+from .cfr import VanillaCFR, regret_matching, solve_vanilla_cfr
 from .evaluate import expected_value, expected_value_by_leaves, player_values
 from .game import Chance, Decision, Game, Node, Terminal
 from .reach import LeafReach, leaf_reaches, total_reach
@@ -43,6 +45,7 @@ __all__ = [
     "Node",
     "StrategyProfile",
     "Terminal",
+    "VanillaCFR",
     "best_response_strategy",
     "best_response_value",
     "expected_value",
@@ -52,6 +55,8 @@ __all__ = [
     "nash_conv",
     "normalized_action_dist",
     "player_values",
+    "regret_matching",
+    "solve_vanilla_cfr",
     "total_reach",
     "uniform_profile",
     "validate_profile",
