@@ -1,11 +1,12 @@
-"""poker_ai: observation, lookup strategy, mixer, selector and the session runner.
+"""poker_ai: observation, lookup strategy, leak detection, mixer and sessions.
 
-Phase 2 (task 3) implements the vertical slice (ADR-0007): a river scenario is
-generated deterministically, the stub opponent acts, Hero looks up its base policy
-by situation and ``hand_bucket`` (ADR-0005), the SafetyMixer runs at ``alpha = 0``
-(no exploitation), an action is sampled, and the decision is assembled into a frozen
-Decision Provenance Log with an exact ``solver_exact`` EV (ADR-0008). Leak detection,
-exploitation (``alpha > 0``), CFR and the LLM layer are later phases.
+Phase 2 implements the river MVP (ADR-0007): a river scenario is generated
+deterministically, the stub opponent acts, public action observations feed an
+action-only LeakDetector, Hero looks up its base policy by situation and
+``hand_bucket`` (ADR-0005), the SafetyMixer runs at ``alpha = 0`` (no exploitation),
+an action is sampled, and the decision is assembled into a frozen Decision
+Provenance Log with an exact ``solver_exact`` EV (ADR-0008). Node-lock exploitation
+(``alpha > 0``), CFR and the LLM layer are later phases.
 """
 
 from __future__ import annotations
@@ -36,7 +37,15 @@ from .hand_bucket import (
     load_bucket_definition,
     strength_percentile,
 )
+from .leak import (
+    ActionBaselineTable,
+    ActionLeakRule,
+    LeakDetector,
+    LeakDetectorConfig,
+    default_action_baseline_table,
+)
 from .mixer import ActionSelector, is_pure_base, safety_mix
+from .observation import ActionStats, ObservationTracker
 from .opponent import HiddenStrategyAccessError, OpponentAction, StubOpponent
 from .scenario import (
     SCENARIO_SCHEMA_VERSION,
@@ -61,12 +70,18 @@ __all__ = [
     "NO_FACING_ACTIONS",
     "SCENARIO_SCHEMA_VERSION",
     "ActionSelector",
+    "ActionBaselineTable",
+    "ActionLeakRule",
+    "ActionStats",
     "BaselineStrategy",
     "BucketDefinition",
     "DecisionResult",
     "HeroAgent",
     "HiddenStrategyAccessError",
+    "LeakDetector",
+    "LeakDetectorConfig",
     "Observation",
+    "ObservationTracker",
     "OpponentAction",
     "Scenario",
     "SessionResult",
@@ -78,6 +93,7 @@ __all__ = [
     "build_strategy_table",
     "call_fold_action_evs",
     "classify_combo",
+    "default_action_baseline_table",
     "generate_scenario",
     "generate_scenarios",
     "get_baseline_strategy",

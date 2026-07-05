@@ -6,6 +6,13 @@ import json
 import math
 
 from poker_ai.baseline_strategy import baseline_table_version
+from poker_ai.leak import (
+    BET_ACTIONS,
+    ActionBaselineTable,
+    ActionLeakRule,
+    LeakDetector,
+    LeakDetectorConfig,
+)
 from poker_ai.session import (
     EV_SOURCE,
     build_manifest,
@@ -53,11 +60,57 @@ def test_alpha_zero_and_closed_world_reason_fields():
         assert log.selected_action in log.final_policy
 
 
+def test_positive_leak_fixture_is_written_to_dpl_closed_world():
+    leak_detector = _positive_fixture_detector()
+
+    logs = list(iter_session_logs(20260704, 3, leak_detector=leak_detector))
+    assert len(logs) == 3
+    for log in logs:
+        assert log.detected_leaks
+        assert log.allowed_reason_ids == ["LEAK_R008"]
+        assert log.trigger_reasons == []
+        assert log.mix_reasons == []
+        assert log.safety_alpha == 0.0
+        assert log.exploit_policy == log.base_policy
+        DecisionProvenanceLog.model_validate(log.model_dump(mode="json"))
+
+
+def test_custom_leak_baseline_version_is_stamped_on_manifest_and_logs():
+    leak_detector = _positive_fixture_detector()
+    result = run_session(20260704, 1, leak_detector=leak_detector)
+
+    assert result.logs[0].baseline_table_version == "fixture-action-baseline"
+    assert result.manifest.versions.baseline_table_version == "fixture-action-baseline"
+
+
+def _positive_fixture_detector() -> LeakDetector:
+    return LeakDetector(
+        ActionBaselineTable(
+            "fixture-action-baseline",
+            (
+                ActionLeakRule(
+                    reason_id="LEAK_R008",
+                    leak_type="bet_too_often_when_checked_to",
+                    action_group=BET_ACTIONS,
+                    baseline_rate=0.0,
+                    direction="decrease_bet_frequency_when_checked_to",
+                ),
+            ),
+        ),
+        LeakDetectorConfig(
+            min_effective_sample_size=1,
+            min_deviation=0.25,
+            min_confidence=0.5,
+        ),
+    )
+
+
 def test_versions_are_stamped_on_every_log():
+    default_detector = LeakDetector()
     for log in iter_session_logs(20260704, HANDS):
         assert log.cluster_def_version == cluster_def_version()
         assert log.cluster_def_version.endswith("-draft")
-        assert log.baseline_table_version == baseline_table_version()
+        assert log.baseline_table_version == default_detector.baseline_table_version
         assert log.baseline_table_version.endswith("-stub")
 
 
@@ -87,7 +140,8 @@ def test_manifest_is_valid_and_pins_versions_and_configs():
     assert isinstance(manifest, RunManifest)
     assert manifest.seeds["master"] == 20260704
     assert manifest.versions.cluster_def_version == cluster_def_version()
-    assert manifest.versions.baseline_table_version == baseline_table_version()
+    assert manifest.versions.strategy_table_version == baseline_table_version()
+    assert manifest.versions.baseline_table_version == LeakDetector().baseline_table_version
     # Every referenced config carries a content hash (auditable provenance).
     roles = {c.role for c in manifest.configs}
     assert {"cluster_def", "baseline_table", "other"} <= roles

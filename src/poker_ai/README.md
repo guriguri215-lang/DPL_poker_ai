@@ -1,14 +1,15 @@
 # poker_ai
 
-Hero-side pipeline: observation, lookup strategy, SafetyMixer, ActionSelector and
-the session runner. Phase 2 (task 3) implements the **vertical slice** (ADR-0007):
-one river decision, wired end to end, before the CFR solver exists.
+Hero-side pipeline: observation, lookup strategy, action-only leak detection,
+SafetyMixer, ActionSelector and the session runner. Phase 2 implements the river MVP
+(ADR-0007): one river decision, wired end to end, before the CFR solver exists.
 
 ## Task 3 vertical slice
 
-Scenario → single decision → lookup strategy (with `hand_bucket`) → stub opponent →
-SafetyMixer (`alpha = 0`) → Decision Provenance Log (JSONL) → schema validation.
-Leak detection, exploitation (`alpha > 0`), CFR and the LLM layer are later phases.
+Scenario → stub opponent public action → observation tracking → lookup strategy
+(with `hand_bucket`) → minimal action-only LeakDetector → SafetyMixer (`alpha = 0`)
+→ Decision Provenance Log (JSONL) → schema validation. Node-lock exploitation
+(`alpha > 0`), CFR, showdown-required leaks and the LLM layer are later phases.
 
 - `actions.py` — the river action vocabulary; task 3 realises only facing an all-in
   (`FOLD` / `CALL`), whose terminals are showdown-determined so every EV is exact.
@@ -26,12 +27,18 @@ Leak detection, exploitation (`alpha > 0`), CFR and the LLM layer are later phas
 - `opponent.py` — the single fixed `jam_all` stub opponent. Its hidden action
   strategy is behind a tripwire: reading `hidden_strategy` raises (AI Spec 6.3); only
   the public assumed range is available to Hero.
+- `observation.py` — action-only public observation counts by situation key. It
+  accepts public action labels, never opponent objects or hidden policies.
+- `leak.py` — MVP action-rate LeakDetector for `LEAK_R007` / `LEAK_R008`, producing
+  frozen DPL `DetectedLeak` records from public observations only. The default stub
+  baseline matches the stub opponent, so the normal CLI run has no detected leaks.
 - `mixer.py` — the SafetyMixer (`final = (1-alpha)*base + alpha*exploit`, the DPL
   mixing contract) and the seeded ActionSelector.
 - `decision.py` — Hero's decision on the public `Observation`, with the exact
   `incremental_ev_from_current_node` EV (`solver_exact`, ADR-0008).
-- `session.py` — the runner that assembles validated DPLs and a `RunManifest`, and
-  writes JSONL + manifest under a gitignored output directory.
+- `session.py` — the runner that records public opponent actions, assembles validated
+  DPLs and a `RunManifest`, and writes JSONL + manifest under a gitignored output
+  directory.
 
 Run it: `python cli/run_session.py --seed 20260704 --hands 200`.
 
