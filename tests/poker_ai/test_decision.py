@@ -1,4 +1,4 @@
-"""Tests for Hero's decision: exact call/fold EV, alpha=0 mixing, no peeking."""
+"""Tests for Hero's decision: exact call/fold EV, safety mixing, no peeking."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from poker_ai.decision import (
     call_fold_action_evs,
     policy_ev,
 )
+from poker_ai.exploit import RuleExploitResult
 from poker_ai.hand_bucket import get_bucket_definition
 from poker_ai.mixer import is_pure_base
 from poker_ai.opponent import HiddenStrategyAccessError, StubOpponent
@@ -107,9 +108,32 @@ def test_decide_is_reproducible():
     assert _agent().decide(obs) == _agent().decide(obs)
 
 
-def test_agent_rejects_nonzero_alpha():
-    with pytest.raises(ValueError, match="safety_alpha=0"):
-        HeroAgent(get_baseline_strategy(), get_bucket_definition(), safety_alpha=0.5)
+def test_agent_rejects_alpha_outside_unit_interval():
+    with pytest.raises(ValueError, match="safety_alpha"):
+        HeroAgent(get_baseline_strategy(), get_bucket_definition(), safety_alpha=1.5)
+
+
+def test_positive_alpha_mixes_base_with_rule_exploit():
+    import random
+
+    obs = _observation_from_scenario(generate_scenario(random.Random(5), "SC0"))
+    agent = HeroAgent(
+        get_baseline_strategy(),
+        get_bucket_definition(),
+        safety_alpha=0.25,
+        exploit_provider=_StaticExploitProvider(),
+    )
+
+    result = agent.decide(obs)
+
+    assert result.exploit_policy == {"FOLD": 0.2, "CALL": 0.8}
+    for action in set(result.base_policy) | set(result.exploit_policy):
+        expected = 0.75 * result.base_policy.get(action, 0.0) + 0.25 * result.exploit_policy.get(
+            action, 0.0
+        )
+        assert result.final_policy.get(action, 0.0) == pytest.approx(expected)
+    assert result.trigger_reasons == ["TRG_R001", "TRG_R002"]
+    assert result.mix_reasons == ["MIX_R001"]
 
 
 def test_hero_only_sees_public_info_and_cannot_peek():
@@ -131,3 +155,12 @@ def test_hero_only_sees_public_info_and_cannot_peek():
     )
     with pytest.raises(HiddenStrategyAccessError):
         _ = opponent.hidden_strategy
+
+
+class _StaticExploitProvider:
+    def build(self, **_kwargs) -> RuleExploitResult:
+        return RuleExploitResult(
+            policy={"FOLD": 0.2, "CALL": 0.8},
+            applied_leak_reason_ids=("LEAK_R008",),
+            trigger_reasons=("TRG_R001", "TRG_R002"),
+        )

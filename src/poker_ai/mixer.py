@@ -3,10 +3,8 @@
 The SafetyMixer forms the realised policy as the safety mixture
 ``final = (1 - alpha) * base + alpha * exploit`` over the union of actions -- the
 exact formula the frozen DPL validates (``dpl_schema._check_mixing_consistency``).
-Task 3 runs with ``alpha = 0`` and ``exploit = base`` (no exploitation), so
-``final == base``; the function is written for general ``alpha`` only to mirror the
-contract and to make the boundary testable. The **session never mixes at alpha > 0**
-(leak detection / exploitation is out of task-3 scope).
+The default CLI run keeps ``alpha = 0`` for baseline compatibility, while Phase 2
+fixtures may pass ``alpha > 0`` to exercise the rule-based exploit boundary.
 
 The ActionSelector realises one concrete action by sampling the final policy with a
 per-decision seed, so a run is reproducible: the same seed yields the same action.
