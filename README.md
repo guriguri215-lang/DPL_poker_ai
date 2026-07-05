@@ -50,11 +50,6 @@ Early development. Phase 0 (frozen contracts) lives in `src/poker_core`:
 the DPL schema, the Reason Ontology and the RunManifest. Other packages are
 placeholders filled in over later phases.
 
-## Citation
-
-A paper is in preparation ("Verifiable Safe Exploitation"). Citation details
-will be added on release.
-
 ## Responsible use
 
 This is a simulation-only research artefact. Do not use it to gain an unfair

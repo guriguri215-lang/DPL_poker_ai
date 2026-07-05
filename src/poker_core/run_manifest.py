@@ -3,7 +3,7 @@
 A manifest bundles every version, seed and config reference needed to reproduce
 a run exactly (REV-20260702 M-7). Sessions and experiments are expected to be
 launched *through* a manifest so that a run can always be replayed and audited,
-and so the paper's results are traceable to a frozen configuration.
+and so experiment results are traceable to a frozen configuration.
 
 Structural validation is kept separate from *compatibility* checking: a manifest
 records the ontology/version strings it ran under and always parses, so old

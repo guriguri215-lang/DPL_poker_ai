@@ -2,7 +2,7 @@
 
 The DPL is the structured, auditable record of *why* the AI adjusted its policy
 on a single decision. Every downstream artefact (template explanations, the
-future LLM surface layer, the Explanation Verifier and the paper's faithfulness
+future LLM surface layer, the Explanation Verifier and the faithfulness
 metrics) is defined against this schema, which is frozen in Phase 0 and may only
 change with an ADR and a ``schema_version`` bump (ADR-0006).
 
