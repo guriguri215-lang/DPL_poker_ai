@@ -1,4 +1,4 @@
-# Hand-bucket percentile thresholds -- DRAFT proposal (Q5, ADR-0005; ADR pending).
+# Hand-bucket percentile thresholds -- FROZEN 0.1.0 (Q5, ADR-0005 + ADR-0015).
 #
 # ADR-0005 adds `hand_bucket` (five classes) to the Hero strategy key so that a
 # river policy can depend on hand strength. The class is computed deterministically
@@ -9,18 +9,24 @@
 #
 # The five names are exactly the frozen DPL `hand_bucket` enum
 # (nuts / strong_value / marginal / weak_showdown / air, DPL schema v1) and MUST
-# stay in sync with it. The thresholds below are an initial engineering proposal
-# (Q5, owner opus4.8 -> human confirmation) and MUST be reviewed and frozen via an
-# ADR before this version drops "-draft".
+# stay in sync with it. The thresholds below are frozen at 0.1.0 by ADR-0015
+# (human-approved 2026-07-04); changing any bound requires a new ADR + version bump.
 #
-# `percentile(combo)` is the range-reach-weighted fraction of the range that is
-# *strictly weaker* than `combo` on the board, so it lies in [0, 1): the nut combo
-# approaches 1.0 and the weakest combo is 0.0.
+# IMPORTANT semantics (ADR-0015): `percentile(combo)` is the range-reach-weighted
+# fraction of Hero's *own* range that is *strictly weaker* than `combo` on the
+# board, so it lies in [0, 1): the range-relative best combo approaches 1.0 and the
+# worst is 0.0. A bucket name is therefore a **strict-CDF / reach-percentile band**,
+# NOT an absolute hand category: `nuts` means "top reach-percentile band within this
+# range", not "the absolute best possible hand". In a small or highly concentrated
+# range the top bands can be empty (even the range's strongest combo may fall short
+# of the `nuts` band). Any downstream table keyed on these buckets must therefore use
+# scenario ranges with enough granularity (see ADR-0015).
 
-bucket_def_version: "0.1.0-draft"
+bucket_def_version: "0.1.0"
 description: >
-  Draft hand-bucket percentile bands for the River MVP. Boundaries are
-  provisional (Q5) and pending an ADR before any persisted table is keyed on them.
+  Frozen hand-bucket reach-percentile bands (Q5, ADR-0015). Bands are strict-CDF
+  reach-weighted percentile intervals within Hero's own range, not absolute hand
+  categories; upper bands may be empty for small/concentrated ranges.
 
 # Ordered weakest -> strongest. `max_percentile` is the exclusive upper bound of
 # the band; the last (strongest) band must be open (null).

@@ -18,8 +18,9 @@ def _dump(scenarios):
     return [s.model_dump() for s in scenarios]
 
 
-def test_schema_version_is_draft():
-    assert SCENARIO_SCHEMA_VERSION.endswith("-draft")
+def test_schema_version_is_frozen():
+    # Q3 frozen at 0.1.0 (ADR-0014): no longer a -draft proposal.
+    assert SCENARIO_SCHEMA_VERSION == "0.1.0"
 
 
 def test_generation_is_deterministic_for_a_seed():

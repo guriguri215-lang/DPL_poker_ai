@@ -12,11 +12,14 @@ Leak detection, exploitation (`alpha > 0`), CFR and the LLM layer are later phas
 
 - `actions.py` — the river action vocabulary; task 3 realises only facing an all-in
   (`FOLD` / `CALL`), whose terminals are showdown-determined so every EV is exact.
-- `scenario.py` + no config file — the **Q3 proposal** scenario schema
-  (`SCENARIO_SCHEMA_VERSION`, draft) and a deterministic seed-driven generator (M-5).
-- `hand_bucket.py` + `hand_bucket.yaml` — the **Q5 proposal** percentile bands
-  (`bucket_def_version`, draft) mapping a combo to one of the five frozen DPL classes
-  (ADR-0005).
+- `scenario.py` + no config file — the **frozen Q3** scenario schema
+  (`SCENARIO_SCHEMA_VERSION = 0.1.0`, ADR-0014) and a deterministic seed-driven
+  generator (M-5).
+- `hand_bucket.py` + `hand_bucket.yaml` — the **frozen Q5** percentile bands
+  (`bucket_def_version = 0.1.0`, ADR-0015) mapping a combo to one of the five frozen
+  DPL classes (ADR-0005). A bucket is a strict-CDF / reach-percentile band within
+  Hero's own range, not an absolute hand category, so upper bands can be empty for
+  small/concentrated ranges (ADR-0015).
 - `baseline_strategy.py` + `baseline_strategy.yaml` — a **stub** base strategy
   (`baseline_table_version` ends with `-stub`; not an equilibrium) keyed by situation
   then `hand_bucket`, plus a builder for the canonical per-combo `StrategyTable`.
@@ -32,8 +35,9 @@ Leak detection, exploitation (`alpha > 0`), CFR and the LLM layer are later phas
 
 Run it: `python cli/run_session.py --seed 20260704 --hands 200`.
 
-## Proposals pending human confirmation + ADR
+## Frozen at 0.1.0 (Q3 / Q5)
 
-`scenario.py` (Q3) and `hand_bucket.yaml` (Q5) are opus4.8 proposals, versioned as
-drafts. They are not among the Phase-0 frozen contracts; adopting/freezing them needs
-human confirmation and an ADR (see `pm/questions/OPEN_QUESTIONS.md`).
+`scenario.py` (Q3, ADR-0014) and `hand_bucket.yaml` (Q5, ADR-0015) are frozen at
+`0.1.0` (human-approved 2026-07-04). They are not among the Phase-0 frozen contracts
+(ADR-0006), but changing their fields, invariants or thresholds now requires a new ADR
+and a version bump. The Q4 `state_cluster` definition remains `0.1.0-draft`.
