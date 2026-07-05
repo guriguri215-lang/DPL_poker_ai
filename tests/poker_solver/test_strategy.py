@@ -66,3 +66,13 @@ def test_validate_profile_rejects_wrong_action_keys():
     profile["P0"] = {"A": 0.5, "Z": 0.5}
     with pytest.raises(ValueError, match="!= actions"):
         validate_profile(game, profile)
+
+
+def test_validate_profile_rejects_extra_infoset():
+    # A stale/unknown infoset (e.g. from a buggy CFR average-strategy dump) must
+    # be rejected rather than silently ignored by the evaluator.
+    game = build_toy_coin()
+    profile = uniform_profile(game)
+    profile["P0_STALE"] = {"A": 0.5, "B": 0.5}
+    with pytest.raises(ValueError, match="unknown infosets"):
+        validate_profile(game, profile)

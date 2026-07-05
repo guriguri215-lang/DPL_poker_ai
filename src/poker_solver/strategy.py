@@ -56,10 +56,16 @@ def validate_profile(
 ) -> None:
     """Raise ``ValueError`` unless ``profile`` is a valid strategy for ``game``.
 
-    Checks that every infoset is present exactly with the game's action set, that
+    Checks that the profile's infoset keys match the game's exactly (no missing
+    and no extra keys), that every distribution uses the game's action set, that
     all probabilities are finite and non-negative, and that each distribution
-    sums to 1 within ``tolerance``.
+    sums to 1 within ``tolerance``. Rejecting extra keys keeps a downstream
+    generator (e.g. CFR average-strategy extraction in P3-2) from smuggling
+    stale or unknown infosets past the verifier unnoticed.
     """
+    extra = set(profile) - set(game.infosets)
+    if extra:
+        raise ValueError(f"profile has unknown infosets {sorted(extra)}")
     for infoset in game.infosets:
         if infoset not in profile:
             raise ValueError(f"profile missing infoset {infoset!r}")
