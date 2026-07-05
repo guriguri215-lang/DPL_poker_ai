@@ -2,12 +2,14 @@
 
 Ties task 3 together (ADR-0007): generate scenarios deterministically, have the stub
 opponent act, let Hero decide on the *public* observation, and assemble each decision
-into a frozen :class:`~poker_core.dpl_schema.DecisionProvenanceLog`. Because task 3
-runs at ``safety_alpha = 0`` with no leak detection, every DPL has empty
-``detected_leaks`` / ``trigger_reasons`` / ``mix_reasons`` and an empty
-``allowed_reason_ids`` (closed-world consistent), ``exploit_policy == base_policy``,
-and an exact ``solver_exact`` EV. A :class:`~poker_core.run_manifest.RunManifest`
-pins the versions, seed and config hashes so the run is reproducible (M-7).
+into a frozen :class:`~poker_core.dpl_schema.DecisionProvenanceLog`. Phase 2 now also
+records action-only public observations and runs a minimal leak detector. The default
+stub baseline matches the stub opponent, so the normal CLI run remains leak-free, but
+positive fixtures can inject a stricter baseline and produce DPL ``DetectedLeak``
+records without reading hidden strategy. The Hero still runs at ``safety_alpha = 0``:
+``exploit_policy == base_policy`` and every EV is exact ``solver_exact``. A
+:class:`~poker_core.run_manifest.RunManifest` pins the versions, seed and config
+hashes so the run is reproducible (M-7).
 
 The DPLs are written as JSONL (one decision per line); the manifest is written as a
 sidecar JSON. Both live under a gitignored output directory.
@@ -42,6 +44,8 @@ from .baseline_strategy import (
 )
 from .decision import NO_EXPLOIT_SOURCE, HeroAgent, Observation
 from .hand_bucket import BUCKET_DEF_PATH, bucket_def_version, get_bucket_definition
+from .leak import LeakDetector
+from .observation import ObservationTracker
 from .opponent import StubOpponent
 from .scenario import SCENARIO_SCHEMA_VERSION, Scenario, generate_scenarios
 
@@ -70,6 +74,9 @@ def _build_dpl(
     scenario: Scenario,
     hand_id: str,
     session_id: str,
+    *,
+    tracker: ObservationTracker,
+    leak_detector: LeakDetector,
 ) -> DecisionProvenanceLog:
     """Run one decision and assemble its validated DPL."""
     opponent = StubOpponent(
@@ -95,6 +102,15 @@ def _build_dpl(
     )
     agent = HeroAgent(get_baseline_strategy(), get_bucket_definition())
     result = agent.decide(observation)
+    tracker.record_opponent_action(
+        situation_key=result.situation_key,
+        action=opponent_action.action,
+    )
+    detected_leaks = leak_detector.detect_for_situation(
+        tracker.snapshot(),
+        result.situation_key,
+    )
+    allowed_reason_ids = list(dict.fromkeys(leak.reason_id for leak in detected_leaks))
 
     ev = EvEstimate(
         base_ev=result.base_ev,
@@ -113,7 +129,7 @@ def _build_dpl(
         hand_bucket=result.hand_bucket,
         hero_combo=scenario.hero_combo,
         base_policy=result.base_policy,
-        detected_leaks=[],
+        detected_leaks=detected_leaks,
         trigger_reasons=[],
         mix_reasons=[],
         exploit_policy=result.exploit_policy,
@@ -124,17 +140,30 @@ def _build_dpl(
         selected_action=result.selected_action,
         sampling_seed=result.sampling_seed,
         ev_estimate=ev,
-        allowed_reason_ids=[],
-        baseline_table_version=baseline_table_version(),
+        allowed_reason_ids=allowed_reason_ids,
+        baseline_table_version=leak_detector.baseline_table_version,
     )
 
 
-def iter_session_logs(seed: int, num_hands: int) -> Iterator[DecisionProvenanceLog]:
+def iter_session_logs(
+    seed: int,
+    num_hands: int,
+    *,
+    leak_detector: LeakDetector | None = None,
+) -> Iterator[DecisionProvenanceLog]:
     """Yield one validated DPL per generated hand (deterministic for a seed)."""
     session_id = _session_id_for(seed)
+    tracker = ObservationTracker()
+    detector = leak_detector or LeakDetector()
     for index, scenario in enumerate(generate_scenarios(seed, num_hands)):
         hand_id = f"{session_id}-H{index:05d}"
-        yield _build_dpl(scenario, hand_id, session_id)
+        yield _build_dpl(
+            scenario,
+            hand_id,
+            session_id,
+            tracker=tracker,
+            leak_detector=detector,
+        )
 
 
 def _config_ref(path: Path, *, name: str, role: str) -> ConfigRef:
@@ -148,13 +177,15 @@ def build_manifest(
     *,
     git_commit: str = "unknown",
     output_paths: list[str] | None = None,
+    leak_detector: LeakDetector | None = None,
 ) -> RunManifest:
     """Build the RunManifest pinning versions, the seed and config hashes (M-7)."""
+    detector = leak_detector or LeakDetector()
     versions = ComponentVersions(
         reason_ontology_version=get_ontology().ontology_version,
         cluster_def_version=cluster_def_version(),
         strategy_table_version=baseline_table_version(),
-        baseline_table_version=baseline_table_version(),
+        baseline_table_version=detector.baseline_table_version,
     )
     configs = [
         _config_ref(CLUSTER_DEF_PATH, name="state_cluster", role="cluster_def"),
@@ -188,10 +219,17 @@ def build_manifest(
     )
 
 
-def run_session(seed: int, num_hands: int, *, git_commit: str = "unknown") -> SessionResult:
+def run_session(
+    seed: int,
+    num_hands: int,
+    *,
+    git_commit: str = "unknown",
+    leak_detector: LeakDetector | None = None,
+) -> SessionResult:
     """Run a full session in memory: validated DPLs plus the manifest."""
-    logs = list(iter_session_logs(seed, num_hands))
-    manifest = build_manifest(seed, num_hands, git_commit=git_commit)
+    detector = leak_detector or LeakDetector()
+    logs = list(iter_session_logs(seed, num_hands, leak_detector=detector))
+    manifest = build_manifest(seed, num_hands, git_commit=git_commit, leak_detector=detector)
     return SessionResult(_session_id_for(seed), logs, manifest)
 
 

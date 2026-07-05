@@ -1,13 +1,14 @@
-"""CLI: run the task-3 vertical-slice session and write DPL JSONL + a manifest.
+"""CLI: run the Phase-2 river MVP session and write DPL JSONL + a manifest.
 
 Usage::
 
     python cli/run_session.py --seed 20260704 --hands 200 --out-dir experiments_output/demo
 
 Generates ``--hands`` river decisions deterministically from ``--seed``, validates
-each against the frozen DPL schema, writes them as JSONL, and writes a RunManifest
-sidecar. Output goes under a gitignored directory (``experiments_output/`` by
-default). Requires ``pip install -e .``.
+each against the frozen DPL schema, includes action-only public leak detection,
+writes them as JSONL, and writes a RunManifest sidecar. Output goes under a
+gitignored directory (``experiments_output/`` by default). Requires
+``pip install -e .``.
 """
 
 from __future__ import annotations
