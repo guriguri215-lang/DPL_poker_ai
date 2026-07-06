@@ -122,9 +122,14 @@ class NodeLockApplication:
 
 @dataclass(frozen=True, slots=True)
 class NodeLockMetrics:
-    """Independent verifier metrics for the node-locked profile."""
+    """Independent verifier metrics for the node-locked profile.
 
+    Game values follow the solver convention: player 0 expected utility.
+    """
+
+    base_game_value: float
     game_value: float
+    ev_delta: float
     exploitability: float
 
 
@@ -212,8 +217,11 @@ def solve_nodelocked_river_scenario(
         resolve_iterations=iterations,
         average_delay=average_delay,
     )
+    locked_game_value = expected_value(game, application.profile)
     metrics = NodeLockMetrics(
-        game_value=expected_value(game, application.profile),
+        base_game_value=base_result.metrics.game_value,
+        game_value=locked_game_value,
+        ev_delta=locked_game_value - base_result.metrics.game_value,
         exploitability=exploitability(game, application.profile),
     )
     return RiverNodeLockSolveResult(

@@ -7,6 +7,7 @@ import math
 import pytest
 
 from poker_ai.scenario import Scenario
+from poker_solver.evaluate import expected_value
 from poker_solver.nodelock import (
     NodeLockConfig,
     NodeLockRule,
@@ -94,7 +95,9 @@ def test_empty_nodelock_config_matches_frozen_river_solve():
     assert locked.applied_locks == ()
     assert locked.lock_mode == "HARD"
     assert locked.unlocked_policy_mode == "fix_to_baseline"
+    assert locked.metrics.base_game_value == pytest.approx(base.metrics.game_value)
     assert locked.metrics.game_value == pytest.approx(base.metrics.game_value)
+    assert locked.metrics.ev_delta == pytest.approx(0.0)
     assert locked.metrics.exploitability == pytest.approx(base.metrics.final_exploitability)
 
 
@@ -371,5 +374,33 @@ def test_nodelocked_river_result_records_modes_and_allocation():
     assert result.unlocked_policy_mode == "fix_to_baseline"
     assert result.applied_locks[0].combo_allocation == "baseline_scaled"
     assert result.applied_locks[0].achieved_frequency == pytest.approx(0.75)
+    assert result.metrics.base_game_value == pytest.approx(result.base_result.metrics.game_value)
+    assert result.metrics.ev_delta == pytest.approx(
+        result.metrics.game_value - result.base_result.metrics.game_value
+    )
     assert math.isfinite(result.metrics.game_value)
+    assert math.isfinite(result.metrics.ev_delta)
     assert math.isfinite(result.metrics.exploitability)
+
+
+def test_fix_to_baseline_result_records_locked_ev_delta():
+    scenario = _scenario("OOP")
+    result = solve_nodelocked_river_scenario(
+        scenario,
+        bet_fraction=0.5,
+        iterations=20,
+        nodelock_config=NodeLockConfig(
+            rules=(NodeLockRule(actor="IP", phase="vs_bet", action="CALL", target_frequency=1.0),)
+        ),
+    )
+
+    locked_game_value = expected_value(_river_game(), result.strategy)
+
+    assert result.unlocked_policy_mode == "fix_to_baseline"
+    assert result.applied_locks[0].achieved_frequency == pytest.approx(1.0)
+    assert result.metrics.base_game_value == pytest.approx(result.base_result.metrics.game_value)
+    assert result.metrics.game_value == pytest.approx(locked_game_value)
+    assert result.metrics.ev_delta == pytest.approx(
+        locked_game_value - result.base_result.metrics.game_value
+    )
+    assert result.metrics.ev_delta > 0.0
