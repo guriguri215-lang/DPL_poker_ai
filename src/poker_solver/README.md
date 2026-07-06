@@ -27,3 +27,10 @@ two-player zero-sum (`u0 + u1 = 0` at every leaf).
 **P3-2/P3-3/P3-4 (implemented): solving and artifacts.** The package now includes
 the vanilla CFR core, CFR+, independent convergence metrics, frozen river scenario
 solves, and StrategyTable baseline artifact generation from solved hero phases.
+
+**P4-1 (implemented): node-lock foundation.** `nodelock.py` validates HARD/SOFT/
+DISABLE lock configs, projects aggregate river action targets into per-combo
+policies with `baseline_scaled` as the default allocation, records the unlocked
+policy mode, and can keep unlocked infosets fixed to the baseline or re-run CFR+
+with hard-locked infosets fixed. SOFT rules are defined for provenance but are
+rejected until their semantics are implemented in a later Phase 4 task.

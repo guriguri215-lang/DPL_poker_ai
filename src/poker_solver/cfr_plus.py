@@ -18,7 +18,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from .game import PLAYERS, Chance, Game, Node, Terminal
-from .strategy import ActionDist, StrategyProfile, normalized_action_dist, validate_profile
+from .strategy import (
+    ActionDist,
+    StrategyProfile,
+    normalized_action_dist,
+    uniform_profile,
+    validate_profile,
+)
 
 
 def regret_matching_plus(regrets: Mapping[str, float], actions: tuple[str, ...]) -> ActionDist:
@@ -33,6 +39,7 @@ class CFRPlus:
 
     game: Game
     average_delay: int = 0
+    fixed_strategy: Mapping[str, Mapping[str, float]] | None = None
     cumulative_regrets: dict[str, ActionDist] = field(init=False)
     strategy_sum: dict[str, ActionDist] = field(init=False)
     iterations: int = field(default=0, init=False)
@@ -41,30 +48,37 @@ class CFRPlus:
     def __post_init__(self) -> None:
         if self.average_delay < 0:
             raise ValueError(f"average_delay must be non-negative, got {self.average_delay}")
+        self.fixed_strategy = _validated_fixed_strategy(self.game, self.fixed_strategy)
         self.cumulative_regrets = _zero_table(self.game)
         self.strategy_sum = _zero_table(self.game)
 
     def current_profile(self) -> StrategyProfile:
         """The profile induced by current non-negative cumulative regrets."""
         self._validate_table_shape(self.cumulative_regrets, "cumulative_regrets")
-        profile = {
-            infoset: regret_matching_plus(
-                self.cumulative_regrets[infoset], self.game.actions_of(infoset)
-            )
-            for infoset in self.game.infosets
-        }
+        profile = {}
+        for infoset in self.game.infosets:
+            fixed_dist = self.fixed_strategy.get(infoset)
+            if fixed_dist is not None:
+                profile[infoset] = dict(fixed_dist)
+            else:
+                profile[infoset] = regret_matching_plus(
+                    self.cumulative_regrets[infoset], self.game.actions_of(infoset)
+                )
         validate_profile(self.game, profile)
         return profile
 
     def average_strategy(self) -> StrategyProfile:
         """Return the linear-weighted average strategy, uniform off path."""
         self._validate_table_shape(self.strategy_sum, "strategy_sum")
-        profile = {
-            infoset: normalized_action_dist(
-                self.strategy_sum[infoset], self.game.actions_of(infoset)
-            )
-            for infoset in self.game.infosets
-        }
+        profile = {}
+        for infoset in self.game.infosets:
+            fixed_dist = self.fixed_strategy.get(infoset)
+            if fixed_dist is not None:
+                profile[infoset] = dict(fixed_dist)
+            else:
+                profile[infoset] = normalized_action_dist(
+                    self.strategy_sum[infoset], self.game.actions_of(infoset)
+                )
         validate_profile(self.game, profile)
         return profile
 
@@ -144,7 +158,7 @@ class CFRPlus:
             )
 
         node_value = math.fsum(dist[action] * action_values[action] for action in node.actions)
-        if node.player == update_player:
+        if node.player == update_player and node.infoset not in self.fixed_strategy:
             opponent_reach = reach1 if update_player == 0 else reach0
             counterfactual_reach = chance_reach * opponent_reach
             regrets = self.cumulative_regrets[node.infoset]
@@ -208,3 +222,19 @@ def solve_cfr_plus(game: Game, iterations: int, *, average_delay: int = 0) -> St
 
 def _zero_table(game: Game) -> dict[str, ActionDist]:
     return {infoset: dict.fromkeys(game.actions_of(infoset), 0.0) for infoset in game.infosets}
+
+
+def _validated_fixed_strategy(
+    game: Game, fixed_strategy: Mapping[str, Mapping[str, float]] | None
+) -> StrategyProfile:
+    if fixed_strategy is None:
+        return {}
+    extra = set(fixed_strategy) - set(game.infosets)
+    if extra:
+        raise ValueError(f"fixed_strategy has unknown infosets {sorted(extra)}")
+
+    profile = uniform_profile(game)
+    for infoset, dist in fixed_strategy.items():
+        profile[infoset] = dict(dist)
+    validate_profile(game, profile)
+    return {infoset: dict(fixed_strategy[infoset]) for infoset in fixed_strategy}
