@@ -6,8 +6,8 @@ best-response / exploitability module that is deliberately independent of any CF
 code (ADR-0017 sec.4). P3-2 adds full-tree vanilla CFR on top of those measuring
 instruments. P3-3 adds CFR+, independent convergence metrics, and an in-memory
 frozen-river-scenario solve entry point. P3-4 adds StrategyTable baseline artifact
-generation from solved river phases. P4-1 adds node-lock configuration and
-river application helpers.
+generation from solved river phases. Phase 4 adds node-lock configuration,
+river application helpers, EV deltas, and resolve-mode worst-case metrics.
 
 Public API::
 
@@ -51,6 +51,7 @@ from .nodelock import (
     NodeLockConfig,
     NodeLockMetrics,
     NodeLockRule,
+    NodeLockWorstCaseMetrics,
     RiverNodeLockSolveResult,
     apply_node_locks,
     river_infoset_reach_weights,
@@ -89,6 +90,7 @@ __all__ = [
     "NodeLockConfig",
     "NodeLockMetrics",
     "NodeLockRule",
+    "NodeLockWorstCaseMetrics",
     "RiverNodeLockSolveResult",
     "StrategyProfile",
     "Terminal",

@@ -1,4 +1,4 @@
-"""Node-lock foundation checks (P4-1)."""
+"""Node-lock checks (Phase 4)."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import math
 import pytest
 
 from poker_ai.scenario import Scenario
+from poker_solver.best_response import best_response_value
 from poker_solver.evaluate import expected_value
 from poker_solver.nodelock import (
     NodeLockConfig,
@@ -35,11 +36,22 @@ def _scenario(position: str = "OOP") -> Scenario:
 
 def _river_game():
     scenario = _scenario("OOP")
+    return _river_game_for_scenario(scenario)
+
+
+def _river_game_for_scenario(scenario: Scenario):
     config = RiverBettingConfig(pot=scenario.pot, bet_fraction=0.5)
+    if scenario.position == "OOP":
+        return build_river_game(
+            config,
+            scenario.hero_range_obj(),
+            scenario.opponent_range_obj(),
+            scenario.board_cards(),
+        )
     return build_river_game(
         config,
-        scenario.hero_range_obj(),
         scenario.opponent_range_obj(),
+        scenario.hero_range_obj(),
         scenario.board_cards(),
     )
 
@@ -99,6 +111,7 @@ def test_empty_nodelock_config_matches_frozen_river_solve():
     assert locked.metrics.game_value == pytest.approx(base.metrics.game_value)
     assert locked.metrics.ev_delta == pytest.approx(0.0)
     assert locked.metrics.exploitability == pytest.approx(base.metrics.final_exploitability)
+    assert locked.metrics.worst_case is None
 
 
 def test_disable_mode_ignores_rules_and_matches_baseline_profile():
@@ -381,6 +394,7 @@ def test_nodelocked_river_result_records_modes_and_allocation():
     assert math.isfinite(result.metrics.game_value)
     assert math.isfinite(result.metrics.ev_delta)
     assert math.isfinite(result.metrics.exploitability)
+    assert result.metrics.worst_case is None
 
 
 def test_fix_to_baseline_result_records_locked_ev_delta():
@@ -404,3 +418,62 @@ def test_fix_to_baseline_result_records_locked_ev_delta():
         locked_game_value - result.base_result.metrics.game_value
     )
     assert result.metrics.ev_delta > 0.0
+    assert result.metrics.worst_case is None
+
+
+def test_resolve_result_records_mode2_opponent_best_response_worst_case():
+    scenario = _scenario("OOP")
+    result = solve_nodelocked_river_scenario(
+        scenario,
+        bet_fraction=0.5,
+        iterations=20,
+        nodelock_config=NodeLockConfig(
+            unlocked_policy_mode="resolve",
+            rules=(NodeLockRule(actor="IP", phase="vs_bet", action="FOLD", target_frequency=1.0),),
+        ),
+    )
+    game = _river_game_for_scenario(scenario)
+    worst_case = result.metrics.worst_case
+
+    assert result.unlocked_policy_mode == "resolve"
+    assert worst_case is not None
+    opponent_best_response = best_response_value(game, 1, result.strategy)
+    assert worst_case.hero_player == 0
+    assert worst_case.opponent_player == 1
+    assert worst_case.opponent_best_response_value == pytest.approx(opponent_best_response)
+    assert worst_case.player0_worst_case_value == pytest.approx(-opponent_best_response)
+    assert worst_case.hero_value == pytest.approx(result.metrics.game_value)
+    assert worst_case.hero_worst_case_value == pytest.approx(-opponent_best_response)
+    assert worst_case.worst_case_penalty == pytest.approx(
+        result.metrics.game_value - worst_case.hero_worst_case_value
+    )
+    assert worst_case.worst_case_penalty >= -1e-12
+
+
+def test_resolve_mode2_worst_case_uses_hero_sign_for_ip_scenarios():
+    scenario = _scenario("IP")
+    result = solve_nodelocked_river_scenario(
+        scenario,
+        bet_fraction=0.5,
+        iterations=20,
+        nodelock_config=NodeLockConfig(
+            unlocked_policy_mode="resolve",
+            rules=(NodeLockRule(actor="OOP", phase="start", action="BET", target_frequency=1.0),),
+        ),
+    )
+    game = _river_game_for_scenario(scenario)
+    worst_case = result.metrics.worst_case
+
+    assert result.unlocked_policy_mode == "resolve"
+    assert worst_case is not None
+    opponent_best_response = best_response_value(game, 0, result.strategy)
+    assert worst_case.hero_player == 1
+    assert worst_case.opponent_player == 0
+    assert worst_case.opponent_best_response_value == pytest.approx(opponent_best_response)
+    assert worst_case.player0_worst_case_value == pytest.approx(opponent_best_response)
+    assert worst_case.hero_value == pytest.approx(-result.metrics.game_value)
+    assert worst_case.hero_worst_case_value == pytest.approx(-opponent_best_response)
+    assert worst_case.worst_case_penalty == pytest.approx(
+        -result.metrics.game_value - worst_case.hero_worst_case_value
+    )
+    assert worst_case.worst_case_penalty >= -1e-12

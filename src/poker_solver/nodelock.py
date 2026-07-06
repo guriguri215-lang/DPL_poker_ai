@@ -1,10 +1,11 @@
-"""Node-lock configuration and river application helpers (P4-1).
+"""Node-lock configuration and river application helpers (Phase 4).
 
 This module keeps the first node-lock layer narrow: it validates lock requests,
 projects aggregate action targets into per-combo policies, and can either keep
 unlocked infosets at the baseline profile or re-run CFR+ with hard-locked
-infosets fixed. It does not implement Mode 2 worst-case evaluation, sensitivity
-analysis, or explanation generation.
+infosets fixed. Mode 2 records the opponent's exact best-response worst-case
+value for resolve runs. It does not implement sensitivity analysis or
+explanation generation.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from typing import Literal
 
 from poker_ai.scenario import Scenario
 
-from .best_response import exploitability
+from .best_response import best_response_value, exploitability
 from .cfr_plus import CFRPlus
 from .evaluate import expected_value
 from .game import Chance, Decision, Game, Node
@@ -121,6 +122,23 @@ class NodeLockApplication:
 
 
 @dataclass(frozen=True, slots=True)
+class NodeLockWorstCaseMetrics:
+    """Mode 2 opponent best-response metrics for a fixed hero policy.
+
+    ``player0_worst_case_value`` follows the solver convention. Hero fields use
+    hero utility, so they remain sign-stable when the scenario hero is IP.
+    """
+
+    hero_player: int
+    opponent_player: int
+    opponent_best_response_value: float
+    player0_worst_case_value: float
+    hero_value: float
+    hero_worst_case_value: float
+    worst_case_penalty: float
+
+
+@dataclass(frozen=True, slots=True)
 class NodeLockMetrics:
     """Independent verifier metrics for the node-locked profile.
 
@@ -131,6 +149,7 @@ class NodeLockMetrics:
     game_value: float
     ev_delta: float
     exploitability: float
+    worst_case: NodeLockWorstCaseMetrics | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,6 +220,7 @@ def solve_nodelocked_river_scenario(
     average_delay: int = 0,
 ) -> RiverNodeLockSolveResult:
     """Solve a frozen river scenario and apply P4-1 node-lock configuration."""
+    config = nodelock_config or NodeLockConfig()
     base_result = solve_frozen_river_scenario(
         scenario,
         bet_fraction=bet_fraction,
@@ -212,17 +232,25 @@ def solve_nodelocked_river_scenario(
     application = apply_node_locks(
         game,
         base_result.strategy,
-        nodelock_config,
+        config,
         reach_weights=river_infoset_reach_weights(game, base_result.strategy),
         resolve_iterations=iterations,
         average_delay=average_delay,
     )
     locked_game_value = expected_value(game, application.profile)
+    worst_case = _mode2_worst_case_metrics(
+        game,
+        application.profile,
+        hero_prefix,
+        game_value=locked_game_value,
+        enabled=config.unlocked_policy_mode == "resolve" and bool(application.applied_locks),
+    )
     metrics = NodeLockMetrics(
         base_game_value=base_result.metrics.game_value,
         game_value=locked_game_value,
         ev_delta=locked_game_value - base_result.metrics.game_value,
         exploitability=exploitability(game, application.profile),
+        worst_case=worst_case,
     )
     return RiverNodeLockSolveResult(
         base_result=base_result,
@@ -497,6 +525,49 @@ def _river_game_for_scenario(scenario: Scenario, *, bet_fraction: float) -> tupl
         build_river_game(config, scenario.opponent_range_obj(), scenario.hero_range_obj(), board),
         "IP",
     )
+
+
+def _mode2_worst_case_metrics(
+    game: Game,
+    profile: StrategyProfile,
+    hero_prefix: str,
+    *,
+    game_value: float,
+    enabled: bool,
+) -> NodeLockWorstCaseMetrics | None:
+    if not enabled:
+        return None
+    hero_player = _river_player_for_actor(hero_prefix)
+    opponent_player = 1 - hero_player
+    opponent_best_response = best_response_value(game, opponent_player, profile)
+    player0_worst_case = opponent_best_response if opponent_player == 0 else -opponent_best_response
+    hero_value = _player_utility(game_value, hero_player)
+    hero_worst_case = -opponent_best_response
+    return NodeLockWorstCaseMetrics(
+        hero_player=hero_player,
+        opponent_player=opponent_player,
+        opponent_best_response_value=opponent_best_response,
+        player0_worst_case_value=player0_worst_case,
+        hero_value=hero_value,
+        hero_worst_case_value=hero_worst_case,
+        worst_case_penalty=hero_value - hero_worst_case,
+    )
+
+
+def _river_player_for_actor(actor: str) -> int:
+    if actor == "OOP":
+        return 0
+    if actor == "IP":
+        return 1
+    raise ValueError(f"unknown river actor {actor!r}")
+
+
+def _player_utility(player0_value: float, player: int) -> float:
+    if player == 0:
+        return player0_value
+    if player == 1:
+        return -player0_value
+    raise ValueError(f"player must be 0 or 1, got {player}")
 
 
 def _copy_profile(profile: StrategyProfile) -> StrategyProfile:
