@@ -6,9 +6,10 @@ best-response / exploitability module that is deliberately independent of any CF
 code (ADR-0017 sec.4). P3-2 adds full-tree vanilla CFR on top of those measuring
 instruments. P3-3 adds CFR+, independent convergence metrics, and an in-memory
 frozen-river-scenario solve entry point. P3-4 adds StrategyTable baseline artifact
-generation from solved river phases.
+generation from solved river phases. P4-1 adds node-lock configuration and
+river application helpers.
 
-Public API (P3-3)::
+Public API::
 
     from poker_solver import (
         Game, Terminal, Chance, Decision,          # game tree
@@ -21,6 +22,7 @@ Public API (P3-3)::
         solve_frozen_river_scenario,
         build_baseline_strategy_table, build_baseline_strategy_tables,
         write_baseline_strategy_tables,
+        NodeLockConfig, NodeLockRule, solve_nodelocked_river_scenario,
     )
 """
 
@@ -42,6 +44,18 @@ from .cfr_metrics import (
 from .cfr_plus import CFRPlus, regret_matching_plus, solve_cfr_plus
 from .evaluate import expected_value, expected_value_by_leaves, player_values
 from .game import Chance, Decision, Game, Node, Terminal
+from .nodelock import (
+    AppliedNodeLock,
+    NodeLockApplication,
+    NodeLockComboPolicy,
+    NodeLockConfig,
+    NodeLockMetrics,
+    NodeLockRule,
+    RiverNodeLockSolveResult,
+    apply_node_locks,
+    river_infoset_reach_weights,
+    solve_nodelocked_river_scenario,
+)
 from .reach import LeafReach, leaf_reaches, total_reach
 from .river_solve import (
     RiverComboPolicy,
@@ -69,6 +83,13 @@ __all__ = [
     "Game",
     "LeafReach",
     "Node",
+    "AppliedNodeLock",
+    "NodeLockApplication",
+    "NodeLockComboPolicy",
+    "NodeLockConfig",
+    "NodeLockMetrics",
+    "NodeLockRule",
+    "RiverNodeLockSolveResult",
     "StrategyProfile",
     "Terminal",
     "VanillaCFR",
@@ -79,6 +100,7 @@ __all__ = [
     "expected_value",
     "expected_value_by_leaves",
     "exploitability",
+    "apply_node_locks",
     "leaf_reaches",
     "nash_conv",
     "normalized_action_dist",
@@ -87,10 +109,12 @@ __all__ = [
     "regret_matching_plus",
     "RiverComboPolicy",
     "RiverScenarioSolveResult",
+    "river_infoset_reach_weights",
     "river_solve_situation_key",
     "solve_cfr_plus",
     "solve_cfr_plus_with_metrics",
     "solve_frozen_river_scenario",
+    "solve_nodelocked_river_scenario",
     "solve_vanilla_cfr",
     "total_reach",
     "uniform_profile",
