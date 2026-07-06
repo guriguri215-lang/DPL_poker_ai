@@ -5,10 +5,17 @@ from __future__ import annotations
 import pytest
 
 from poker_ai.hand_bucket import bucket_def_version, classify_combo
+from poker_ai.leak import action_baseline_table_from_strategy_table
 from poker_ai.scenario import Scenario
 from poker_core.combo import Combo
 from poker_core.state_cluster import classify_board, cluster_def_version
-from poker_solver.river_solve import solve_frozen_river_scenario
+from poker_core.strategy_table import StrategyTable
+from poker_solver.river_solve import (
+    build_baseline_strategy_table,
+    build_baseline_strategy_tables,
+    solve_frozen_river_scenario,
+    write_baseline_strategy_tables,
+)
 
 
 def _scenario(position: str = "OOP") -> Scenario:
@@ -72,3 +79,89 @@ def test_frozen_river_scenario_solve_rejects_bet_above_effective_stack():
 
     with pytest.raises(ValueError, match="exceeds effective stack"):
         solve_frozen_river_scenario(scenario, bet_fraction=3.0, iterations=1)
+
+
+def test_solve_result_builds_strategy_table_per_phase(tmp_path):
+    scenario = _scenario("OOP")
+    result = solve_frozen_river_scenario(scenario, bet_fraction=0.5, iterations=20)
+
+    table = build_baseline_strategy_table(result, phase="start")
+
+    assert isinstance(table, StrategyTable)
+    assert table.table_version.startswith("river-solve-S-OOP-oop-start-i20")
+    assert table.situation_key == f"{result.state_cluster}:OOP:river_start"
+    assert table.cluster_def_version == result.cluster_def_version
+    assert table.source == "poker_solver.solve_frozen_river_scenario"
+    assert {entry.combo for entry in table.entries} == {
+        policy.combo for policy in result.combo_policies if policy.phase == "start"
+    }
+    for entry in table.entries:
+        source_policy = next(
+            policy
+            for policy in result.combo_policies
+            if policy.phase == "start" and policy.combo == entry.combo
+        )
+        assert entry.policy == source_policy.policy
+        assert entry.reach_prob == pytest.approx(source_policy.reach_prob)
+
+    written = write_baseline_strategy_tables((table,), tmp_path)
+    assert len(written) == 1
+    reloaded = StrategyTable.model_validate_json(written[0].read_text(encoding="utf-8"))
+    assert reloaded == table
+
+
+def test_strategy_table_version_and_path_include_solve_config(tmp_path):
+    scenario = _scenario("OOP")
+    half_pot = solve_frozen_river_scenario(scenario, bet_fraction=0.5, iterations=20)
+    three_quarter_pot = solve_frozen_river_scenario(
+        scenario,
+        bet_fraction=0.75,
+        iterations=20,
+    )
+
+    half_pot_table = build_baseline_strategy_table(half_pot, phase="start")
+    three_quarter_pot_table = build_baseline_strategy_table(
+        three_quarter_pot,
+        phase="start",
+    )
+    written = write_baseline_strategy_tables(
+        (half_pot_table, three_quarter_pot_table),
+        tmp_path,
+    )
+
+    assert half_pot.solve_config_digest != three_quarter_pot.solve_config_digest
+    assert half_pot_table.table_version != three_quarter_pot_table.table_version
+    assert len(set(written)) == 2
+    assert all(path.exists() for path in written)
+
+
+def test_solve_result_builds_all_strategy_table_phases():
+    result = solve_frozen_river_scenario(_scenario("IP"), bet_fraction=0.5, iterations=10)
+
+    tables = build_baseline_strategy_tables(result)
+
+    assert {table.situation_key for table in tables} == {
+        f"{result.state_cluster}:IP:river_vs_bet",
+        f"{result.state_cluster}:IP:river_vs_check",
+    }
+    assert all(isinstance(table, StrategyTable) for table in tables)
+
+
+def test_call_fold_solve_phase_cannot_build_checked_to_action_baseline():
+    result = solve_frozen_river_scenario(_scenario("IP"), bet_fraction=0.5, iterations=10)
+    tables = build_baseline_strategy_tables(result)
+    vs_bet = next(table for table in tables if table.situation_key.endswith(":river_vs_bet"))
+    vs_check = next(table for table in tables if table.situation_key.endswith(":river_vs_check"))
+
+    with pytest.raises(ValueError, match="CHECK/BET actions"):
+        action_baseline_table_from_strategy_table(vs_bet)
+
+    baseline = action_baseline_table_from_strategy_table(vs_check)
+    assert baseline.table_version.endswith("-action-baseline")
+
+
+def test_build_strategy_table_rejects_unknown_phase():
+    result = solve_frozen_river_scenario(_scenario("OOP"), bet_fraction=0.5, iterations=10)
+
+    with pytest.raises(ValueError, match="no hero policy"):
+        build_baseline_strategy_table(result, phase="missing")

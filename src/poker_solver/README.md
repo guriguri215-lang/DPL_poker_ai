@@ -24,4 +24,6 @@ converged" (ADR-0017, REV-20260705-phase2-gate2-fable5 sec.5/sec.6):
 Units are big blinds (ADR-0017 sec.1). Player 0 is the hero; the game is
 two-player zero-sum (`u0 + u1 = 0` at every leaf).
 
-**Later:** CFR core (P3-2), CFR+ (P3-3), BaselineTable generation (P3-4).
+**P3-2/P3-3/P3-4 (implemented): solving and artifacts.** The package now includes
+the vanilla CFR core, CFR+, independent convergence metrics, frozen river scenario
+solves, and StrategyTable baseline artifact generation from solved hero phases.

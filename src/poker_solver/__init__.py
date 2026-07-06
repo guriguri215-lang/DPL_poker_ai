@@ -5,7 +5,8 @@ an extensive-form game tree, an exact strategy-profile EV evaluator, and a
 best-response / exploitability module that is deliberately independent of any CFR
 code (ADR-0017 sec.4). P3-2 adds full-tree vanilla CFR on top of those measuring
 instruments. P3-3 adds CFR+, independent convergence metrics, and an in-memory
-frozen-river-scenario solve entry point. BaselineTable generation (P3-4) follows.
+frozen-river-scenario solve entry point. P3-4 adds StrategyTable baseline artifact
+generation from solved river phases.
 
 Public API (P3-3)::
 
@@ -18,6 +19,8 @@ Public API (P3-3)::
         VanillaCFR, regret_matching, solve_vanilla_cfr,
         CFRPlus, solve_cfr_plus, solve_cfr_plus_with_metrics,
         solve_frozen_river_scenario,
+        build_baseline_strategy_table, build_baseline_strategy_tables,
+        write_baseline_strategy_tables,
     )
 """
 
@@ -40,7 +43,15 @@ from .cfr_plus import CFRPlus, regret_matching_plus, solve_cfr_plus
 from .evaluate import expected_value, expected_value_by_leaves, player_values
 from .game import Chance, Decision, Game, Node, Terminal
 from .reach import LeafReach, leaf_reaches, total_reach
-from .river_solve import RiverComboPolicy, RiverScenarioSolveResult, solve_frozen_river_scenario
+from .river_solve import (
+    RiverComboPolicy,
+    RiverScenarioSolveResult,
+    build_baseline_strategy_table,
+    build_baseline_strategy_tables,
+    river_solve_situation_key,
+    solve_frozen_river_scenario,
+    write_baseline_strategy_tables,
+)
 from .strategy import (
     StrategyProfile,
     normalized_action_dist,
@@ -63,6 +74,8 @@ __all__ = [
     "VanillaCFR",
     "best_response_strategy",
     "best_response_value",
+    "build_baseline_strategy_table",
+    "build_baseline_strategy_tables",
     "expected_value",
     "expected_value_by_leaves",
     "exploitability",
@@ -74,6 +87,7 @@ __all__ = [
     "regret_matching_plus",
     "RiverComboPolicy",
     "RiverScenarioSolveResult",
+    "river_solve_situation_key",
     "solve_cfr_plus",
     "solve_cfr_plus_with_metrics",
     "solve_frozen_river_scenario",
@@ -81,4 +95,5 @@ __all__ = [
     "total_reach",
     "uniform_profile",
     "validate_profile",
+    "write_baseline_strategy_tables",
 ]

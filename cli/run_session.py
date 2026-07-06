@@ -18,6 +18,12 @@ import argparse
 import subprocess
 from pathlib import Path
 
+from poker_ai.exploit import RuleExploitResult
+from poker_ai.leak import (
+    LeakDetector,
+    LeakDetectorConfig,
+    leaky_fixture_action_baseline_table,
+)
 from poker_ai.session import run_session, write_jsonl, write_manifest
 
 
@@ -36,6 +42,26 @@ def _current_git_commit() -> str:
     return commit if commit else "unknown"
 
 
+class _LeakyFixtureExploitProvider:
+    """CLI smoke helper: force a CALL exploit when the public fixture detects R008."""
+
+    def build(self, **kwargs: object) -> RuleExploitResult:
+        base_policy = kwargs["base_policy"]
+        detected_leaks = kwargs["detected_leaks"]
+        legal_actions = kwargs["legal_actions"]
+        if (
+            isinstance(base_policy, dict)
+            and "CALL" in legal_actions
+            and any(leak.reason_id == "LEAK_R008" for leak in detected_leaks)
+        ):
+            return RuleExploitResult(
+                policy={"CALL": 1.0},
+                applied_leak_reason_ids=("LEAK_R008",),
+                trigger_reasons=("TRG_R001", "TRG_R002"),
+            )
+        return RuleExploitResult(policy=dict(base_policy))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -45,8 +71,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--safety-alpha",
         type=float,
-        default=0.0,
-        help="SafetyMixer alpha in [0, 1] (default: 0.0)",
+        default=None,
+        help="SafetyMixer alpha in [0, 1] (default: 0.0, or 1.0 with --leaky-fixture)",
+    )
+    parser.add_argument(
+        "--leaky-fixture",
+        action="store_true",
+        help="use a public fixture baseline that produces leak/exploit smoke output",
     )
     parser.add_argument(
         "--out-dir",
@@ -56,18 +87,40 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    safety_alpha = (
+        args.safety_alpha if args.safety_alpha is not None else (1.0 if args.leaky_fixture else 0.0)
+    )
+    leak_detector = None
+    exploit_provider = None
+    if args.leaky_fixture:
+        leak_detector = LeakDetector(
+            leaky_fixture_action_baseline_table(),
+            LeakDetectorConfig(
+                min_effective_sample_size=1,
+                min_deviation=0.25,
+                min_confidence=0.5,
+            ),
+        )
+        exploit_provider = _LeakyFixtureExploitProvider()
+
     result = run_session(
         args.seed,
         args.hands,
         git_commit=_current_git_commit(),
-        safety_alpha=args.safety_alpha,
+        leak_detector=leak_detector,
+        safety_alpha=safety_alpha,
+        exploit_provider=exploit_provider,
     )
     jsonl_path = write_jsonl(result.logs, args.out_dir / f"{result.session_id}.dpl.jsonl")
     manifest_path = write_manifest(
         result.manifest, args.out_dir / f"{result.session_id}.manifest.json"
     )
 
+    detected_leaks = sum(len(log.detected_leaks) for log in result.logs)
+    mixed_decisions = sum(1 for log in result.logs if log.mix_reasons)
     print(f"session {result.session_id}: {len(result.logs)} decisions validated against DPL v1")
+    print(f"detected_leaks={detected_leaks}")
+    print(f"mixed_decisions={mixed_decisions}")
     print(f"wrote {jsonl_path}")
     print(f"wrote {manifest_path}")
     return 0

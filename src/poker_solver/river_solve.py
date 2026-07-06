@@ -8,17 +8,24 @@ belong to P3-4.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
+from pathlib import Path
 
 from poker_ai.hand_bucket import bucket_def_version, classify_combo
 from poker_ai.scenario import Scenario
 from poker_core.state_cluster import classify_board, cluster_def_version
+from poker_core.strategy_table import StrategyEntry, StrategyTable
 
 from .cfr_metrics import ConvergenceMetrics, solve_cfr_plus_with_metrics
 from .game import Chance, Game
 from .river_tree import RiverBettingConfig, build_river_game
 from .strategy import ActionDist, StrategyProfile
+
+_SOLVE_CONFIG_VERSION = "river-solve-config-v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +53,70 @@ class RiverScenarioSolveResult:
     strategy: StrategyProfile
     metrics: ConvergenceMetrics
     combo_policies: tuple[RiverComboPolicy, ...]
+    solve_config_digest: str
+
+
+def build_baseline_strategy_table(
+    result: RiverScenarioSolveResult,
+    *,
+    phase: str,
+    table_version: str | None = None,
+    source: str = "poker_solver.solve_frozen_river_scenario",
+) -> StrategyTable:
+    """Convert one solved hero phase into the frozen per-combo StrategyTable."""
+    policies = [policy for policy in result.combo_policies if policy.phase == phase]
+    if not policies:
+        raise ValueError(f"solve result has no hero policy for phase {phase!r}")
+
+    version = table_version or _baseline_table_version(result, phase)
+    return StrategyTable(
+        table_version=version,
+        situation_key=river_solve_situation_key(result, phase),
+        cluster_def_version=result.cluster_def_version,
+        source=source,
+        entries=tuple(
+            StrategyEntry(
+                combo=policy.combo,
+                policy=dict(policy.policy),
+                reach_prob=policy.reach_prob,
+            )
+            for policy in policies
+        ),
+    )
+
+
+def build_baseline_strategy_tables(
+    result: RiverScenarioSolveResult,
+    *,
+    phases: Iterable[str] | None = None,
+    source: str = "poker_solver.solve_frozen_river_scenario",
+) -> tuple[StrategyTable, ...]:
+    """Convert solved hero phases into StrategyTable baseline artifacts."""
+    selected = tuple(phases) if phases is not None else _solved_phases(result)
+    return tuple(
+        build_baseline_strategy_table(result, phase=phase, source=source) for phase in selected
+    )
+
+
+def write_baseline_strategy_tables(
+    tables: Iterable[StrategyTable],
+    out_dir: Path | str,
+) -> tuple[Path, ...]:
+    """Write StrategyTable artifacts as deterministic JSON files."""
+    target = Path(out_dir)
+    target.mkdir(parents=True, exist_ok=True)
+
+    paths: list[Path] = []
+    for table in tables:
+        path = target / f"{_safe_slug(table.table_version)}.strategy_table.json"
+        path.write_text(table.model_dump_json(indent=2) + "\n", encoding="utf-8")
+        paths.append(path)
+    return tuple(paths)
+
+
+def river_solve_situation_key(result: RiverScenarioSolveResult, phase: str) -> str:
+    """Build a StrategyTable situation key for one solved river phase."""
+    return f"{result.state_cluster}:{result.position}:river_{phase}"
 
 
 def solve_frozen_river_scenario(
@@ -92,6 +163,10 @@ def solve_frozen_river_scenario(
         strategy=solve.profile,
         metrics=solve.metrics,
         combo_policies=combo_policies,
+        solve_config_digest=_solve_config_digest(
+            bet_fraction=bet_fraction,
+            average_delay=average_delay,
+        ),
     )
 
 
@@ -115,6 +190,33 @@ def _combo_policies(
             )
         )
     return tuple(sorted(policies, key=lambda policy: (policy.combo, policy.phase)))
+
+
+def _solved_phases(result: RiverScenarioSolveResult) -> tuple[str, ...]:
+    return tuple(sorted({policy.phase for policy in result.combo_policies}))
+
+
+def _baseline_table_version(result: RiverScenarioSolveResult, phase: str) -> str:
+    return (
+        f"river-solve-{_safe_slug(result.scenario_id)}-{result.position.lower()}-"
+        f"{_safe_slug(phase)}-i{result.metrics.iterations}-cfg{result.solve_config_digest}"
+    )
+
+
+def _safe_slug(value: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", value.strip())
+    return slug.strip("._-") or "strategy_table"
+
+
+def _solve_config_digest(*, bet_fraction: float, average_delay: int) -> str:
+    payload = {
+        "version": _SOLVE_CONFIG_VERSION,
+        "solver": "cfr_plus",
+        "bet_fraction": bet_fraction,
+        "average_delay": average_delay,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()[:12]
 
 
 def _hero_chance_reaches(game: Game, hero_prefix: str) -> dict[str, float]:
