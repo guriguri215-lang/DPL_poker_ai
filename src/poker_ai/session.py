@@ -30,6 +30,7 @@ from poker_core.dpl_schema import DecisionProvenanceLog, EvEstimate
 from poker_core.range_model import Range
 from poker_core.reason_ontology import get_ontology
 from poker_core.run_manifest import (
+    ArtifactRef,
     CodeProvenance,
     ComponentVersions,
     ConfigRef,
@@ -48,7 +49,7 @@ from .baseline_strategy import (
 from .decision import HeroAgent, Observation
 from .exploit import RuleExploitProvider
 from .hand_bucket import BUCKET_DEF_PATH, bucket_def_version, get_bucket_definition
-from .leak import LeakDetector
+from .leak import LeakDetector, action_baseline_table_sha256
 from .observation import ObservationTracker
 from .opponent import StubOpponent
 from .scenario import SCENARIO_SCHEMA_VERSION, Scenario, generate_scenarios
@@ -204,6 +205,21 @@ def _config_ref(path: Path, *, name: str, role: str) -> ConfigRef:
     return ConfigRef(name=name, role=role, path=path.name, sha256=sha)
 
 
+def _action_baseline_config_ref(detector: LeakDetector) -> ConfigRef:
+    return ConfigRef(
+        name="action_baseline_table",
+        role="baseline_table",
+        path=f"inline:{detector.baseline_table_version}",
+        sha256=action_baseline_table_sha256(detector.baseline_table),
+    )
+
+
+def _artifact_ref(path: str) -> ArtifactRef:
+    target = Path(path)
+    sha = hashlib.sha256(target.read_bytes()).hexdigest() if target.exists() else None
+    return ArtifactRef(name=target.name, path=str(target), sha256=sha)
+
+
 def build_manifest(
     seed: int,
     num_hands: int,
@@ -224,7 +240,8 @@ def build_manifest(
     configs = [
         _config_ref(CLUSTER_DEF_PATH, name="state_cluster", role="cluster_def"),
         _config_ref(BUCKET_DEF_PATH, name="hand_bucket_def", role="other"),
-        _config_ref(BASELINE_PATH, name="baseline_strategy", role="baseline_table"),
+        _config_ref(BASELINE_PATH, name="baseline_strategy", role="strategy_table"),
+        _action_baseline_config_ref(detector),
     ]
     code = CodeProvenance(
         git_commit=git_commit,
@@ -251,6 +268,7 @@ def build_manifest(
                 split="training",
             )
         ],
+        outputs=[_artifact_ref(path) for path in output_paths or []],
     )
 
 

@@ -10,10 +10,14 @@ from poker_ai.leak import (
     ActionLeakRule,
     LeakDetector,
     LeakDetectorConfig,
+    action_baseline_table_from_strategy_table,
+    action_baseline_table_sha256,
+    leaky_fixture_action_baseline_table,
 )
 from poker_ai.observation import ObservationTracker
 from poker_ai.opponent import HiddenStrategyAccessError, StubOpponent
 from poker_core.range_model import Range
+from poker_core.strategy_table import StrategyEntry, StrategyTable
 
 KEY = "dry:IP:facing_all_in"
 
@@ -124,3 +128,65 @@ def test_leak_detector_does_not_read_hidden_strategy():
     assert len(leaks) == 1
     with pytest.raises(HiddenStrategyAccessError):
         _ = opponent.hidden_strategy
+
+
+def test_action_baseline_can_be_derived_from_strategy_table():
+    table = StrategyTable(
+        table_version="solver-table-v1",
+        situation_key=KEY,
+        cluster_def_version="cluster-v1",
+        source="test",
+        entries=(
+            StrategyEntry(combo="AhAd", policy={"CHECK": 0.5, "BET": 0.5}, reach_prob=0.5),
+            StrategyEntry(combo="KhKd", policy={"CHECK": 1.0}, reach_prob=0.5),
+        ),
+    )
+
+    baseline = action_baseline_table_from_strategy_table(table)
+    detector = LeakDetector(
+        baseline,
+        LeakDetectorConfig(
+            min_effective_sample_size=1,
+            min_deviation=0.25,
+            min_confidence=0.5,
+        ),
+    )
+    leaks = detector.detect(_tracker_with_actions(["BET_ALL_IN"]).snapshot())
+
+    assert baseline.table_version == "solver-table-v1-action-baseline"
+    assert action_baseline_table_sha256(baseline) == action_baseline_table_sha256(baseline)
+    assert len(leaks) == 1
+    assert leaks[0].reason_id == "LEAK_R008"
+    assert leaks[0].baseline_rate == pytest.approx(0.25)
+
+
+def test_action_baseline_rejects_call_fold_strategy_table():
+    table = StrategyTable(
+        table_version="solver-table-vs-bet",
+        situation_key="dry:IP:river_vs_bet",
+        cluster_def_version="cluster-v1",
+        source="test",
+        entries=(StrategyEntry(combo="AhAd", policy={"CALL": 0.5, "FOLD": 0.5}, reach_prob=1.0),),
+    )
+
+    with pytest.raises(ValueError, match="CHECK/BET actions"):
+        action_baseline_table_from_strategy_table(table)
+
+
+def test_leaky_fixture_baseline_is_public_and_deterministic():
+    first = leaky_fixture_action_baseline_table()
+    second = leaky_fixture_action_baseline_table()
+    detector = LeakDetector(
+        first,
+        LeakDetectorConfig(
+            min_effective_sample_size=1,
+            min_deviation=0.25,
+            min_confidence=0.5,
+        ),
+    )
+
+    leaks = detector.detect(_tracker_with_actions(["BET_ALL_IN"]).snapshot())
+
+    assert first.table_version == "fixture-action-baseline"
+    assert action_baseline_table_sha256(first) == action_baseline_table_sha256(second)
+    assert [leak.reason_id for leak in leaks] == ["LEAK_R008"]

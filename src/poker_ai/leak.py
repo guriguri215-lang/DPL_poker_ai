@@ -8,17 +8,22 @@ calibration, node-lock exploitation, or any opponent hidden strategy.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from dataclasses import dataclass, field
 
 from poker_core.dpl_schema import DetectedLeak
 from poker_core.reason_ontology import get_ontology
+from poker_core.strategy_table import StrategyTable
 
 from .observation import ActionStats
 
-# Public action groups used by the action-only MVP detector.
+# Public action groups used by the action-only MVP detector and solver artifacts.
 CHECK_ACTIONS: tuple[str, ...] = ("CHECK",)
-BET_ACTIONS: tuple[str, ...] = ("BET_ALL_IN", "BET_33", "BET_75", "RAISE_ALL_IN")
+BET_ACTIONS: tuple[str, ...] = ("BET", "BET_ALL_IN", "BET_33", "BET_75", "RAISE_ALL_IN")
+_POLICY_BET_ACTIONS: tuple[str, ...] = BET_ACTIONS
+_CHECK_BET_POLICY_ACTIONS = frozenset((*CHECK_ACTIONS, *_POLICY_BET_ACTIONS))
 
 
 @dataclass(frozen=True)
@@ -121,6 +126,82 @@ def default_action_baseline_table() -> ActionBaselineTable:
     )
 
 
+def action_baseline_table_from_strategy_table(
+    strategy_table: StrategyTable,
+    *,
+    table_version: str | None = None,
+) -> ActionBaselineTable:
+    """Build a leak-detector action baseline from a StrategyTable aggregate policy."""
+    _validate_check_bet_strategy_table(strategy_table)
+    aggregate = strategy_table.aggregate_policy()
+    check_rate = _policy_rate(aggregate, CHECK_ACTIONS)
+    bet_rate = _policy_rate(aggregate, _POLICY_BET_ACTIONS)
+    return ActionBaselineTable(
+        table_version=table_version or f"{strategy_table.table_version}-action-baseline",
+        rules=(
+            ActionLeakRule(
+                reason_id="LEAK_R007",
+                leak_type="check_back_too_often",
+                action_group=CHECK_ACTIONS,
+                baseline_rate=check_rate,
+                direction="increase_bet_frequency_when_checked_to",
+                situation_overrides={strategy_table.situation_key: check_rate},
+            ),
+            ActionLeakRule(
+                reason_id="LEAK_R008",
+                leak_type="bet_too_often_when_checked_to",
+                action_group=BET_ACTIONS,
+                baseline_rate=bet_rate,
+                direction="decrease_bet_frequency_when_checked_to",
+                situation_overrides={strategy_table.situation_key: bet_rate},
+            ),
+        ),
+    )
+
+
+def leaky_fixture_action_baseline_table(
+    table_version: str = "fixture-action-baseline",
+) -> ActionBaselineTable:
+    """Return a public fixture baseline that makes the jam-all stub look leaky."""
+    return ActionBaselineTable(
+        table_version=table_version,
+        rules=(
+            ActionLeakRule(
+                reason_id="LEAK_R008",
+                leak_type="bet_too_often_when_checked_to",
+                action_group=BET_ACTIONS,
+                baseline_rate=0.0,
+                direction="decrease_bet_frequency_when_checked_to",
+            ),
+        ),
+    )
+
+
+def action_baseline_table_payload(table: ActionBaselineTable) -> dict[str, object]:
+    """Return a stable JSON-ready payload for provenance hashes."""
+    return {
+        "table_version": table.table_version,
+        "rules": [
+            {
+                "reason_id": rule.reason_id,
+                "leak_type": rule.leak_type,
+                "action_group": list(rule.action_group),
+                "baseline_rate": rule.baseline_rate,
+                "direction": rule.direction,
+                "situation_overrides": dict(sorted(rule.situation_overrides.items())),
+            }
+            for rule in table.rules
+        ],
+    }
+
+
+def action_baseline_table_sha256(table: ActionBaselineTable) -> str:
+    """Return the stable SHA-256 digest of an ActionBaselineTable payload."""
+    payload = action_baseline_table_payload(table)
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
 class LeakDetector:
     """Detect public action-rate leaks from ``ObservationTracker`` snapshots."""
 
@@ -204,3 +285,20 @@ def _mvp_confidence(
 def _validate_rate(rate: float, field_name: str) -> None:
     if not math.isfinite(rate) or not 0.0 <= rate <= 1.0:
         raise ValueError(f"{field_name} must be finite and in [0, 1], got {rate}")
+
+
+def _policy_rate(policy: dict[str, float], actions: tuple[str, ...]) -> float:
+    rate = math.fsum(policy.get(action, 0.0) for action in actions)
+    _validate_rate(rate, "policy action rate")
+    return rate
+
+
+def _validate_check_bet_strategy_table(strategy_table: StrategyTable) -> None:
+    for entry in strategy_table.entries:
+        unsupported = sorted(set(entry.policy) - _CHECK_BET_POLICY_ACTIONS)
+        if unsupported:
+            raise ValueError(
+                "StrategyTable must use only CHECK/BET actions to build an "
+                f"ActionBaselineTable; combo {entry.combo!r} has unsupported "
+                f"actions {unsupported!r}"
+            )

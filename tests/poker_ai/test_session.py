@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import math
+from pathlib import Path
 
 from poker_ai.baseline_strategy import baseline_table_version
 from poker_ai.exploit import RuleExploitResult
@@ -13,6 +15,7 @@ from poker_ai.leak import (
     ActionLeakRule,
     LeakDetector,
     LeakDetectorConfig,
+    leaky_fixture_action_baseline_table,
 )
 from poker_ai.session import (
     EV_SOURCE,
@@ -105,6 +108,10 @@ def test_custom_leak_baseline_version_is_stamped_on_manifest_and_logs():
 
     assert result.logs[0].baseline_table_version == "fixture-action-baseline"
     assert result.manifest.versions.baseline_table_version == "fixture-action-baseline"
+    baseline_configs = [c for c in result.manifest.configs if c.name == "action_baseline_table"]
+    assert len(baseline_configs) == 1
+    assert baseline_configs[0].path == "inline:fixture-action-baseline"
+    assert len(baseline_configs[0].sha256) == 64
 
 
 def _positive_fixture_detector() -> LeakDetector:
@@ -177,7 +184,7 @@ def test_manifest_is_valid_and_pins_versions_and_configs():
     assert manifest.versions.baseline_table_version == LeakDetector().baseline_table_version
     # Every referenced config carries a content hash (auditable provenance).
     roles = {c.role for c in manifest.configs}
-    assert {"cluster_def", "baseline_table", "other"} <= roles
+    assert {"cluster_def", "strategy_table", "baseline_table", "other"} <= roles
     for config in manifest.configs:
         assert len(config.sha256) == 64
     assert manifest.opponents[0].opponent_id == "stub_jam_all"
@@ -201,3 +208,51 @@ def test_run_session_writes_and_reloads(tmp_path):
 
     reloaded = RunManifest.model_validate(json.loads(manifest_path.read_text(encoding="utf-8")))
     assert reloaded.run_id == result.session_id
+
+
+def test_leaky_fixture_cli_smoke_writes_detected_leaks_and_mix(tmp_path, capsys):
+    cli = _load_cli_module()
+
+    rc = cli.main(
+        [
+            "--seed",
+            "20260704",
+            "--hands",
+            "3",
+            "--leaky-fixture",
+            "--out-dir",
+            str(tmp_path),
+        ]
+    )
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "detected_leaks=3" in out
+    assert "mixed_decisions=" in out
+    jsonl_path = tmp_path / "S20260704.dpl.jsonl"
+    manifest_path = tmp_path / "S20260704.manifest.json"
+    logs = [
+        DecisionProvenanceLog.model_validate(json.loads(line))
+        for line in jsonl_path.read_text(encoding="utf-8").splitlines()
+    ]
+    manifest = RunManifest.model_validate(json.loads(manifest_path.read_text(encoding="utf-8")))
+
+    assert len(logs) == 3
+    assert all(log.detected_leaks for log in logs)
+    assert all(
+        log.baseline_table_version == leaky_fixture_action_baseline_table().table_version
+        for log in logs
+    )
+    assert any(log.safety_alpha > 0.0 and log.mix_reasons for log in logs)
+    assert any(log.exploit_policy == {"CALL": 1.0} for log in logs)
+    assert manifest.versions.baseline_table_version == "fixture-action-baseline"
+
+
+def _load_cli_module():
+    path = Path(__file__).resolve().parents[2] / "cli" / "run_session.py"
+    spec = importlib.util.spec_from_file_location("run_session_cli", path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
