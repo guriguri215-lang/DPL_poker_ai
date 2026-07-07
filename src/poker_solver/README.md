@@ -28,10 +28,12 @@ two-player zero-sum (`u0 + u1 = 0` at every leaf).
 the vanilla CFR core, CFR+, independent convergence metrics, frozen river scenario
 solves, and StrategyTable baseline artifact generation from solved hero phases.
 
-**Phase 4 node-lock work in progress.** `nodelock.py` validates HARD/SOFT/
+**Phase 4 node-lock solver (implemented).** `nodelock.py` validates HARD/SOFT/
 DISABLE lock configs, projects aggregate river action targets into per-combo
 policies with `baseline_scaled` as the default allocation, records EV deltas, and
 can keep unlocked infosets fixed to the baseline or re-run CFR+ with hard-locked
 infosets fixed. Resolve runs also record exact opponent best-response worst-case
-metrics for the fixed hero policy. SOFT rules are defined for provenance but are
-rejected until their semantics are implemented in a later Phase 4 task.
+metrics for the fixed hero policy. Sensitivity reports sweep target frequencies
+and compare `uniform` against `baseline_scaled` EV deltas as required by
+ADR-0002. SOFT rules are defined for provenance but are rejected until their
+semantics are implemented in a later task.

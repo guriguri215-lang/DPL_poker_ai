@@ -4,15 +4,16 @@ This module keeps the first node-lock layer narrow: it validates lock requests,
 projects aggregate action targets into per-combo policies, and can either keep
 unlocked infosets at the baseline profile or re-run CFR+ with hard-locked
 infosets fixed. Mode 2 records the opponent's exact best-response worst-case
-value for resolve runs. It does not implement sensitivity analysis or
-explanation generation.
+value for resolve runs. Sensitivity analysis records exact EV deltas across
+target-frequency and combo-allocation sweeps without touching explanation
+generation.
 """
 
 from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 from poker_ai.scenario import Scenario
@@ -165,6 +166,49 @@ class RiverNodeLockSolveResult:
     unlocked_policy_mode: UnlockedPolicyMode
 
 
+@dataclass(frozen=True, slots=True)
+class NodeLockSensitivityPoint:
+    """One exact EV sample in a node-lock target/allocation sweep."""
+
+    target_frequency: float
+    combo_allocation: ComboAllocation
+    achieved_frequency: float
+    base_game_value: float
+    game_value: float
+    ev_delta: float
+    exploitability: float
+    worst_case_penalty: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class NodeLockAllocationComparison:
+    """EV gap between uniform and baseline-scaled allocation at one target."""
+
+    target_frequency: float
+    baseline_scaled_game_value: float
+    uniform_game_value: float
+    uniform_minus_baseline_scaled_game_value: float
+    baseline_scaled_ev_delta: float
+    uniform_ev_delta: float
+    uniform_minus_baseline_scaled_ev_delta: float
+
+
+@dataclass(frozen=True, slots=True)
+class NodeLockSensitivityReport:
+    """Node-lock sensitivity sweep with ADR-0002 allocation EV comparisons."""
+
+    scenario_id: str
+    action: str
+    actor: str | None
+    phase: str | None
+    infoset: str | None
+    lock_mode: LockMode
+    unlocked_policy_mode: UnlockedPolicyMode
+    base_game_value: float
+    points: tuple[NodeLockSensitivityPoint, ...]
+    allocation_comparisons: tuple[NodeLockAllocationComparison, ...]
+
+
 def apply_node_locks(
     game: Game,
     baseline_profile: StrategyProfile,
@@ -228,6 +272,122 @@ def solve_nodelocked_river_scenario(
         checkpoints=checkpoints,
         average_delay=average_delay,
     )
+    return _nodelocked_result_from_base(
+        scenario,
+        bet_fraction=bet_fraction,
+        iterations=iterations,
+        base_result=base_result,
+        config=config,
+        average_delay=average_delay,
+    )
+
+
+def analyze_nodelock_sensitivity(
+    scenario: Scenario,
+    *,
+    bet_fraction: float,
+    iterations: int,
+    rule: NodeLockRule,
+    target_frequencies: tuple[float, ...],
+    combo_allocations: tuple[ComboAllocation, ...] = COMBO_ALLOCATIONS,
+    lock_mode: LockMode = "HARD",
+    unlocked_policy_mode: UnlockedPolicyMode = "fix_to_baseline",
+    checkpoints: tuple[int, ...] = (),
+    average_delay: int = 0,
+) -> NodeLockSensitivityReport:
+    """Sweep one node-lock rule across targets and allocation rules."""
+    target_frequencies = tuple(target_frequencies)
+    combo_allocations = tuple(combo_allocations)
+    if not target_frequencies:
+        raise ValueError("target_frequencies must not be empty")
+    if len(set(target_frequencies)) != len(target_frequencies):
+        raise ValueError("target_frequencies must be unique")
+    if not combo_allocations:
+        raise ValueError("combo_allocations must not be empty")
+    if len(set(combo_allocations)) != len(combo_allocations):
+        raise ValueError("combo_allocations must be unique")
+    if lock_mode != "HARD":
+        raise NotImplementedError("node-lock sensitivity currently requires HARD locks")
+    if unlocked_policy_mode == "soft_resolve":
+        raise NotImplementedError("soft_resolve is reserved for a later Phase 4 task")
+    for target_frequency in target_frequencies:
+        _validate_probability(target_frequency, "target_frequency")
+    for combo_allocation in combo_allocations:
+        if combo_allocation not in COMBO_ALLOCATIONS:
+            raise ValueError(f"unknown combo_allocation {combo_allocation!r}")
+
+    base_result = solve_frozen_river_scenario(
+        scenario,
+        bet_fraction=bet_fraction,
+        iterations=iterations,
+        checkpoints=checkpoints,
+        average_delay=average_delay,
+    )
+    points: list[NodeLockSensitivityPoint] = []
+    by_key: dict[tuple[float, ComboAllocation], NodeLockSensitivityPoint] = {}
+    for target_frequency in target_frequencies:
+        for combo_allocation in combo_allocations:
+            sample_rule = replace(
+                rule,
+                target_frequency=target_frequency,
+                combo_allocation=combo_allocation,
+            )
+            result = _nodelocked_result_from_base(
+                scenario,
+                bet_fraction=bet_fraction,
+                iterations=iterations,
+                base_result=base_result,
+                config=NodeLockConfig(
+                    rules=(sample_rule,),
+                    lock_mode=lock_mode,
+                    unlocked_policy_mode=unlocked_policy_mode,
+                ),
+                average_delay=average_delay,
+            )
+            if len(result.applied_locks) != 1:
+                raise RuntimeError("sensitivity samples must apply exactly one lock")
+            applied = result.applied_locks[0]
+            worst_case_penalty = (
+                None
+                if result.metrics.worst_case is None
+                else result.metrics.worst_case.worst_case_penalty
+            )
+            point = NodeLockSensitivityPoint(
+                target_frequency=target_frequency,
+                combo_allocation=combo_allocation,
+                achieved_frequency=applied.achieved_frequency,
+                base_game_value=result.metrics.base_game_value,
+                game_value=result.metrics.game_value,
+                ev_delta=result.metrics.ev_delta,
+                exploitability=result.metrics.exploitability,
+                worst_case_penalty=worst_case_penalty,
+            )
+            points.append(point)
+            by_key[(target_frequency, combo_allocation)] = point
+
+    return NodeLockSensitivityReport(
+        scenario_id=scenario.scenario_id,
+        action=rule.action,
+        actor=rule.actor,
+        phase=rule.phase,
+        infoset=rule.infoset,
+        lock_mode=lock_mode,
+        unlocked_policy_mode=unlocked_policy_mode,
+        base_game_value=base_result.metrics.game_value,
+        points=tuple(points),
+        allocation_comparisons=_allocation_comparisons(target_frequencies, by_key),
+    )
+
+
+def _nodelocked_result_from_base(
+    scenario: Scenario,
+    *,
+    bet_fraction: float,
+    iterations: int,
+    base_result: RiverScenarioSolveResult,
+    config: NodeLockConfig,
+    average_delay: int,
+) -> RiverNodeLockSolveResult:
     game, hero_prefix = _river_game_for_scenario(scenario, bet_fraction=bet_fraction)
     application = apply_node_locks(
         game,
@@ -261,6 +421,30 @@ def solve_nodelocked_river_scenario(
         lock_mode=application.lock_mode,
         unlocked_policy_mode=application.unlocked_policy_mode,
     )
+
+
+def _allocation_comparisons(
+    target_frequencies: tuple[float, ...],
+    points: Mapping[tuple[float, ComboAllocation], NodeLockSensitivityPoint],
+) -> tuple[NodeLockAllocationComparison, ...]:
+    comparisons: list[NodeLockAllocationComparison] = []
+    for target_frequency in target_frequencies:
+        baseline = points.get((target_frequency, "baseline_scaled"))
+        uniform = points.get((target_frequency, "uniform"))
+        if baseline is None or uniform is None:
+            continue
+        comparisons.append(
+            NodeLockAllocationComparison(
+                target_frequency=target_frequency,
+                baseline_scaled_game_value=baseline.game_value,
+                uniform_game_value=uniform.game_value,
+                uniform_minus_baseline_scaled_game_value=(uniform.game_value - baseline.game_value),
+                baseline_scaled_ev_delta=baseline.ev_delta,
+                uniform_ev_delta=uniform.ev_delta,
+                uniform_minus_baseline_scaled_ev_delta=uniform.ev_delta - baseline.ev_delta,
+            )
+        )
+    return tuple(comparisons)
 
 
 def river_infoset_reach_weights(game: Game, profile: StrategyProfile) -> dict[str, float]:
