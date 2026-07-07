@@ -14,9 +14,10 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
-from poker_ai.scenario import Scenario
+if TYPE_CHECKING:
+    from poker_ai.scenario import Scenario
 
 from .best_response import best_response_value, exploitability
 from .cfr_plus import CFRPlus

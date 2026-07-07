@@ -5,8 +5,8 @@ deterministically, the stub opponent acts, public action observations feed an
 action-only LeakDetector, Hero looks up its base policy by situation and
 ``hand_bucket`` (ADR-0005), optional rule exploitation feeds the SafetyMixer,
 an action is sampled, and the decision is assembled into a frozen Decision
-Provenance Log with an exact ``solver_exact`` EV (ADR-0008). Node-lock exploitation
-is a later phase.
+Provenance Log with an exact ``solver_exact`` EV (ADR-0008). Phase 5 adds an
+optional node-lock solver exploit provider behind the same SafetyMixer contract.
 """
 
 from __future__ import annotations
@@ -28,7 +28,15 @@ from .decision import (
     call_fold_action_evs,
     policy_ev,
 )
-from .exploit import RuleExploitConfig, RuleExploitProvider, RuleExploitResult
+from .exploit import (
+    ExploitProvider,
+    NodelockExploitConfig,
+    NodelockExploitProvider,
+    RuleExploitConfig,
+    RuleExploitProvider,
+    RuleExploitResult,
+    nodelock_config_from_leaks,
+)
 from .hand_bucket import (
     BUCKET_NAMES_WEAK_TO_STRONG,
     BucketDefinition,
@@ -77,10 +85,13 @@ __all__ = [
     "BaselineStrategy",
     "BucketDefinition",
     "DecisionResult",
+    "ExploitProvider",
     "HeroAgent",
     "HiddenStrategyAccessError",
     "LeakDetector",
     "LeakDetectorConfig",
+    "NodelockExploitConfig",
+    "NodelockExploitProvider",
     "Observation",
     "ObservationTracker",
     "OpponentAction",
@@ -107,6 +118,7 @@ __all__ = [
     "legal_actions",
     "load_baseline_strategy",
     "load_bucket_definition",
+    "nodelock_config_from_leaks",
     "policy_ev",
     "run_session",
     "safety_mix",
