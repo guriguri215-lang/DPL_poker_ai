@@ -35,7 +35,7 @@ from poker_core.state_cluster import classify_board, cluster_def_version
 
 from .actions import legal_actions
 from .baseline_strategy import FACING_ALL_IN, BaselineStrategy, build_situation_key
-from .exploit import RuleExploitProvider
+from .exploit import ExploitProvider, RuleExploitProvider
 from .hand_bucket import BucketDefinition, classify_combo
 from .mixer import ActionSelector, safety_mix
 
@@ -84,6 +84,7 @@ class DecisionResult:
     trigger_reasons: list[str]
     mix_reasons: list[str]
     exploit_source: str
+    solver_result_id: str | None
 
 
 def call_fold_action_evs(
@@ -111,7 +112,7 @@ class HeroAgent:
         bucket_def: BucketDefinition,
         *,
         safety_alpha: float = 0.0,
-        exploit_provider: RuleExploitProvider | None = None,
+        exploit_provider: ExploitProvider | None = None,
     ) -> None:
         if not math.isfinite(safety_alpha) or not 0.0 <= safety_alpha <= 1.0:
             raise ValueError(f"safety_alpha must be finite and in [0, 1], got {safety_alpha}")
@@ -152,6 +153,7 @@ class HeroAgent:
             detected_leaks=detected_leaks if self.safety_alpha > 0.0 else (),
             legal_actions=legal,
             action_ev=action_ev,
+            observation=obs,
         )
         exploit_policy = exploit.policy
         final_policy = safety_mix(base_policy, exploit_policy, self.safety_alpha)
@@ -183,7 +185,8 @@ class HeroAgent:
             applied_leak_reason_ids=list(exploit.applied_leak_reason_ids) if mix_reasons else [],
             trigger_reasons=trigger_reasons,
             mix_reasons=mix_reasons,
-            exploit_source=NO_EXPLOIT_SOURCE,
+            exploit_source=exploit.exploit_source if mix_reasons else NO_EXPLOIT_SOURCE,
+            solver_result_id=exploit.solver_result_id if mix_reasons else None,
         )
 
 

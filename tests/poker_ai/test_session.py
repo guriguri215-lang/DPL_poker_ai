@@ -102,6 +102,26 @@ def test_positive_alpha_writes_rule_exploit_reasons_closed_world():
     DecisionProvenanceLog.model_validate(log.model_dump(mode="json"))
 
 
+def test_positive_alpha_writes_nodelock_solver_provenance_to_dpl():
+    result = run_session(
+        20260704,
+        1,
+        leak_detector=_positive_fixture_detector(),
+        safety_alpha=1.0,
+        exploit_provider=_StaticNodelockProvider(),
+    )
+    log = result.logs[0]
+
+    assert log.detected_leaks
+    assert log.exploit_source == "nodelock_solver"
+    assert log.solver_result_id is not None
+    assert "allocation=baseline_scaled" in log.solver_result_id
+    assert "lock_mode=HARD" in log.solver_result_id
+    assert "unlocked_policy_mode=fix_to_baseline" in log.solver_result_id
+    assert log.allowed_reason_ids == ["LEAK_R008", "TRG_R001", "TRG_R002", "MIX_R001"]
+    DecisionProvenanceLog.model_validate(log.model_dump(mode="json"))
+
+
 def test_custom_leak_baseline_version_is_stamped_on_manifest_and_logs():
     leak_detector = _positive_fixture_detector()
     result = run_session(20260704, 1, leak_detector=leak_detector)
@@ -142,6 +162,20 @@ class _StaticExploitProvider:
             policy={"CALL": 1.0},
             applied_leak_reason_ids=("LEAK_R008",),
             trigger_reasons=("TRG_R001", "TRG_R002"),
+        )
+
+
+class _StaticNodelockProvider:
+    def build(self, **_kwargs) -> RuleExploitResult:
+        return RuleExploitResult(
+            policy={"CALL": 1.0},
+            applied_leak_reason_ids=("LEAK_R008",),
+            trigger_reasons=("TRG_R001", "TRG_R002"),
+            exploit_source="nodelock_solver",
+            solver_result_id=(
+                "nodelock_solver:v1:allocation=baseline_scaled:lock_mode=HARD:"
+                "unlocked_policy_mode=fix_to_baseline:digest=test"
+            ),
         )
 
 

@@ -47,7 +47,7 @@ from .baseline_strategy import (
     get_baseline_strategy,
 )
 from .decision import HeroAgent, Observation
-from .exploit import RuleExploitProvider
+from .exploit import ExploitProvider
 from .hand_bucket import BUCKET_DEF_PATH, bucket_def_version, get_bucket_definition
 from .leak import LeakDetector, action_baseline_table_sha256
 from .observation import ObservationTracker
@@ -83,7 +83,7 @@ def _build_dpl(
     tracker: ObservationTracker,
     leak_detector: LeakDetector,
     safety_alpha: float,
-    exploit_provider: RuleExploitProvider | None,
+    exploit_provider: ExploitProvider | None,
 ) -> DecisionProvenanceLog:
     """Run one decision and assemble its validated DPL."""
     opponent = StubOpponent(
@@ -164,7 +164,7 @@ def _build_dpl(
         mix_reasons=result.mix_reasons,
         exploit_policy=result.exploit_policy,
         exploit_source=result.exploit_source,
-        solver_result_id=None,
+        solver_result_id=result.solver_result_id,
         safety_alpha=safety_alpha,
         final_policy=result.final_policy,
         selected_action=result.selected_action,
@@ -181,7 +181,7 @@ def iter_session_logs(
     *,
     leak_detector: LeakDetector | None = None,
     safety_alpha: float = 0.0,
-    exploit_provider: RuleExploitProvider | None = None,
+    exploit_provider: ExploitProvider | None = None,
 ) -> Iterator[DecisionProvenanceLog]:
     """Yield one validated DPL per generated hand (deterministic for a seed)."""
     session_id = _session_id_for(seed)
@@ -279,7 +279,7 @@ def run_session(
     git_commit: str = "unknown",
     leak_detector: LeakDetector | None = None,
     safety_alpha: float = 0.0,
-    exploit_provider: RuleExploitProvider | None = None,
+    exploit_provider: ExploitProvider | None = None,
 ) -> SessionResult:
     """Run a full session in memory: validated DPLs plus the manifest."""
     detector = leak_detector or LeakDetector()
