@@ -228,7 +228,7 @@ def apply_node_locks(
     if not projected.applied_locks or config.unlocked_policy_mode == "fix_to_baseline":
         return projected
     if config.unlocked_policy_mode == "soft_resolve":
-        raise NotImplementedError("soft_resolve is reserved for a later Phase 4 task")
+        raise NotImplementedError("soft_resolve is not implemented; requires a new ADR")
     if config.lock_mode != "HARD":
         raise NotImplementedError("resolve currently requires HARD node locks")
 
@@ -309,7 +309,7 @@ def analyze_nodelock_sensitivity(
     if lock_mode != "HARD":
         raise NotImplementedError("node-lock sensitivity currently requires HARD locks")
     if unlocked_policy_mode == "soft_resolve":
-        raise NotImplementedError("soft_resolve is reserved for a later Phase 4 task")
+        raise NotImplementedError("soft_resolve is not implemented; requires a new ADR")
     for target_frequency in target_frequencies:
         _validate_probability(target_frequency, "target_frequency")
     for combo_allocation in combo_allocations:
@@ -470,7 +470,7 @@ def _project_node_locks(
             unlocked_policy_mode=config.unlocked_policy_mode,
         )
     if config.lock_mode == "SOFT":
-        raise NotImplementedError("SOFT node locks are reserved for a later Phase 4 task")
+        raise NotImplementedError("SOFT node locks are not implemented; require a new ADR")
 
     profile = _copy_profile(baseline_profile)
     applied_locks: list[AppliedNodeLock] = []
