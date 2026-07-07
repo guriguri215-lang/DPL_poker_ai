@@ -35,6 +35,19 @@ def _scenario(position: str = "OOP") -> Scenario:
     )
 
 
+def _overfold_scenario() -> Scenario:
+    return Scenario(
+        scenario_id="NL-OVERFOLD",
+        board=("8c", "Qc", "3s", "Jc", "Jd"),
+        position="OOP",
+        pot=8.0,
+        effective_stack=10.0,
+        hero_combo="Qs7d",
+        hero_range={"Qs7d": 1.0, "Jh5c": 1.0, "Ah6h": 1.0},
+        opponent_range={"Js7c": 1.0, "Kh5d": 1.0, "3h2s": 1.0},
+    )
+
+
 def _river_game():
     scenario = _scenario("OOP")
     return _river_game_for_scenario(scenario)
@@ -90,6 +103,14 @@ def _weighted_frequency(profile, infosets, action, weights):
     total = math.fsum(weights[infoset] for infoset in infosets)
     weighted_action = math.fsum(weights[infoset] * profile[infoset][action] for infoset in infosets)
     return weighted_action / total
+
+
+def _river_infosets(game, *, actor, phase):
+    return tuple(
+        infoset
+        for infoset in game.infosets
+        if infoset.startswith(f"{actor}:") and infoset.endswith(f":{phase}")
+    )
 
 
 def test_empty_nodelock_config_matches_frozen_river_solve():
@@ -451,6 +472,57 @@ def test_resolve_result_records_mode2_opponent_best_response_worst_case():
     assert worst_case.worst_case_penalty >= -1e-12
 
 
+def test_resolve_overfold_lock_increases_hero_start_bet_frequency_and_ev():
+    scenario = _overfold_scenario()
+    game = _river_game_for_scenario(scenario)
+    base = solve_frozen_river_scenario(scenario, bet_fraction=0.5, iterations=20)
+    base_weights = river_infoset_reach_weights(game, base.strategy)
+    hero_start_infosets = _river_infosets(game, actor="OOP", phase="start")
+    opponent_vs_bet_infosets = _river_infosets(game, actor="IP", phase="vs_bet")
+    base_bet_frequency = _weighted_frequency(
+        base.strategy, hero_start_infosets, "BET", base_weights
+    )
+    base_fold_frequency = _weighted_frequency(
+        base.strategy, opponent_vs_bet_infosets, "FOLD", base_weights
+    )
+    target_frequencies = (0.5, 0.65, 0.75)
+
+    ev_deltas = []
+    bet_frequencies = []
+    for target_frequency in target_frequencies:
+        assert target_frequency > base_fold_frequency
+        result = solve_nodelocked_river_scenario(
+            scenario,
+            bet_fraction=0.5,
+            iterations=20,
+            nodelock_config=NodeLockConfig(
+                unlocked_policy_mode="resolve",
+                rules=(
+                    NodeLockRule(
+                        actor="IP",
+                        phase="vs_bet",
+                        action="FOLD",
+                        target_frequency=target_frequency,
+                    ),
+                ),
+            ),
+        )
+        result_weights = river_infoset_reach_weights(game, result.strategy)
+        bet_frequency = _weighted_frequency(
+            result.strategy, hero_start_infosets, "BET", result_weights
+        )
+
+        assert result.unlocked_policy_mode == "resolve"
+        assert result.applied_locks[0].achieved_frequency == pytest.approx(target_frequency)
+        assert bet_frequency > base_bet_frequency
+        assert result.metrics.ev_delta > 0.0
+        ev_deltas.append(result.metrics.ev_delta)
+        bet_frequencies.append(bet_frequency)
+
+    assert all(later > earlier for earlier, later in zip(ev_deltas, ev_deltas[1:], strict=False))
+    assert min(bet_frequencies) > base_bet_frequency
+
+
 def test_resolve_mode2_worst_case_uses_hero_sign_for_ip_scenarios():
     scenario = _scenario("IP")
     result = solve_nodelocked_river_scenario(
@@ -556,6 +628,34 @@ def test_nodelock_sensitivity_records_target_sweep_and_allocation_gap():
     )
     assert all(
         comparison.uniform_minus_baseline_scaled_ev_delta < 0.0
+        for comparison in report.allocation_comparisons
+    )
+
+
+def test_opponent_overfold_sensitivity_uniform_allocation_inflates_ev_delta():
+    scenario = _overfold_scenario()
+    report = analyze_nodelock_sensitivity(
+        scenario,
+        bet_fraction=0.5,
+        iterations=20,
+        rule=NodeLockRule(
+            actor="IP",
+            phase="vs_bet",
+            action="FOLD",
+            target_frequency=0.0,
+        ),
+        target_frequencies=(0.5, 0.65, 0.75),
+        unlocked_policy_mode="resolve",
+    )
+
+    assert report.scenario_id == scenario.scenario_id
+    assert report.action == "FOLD"
+    assert report.actor == "IP"
+    assert report.phase == "vs_bet"
+    assert report.unlocked_policy_mode == "resolve"
+    assert len(report.allocation_comparisons) == 3
+    assert all(
+        comparison.uniform_minus_baseline_scaled_ev_delta > 0.0
         for comparison in report.allocation_comparisons
     )
 
