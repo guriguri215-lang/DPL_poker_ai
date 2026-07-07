@@ -7,7 +7,8 @@ code (ADR-0017 sec.4). P3-2 adds full-tree vanilla CFR on top of those measuring
 instruments. P3-3 adds CFR+, independent convergence metrics, and an in-memory
 frozen-river-scenario solve entry point. P3-4 adds StrategyTable baseline artifact
 generation from solved river phases. Phase 4 adds node-lock configuration,
-river application helpers, EV deltas, and resolve-mode worst-case metrics.
+river application helpers, EV deltas, resolve-mode worst-case metrics, and
+sensitivity analysis.
 
 Public API::
 
@@ -22,7 +23,8 @@ Public API::
         solve_frozen_river_scenario,
         build_baseline_strategy_table, build_baseline_strategy_tables,
         write_baseline_strategy_tables,
-        NodeLockConfig, NodeLockRule, solve_nodelocked_river_scenario,
+        NodeLockConfig, NodeLockRule, analyze_nodelock_sensitivity,
+        solve_nodelocked_river_scenario,
     )
 """
 
@@ -46,13 +48,17 @@ from .evaluate import expected_value, expected_value_by_leaves, player_values
 from .game import Chance, Decision, Game, Node, Terminal
 from .nodelock import (
     AppliedNodeLock,
+    NodeLockAllocationComparison,
     NodeLockApplication,
     NodeLockComboPolicy,
     NodeLockConfig,
     NodeLockMetrics,
     NodeLockRule,
+    NodeLockSensitivityPoint,
+    NodeLockSensitivityReport,
     NodeLockWorstCaseMetrics,
     RiverNodeLockSolveResult,
+    analyze_nodelock_sensitivity,
     apply_node_locks,
     river_infoset_reach_weights,
     solve_nodelocked_river_scenario,
@@ -86,10 +92,13 @@ __all__ = [
     "Node",
     "AppliedNodeLock",
     "NodeLockApplication",
+    "NodeLockAllocationComparison",
     "NodeLockComboPolicy",
     "NodeLockConfig",
     "NodeLockMetrics",
     "NodeLockRule",
+    "NodeLockSensitivityPoint",
+    "NodeLockSensitivityReport",
     "NodeLockWorstCaseMetrics",
     "RiverNodeLockSolveResult",
     "StrategyProfile",
@@ -102,6 +111,7 @@ __all__ = [
     "expected_value",
     "expected_value_by_leaves",
     "exploitability",
+    "analyze_nodelock_sensitivity",
     "apply_node_locks",
     "leaf_reaches",
     "nash_conv",

@@ -12,6 +12,7 @@ from poker_solver.evaluate import expected_value
 from poker_solver.nodelock import (
     NodeLockConfig,
     NodeLockRule,
+    analyze_nodelock_sensitivity,
     apply_node_locks,
     river_infoset_reach_weights,
     solve_nodelocked_river_scenario,
@@ -477,3 +478,132 @@ def test_resolve_mode2_worst_case_uses_hero_sign_for_ip_scenarios():
         -result.metrics.game_value - worst_case.hero_worst_case_value
     )
     assert worst_case.worst_case_penalty >= -1e-12
+
+
+def test_nodelock_sensitivity_records_target_sweep_and_allocation_gap():
+    scenario = _scenario("OOP")
+    rule = NodeLockRule(actor="OOP", phase="start", action="BET", target_frequency=0.0)
+
+    report = analyze_nodelock_sensitivity(
+        scenario,
+        bet_fraction=0.5,
+        iterations=20,
+        rule=rule,
+        target_frequencies=(0.25, 0.5, 0.75),
+    )
+
+    assert report.scenario_id == scenario.scenario_id
+    assert report.action == "BET"
+    assert report.actor == "OOP"
+    assert report.phase == "start"
+    assert report.infoset is None
+    assert report.lock_mode == "HARD"
+    assert report.unlocked_policy_mode == "fix_to_baseline"
+    assert len(report.points) == 6
+    assert len(report.allocation_comparisons) == 3
+    for point in report.points:
+        assert point.base_game_value == pytest.approx(report.base_game_value)
+        assert point.achieved_frequency == pytest.approx(point.target_frequency)
+        assert point.worst_case_penalty is None
+
+    baseline_points = [
+        point for point in report.points if point.combo_allocation == "baseline_scaled"
+    ]
+    uniform_points = [point for point in report.points if point.combo_allocation == "uniform"]
+    assert [point.target_frequency for point in baseline_points] == [0.25, 0.5, 0.75]
+    assert [point.ev_delta for point in baseline_points] == sorted(
+        point.ev_delta for point in baseline_points
+    )
+    assert [point.ev_delta for point in uniform_points] == sorted(
+        point.ev_delta for point in uniform_points
+    )
+
+    direct_uniform = solve_nodelocked_river_scenario(
+        scenario,
+        bet_fraction=0.5,
+        iterations=20,
+        nodelock_config=NodeLockConfig(
+            rules=(
+                NodeLockRule(
+                    actor="OOP",
+                    phase="start",
+                    action="BET",
+                    target_frequency=0.5,
+                    combo_allocation="uniform",
+                ),
+            )
+        ),
+    )
+    uniform_midpoint = next(
+        point
+        for point in report.points
+        if point.target_frequency == 0.5 and point.combo_allocation == "uniform"
+    )
+    comparison_midpoint = next(
+        comparison
+        for comparison in report.allocation_comparisons
+        if comparison.target_frequency == 0.5
+    )
+
+    assert uniform_midpoint.game_value == pytest.approx(direct_uniform.metrics.game_value)
+    assert uniform_midpoint.ev_delta == pytest.approx(direct_uniform.metrics.ev_delta)
+    assert comparison_midpoint.uniform_ev_delta == pytest.approx(uniform_midpoint.ev_delta)
+    assert comparison_midpoint.uniform_minus_baseline_scaled_ev_delta == pytest.approx(
+        comparison_midpoint.uniform_ev_delta - comparison_midpoint.baseline_scaled_ev_delta
+    )
+    assert comparison_midpoint.uniform_minus_baseline_scaled_game_value == pytest.approx(
+        comparison_midpoint.uniform_game_value - comparison_midpoint.baseline_scaled_game_value
+    )
+    assert all(
+        comparison.uniform_minus_baseline_scaled_ev_delta < 0.0
+        for comparison in report.allocation_comparisons
+    )
+
+
+def test_nodelock_sensitivity_rejects_invalid_sweeps():
+    scenario = _scenario("OOP")
+    rule = NodeLockRule(actor="OOP", phase="start", action="BET", target_frequency=0.0)
+
+    with pytest.raises(ValueError, match="target_frequencies"):
+        analyze_nodelock_sensitivity(
+            scenario,
+            bet_fraction=0.5,
+            iterations=1,
+            rule=rule,
+            target_frequencies=(),
+        )
+    with pytest.raises(ValueError, match="unique"):
+        analyze_nodelock_sensitivity(
+            scenario,
+            bet_fraction=0.5,
+            iterations=1,
+            rule=rule,
+            target_frequencies=(0.5, 0.5),
+        )
+    with pytest.raises(ValueError, match="combo_allocations"):
+        analyze_nodelock_sensitivity(
+            scenario,
+            bet_fraction=0.5,
+            iterations=1,
+            rule=rule,
+            target_frequencies=(0.5,),
+            combo_allocations=(),
+        )
+    with pytest.raises(ValueError, match="unknown combo_allocation"):
+        analyze_nodelock_sensitivity(
+            scenario,
+            bet_fraction=0.5,
+            iterations=1,
+            rule=rule,
+            target_frequencies=(0.5,),
+            combo_allocations=("bad",),  # type: ignore[arg-type]
+        )
+    with pytest.raises(NotImplementedError, match="HARD"):
+        analyze_nodelock_sensitivity(
+            scenario,
+            bet_fraction=0.5,
+            iterations=1,
+            rule=rule,
+            target_frequencies=(0.5,),
+            lock_mode="DISABLE",
+        )
