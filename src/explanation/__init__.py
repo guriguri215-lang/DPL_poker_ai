@@ -1,4 +1,4 @@
-"""Explanation contracts and deterministic template generation.
+"""Explanation contracts, deterministic template generation and verification.
 
 Phase 5 starts with a structured explanation object and an LLM-free template
 renderer. The DPL remains the source of truth; explanations cite DPL and optional
@@ -21,6 +21,13 @@ from .contract import (
     SolverDiagnostics,
 )
 from .template import generate_template_explanation
+from .verifier import (
+    ExplanationVerificationError,
+    VerificationIssue,
+    VerificationResult,
+    verify_explanation,
+    verify_explanation_or_raise,
+)
 
 __all__ = [
     "EXPLANATION_SCHEMA_VERSION",
@@ -35,5 +42,10 @@ __all__ = [
     "ReasonCitation",
     "SamplingReasonSet",
     "SolverDiagnostics",
+    "ExplanationVerificationError",
+    "VerificationIssue",
+    "VerificationResult",
     "generate_template_explanation",
+    "verify_explanation",
+    "verify_explanation_or_raise",
 ]
