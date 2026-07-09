@@ -12,6 +12,12 @@ Phase 5 keeps generation deterministic and LLM-free:
   EV values only through `dpl.ev_for_explanation()`, so non-`solver_exact` EVs do
   not reach the explanation. Optional solver diagnostics are stored separately
   from the decision-level EV delta.
+- `verifier.py` independently audits an `ExplanationDocument` against the DPL
+  and optional solver diagnostics. It does not import the generator; it resolves
+  source paths, allowed derivations, reason citations, rendered text and the
+  closed set of allowed numeric claim names with separate logic. Surface numbers
+  are checked against verifier-side display rounding for percentages and EV
+  units. Detected leak numeric claims are limited to whitelisted leak reasons,
+  and solver diagnostics input requires matching explanation-side claims.
 
-The independent Explanation Verifier and any future LLM surface layer are later
-Phase 5/8 tasks.
+Any future LLM surface layer remains a later Phase 8 task.
