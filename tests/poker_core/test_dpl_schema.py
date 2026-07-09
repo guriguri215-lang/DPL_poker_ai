@@ -75,6 +75,90 @@ def test_selected_action_needs_positive_probability(valid_dpl):
         DecisionProvenanceLog.model_validate(valid_dpl)
 
 
+def test_epsilon_execution_allows_action_outside_final_policy(valid_dpl):
+    valid_dpl["detected_leaks"] = []
+    valid_dpl["trigger_reasons"] = []
+    valid_dpl["mix_reasons"] = ["MIX_EPSILON"]
+    valid_dpl["allowed_reason_ids"] = ["MIX_EPSILON"]
+    valid_dpl["base_policy"] = {"CHECK": 1.0}
+    valid_dpl["exploit_policy"] = {"CHECK": 1.0}
+    valid_dpl["safety_alpha"] = 0.0
+    valid_dpl["final_policy"] = {"CHECK": 1.0}
+    valid_dpl["selected_action"] = "BET_75"
+    valid_dpl["execution_sampling"] = {
+        "sampler_version": "epsilon-uniform-v1",
+        "epsilon": 1.0,
+        "epsilon_distribution": {"CHECK": 0.5, "BET_75": 0.5},
+        "execution_policy": {"CHECK": 0.5, "BET_75": 0.5},
+        "exploration_fired": True,
+    }
+
+    dpl = DecisionProvenanceLog.model_validate(valid_dpl)
+
+    assert dpl.selected_action == "BET_75"
+    assert dpl.final_policy == {"CHECK": 1.0}
+    assert dpl.execution_sampling is not None
+    assert dpl.execution_sampling.execution_policy["BET_75"] == pytest.approx(0.5)
+
+
+def test_mix_epsilon_requires_execution_sampling(valid_dpl):
+    valid_dpl["mix_reasons"] = ["MIX_EPSILON"]
+    valid_dpl["allowed_reason_ids"] = [
+        "LEAK_R001",
+        "TRG_R001",
+        "TRG_R002",
+        "TRG_R003",
+        "MIX_EPSILON",
+    ]
+    with pytest.raises(ValidationError, match="MIX_EPSILON requires execution_sampling"):
+        DecisionProvenanceLog.model_validate(valid_dpl)
+
+
+def test_execution_sampling_rejects_non_fired_record(valid_dpl):
+    valid_dpl["execution_sampling"] = {
+        "sampler_version": "epsilon-uniform-v1",
+        "epsilon": 0.5,
+        "epsilon_distribution": {"CHECK": 0.5, "BET_75": 0.5},
+        "execution_policy": {"CHECK": 0.45, "BET_75": 0.55},
+        "exploration_fired": False,
+    }
+    with pytest.raises(ValidationError, match="execution_sampling may only be recorded"):
+        DecisionProvenanceLog.model_validate(valid_dpl)
+
+
+def test_execution_sampling_requires_mix_epsilon_reason(valid_dpl):
+    valid_dpl["execution_sampling"] = {
+        "sampler_version": "epsilon-uniform-v1",
+        "epsilon": 0.5,
+        "epsilon_distribution": {"CHECK": 0.5, "BET_75": 0.5},
+        "execution_policy": {"CHECK": 0.45, "BET_75": 0.55},
+        "exploration_fired": True,
+    }
+    with pytest.raises(ValidationError, match="execution_sampling requires MIX_EPSILON"):
+        DecisionProvenanceLog.model_validate(valid_dpl)
+
+
+def test_execution_sampling_must_match_epsilon_mix(valid_dpl):
+    valid_dpl["detected_leaks"] = []
+    valid_dpl["trigger_reasons"] = []
+    valid_dpl["mix_reasons"] = ["MIX_EPSILON"]
+    valid_dpl["allowed_reason_ids"] = ["MIX_EPSILON"]
+    valid_dpl["base_policy"] = {"CHECK": 1.0}
+    valid_dpl["exploit_policy"] = {"CHECK": 1.0}
+    valid_dpl["safety_alpha"] = 0.0
+    valid_dpl["final_policy"] = {"CHECK": 1.0}
+    valid_dpl["selected_action"] = "BET_75"
+    valid_dpl["execution_sampling"] = {
+        "sampler_version": "epsilon-uniform-v1",
+        "epsilon": 1.0,
+        "epsilon_distribution": {"CHECK": 0.5, "BET_75": 0.5},
+        "execution_policy": {"CHECK": 0.75, "BET_75": 0.25},
+        "exploration_fired": True,
+    }
+    with pytest.raises(ValidationError, match="epsilon execution mix"):
+        DecisionProvenanceLog.model_validate(valid_dpl)
+
+
 # --- reason-id namespace separation (ADR-0001) ----------------------------
 
 

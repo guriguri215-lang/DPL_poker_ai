@@ -15,10 +15,13 @@ Key contracts encoded here:
   closed-world explanation whitelist and must be a subset of the reasons actually
   recorded in those three fields -- an explanation can only cite a reason the
   decision actually rests on.
-* The realised policy is a genuine safety mix: ``final_policy`` must equal
+* The final policy is a genuine safety mix: ``final_policy`` must equal
   ``(1 - safety_alpha) * base_policy + safety_alpha * exploit_policy`` over the
-  union of actions (within :data:`MIXING_ABS_TOL`), and ``selected_action`` must be
-  an action carried with positive probability by ``final_policy`` (Spec 6.8/6.9).
+  union of actions (within :data:`MIXING_ABS_TOL`). By default ``selected_action``
+  must be carried with positive probability by ``final_policy`` (Spec 6.8/6.9).
+  ADR-0018 permits an independent post-SafetyMixer epsilon sampler to execute a
+  legal action outside ``final_policy``; such decisions must record
+  ``execution_sampling`` and ``MIX_EPSILON`` without redefining ``final_policy``.
 * Both the ``hand_bucket`` and the concrete ``hero_combo`` are recorded (ADR-0005;
   ``hero_combo`` is a string until Phase 1 introduces a typed card/combo model).
 * EV provenance is explicit (ADR-0008). ``ev_estimate.ev_source`` is required and
@@ -51,6 +54,9 @@ from .reason_ontology import get_ontology
 
 #: Current DPL schema version. Bump (with an ADR) on any breaking change.
 DPL_SCHEMA_VERSION = "1.0.0"
+
+#: MIX reason recorded only when the ADR-0018 epsilon branch actually fires.
+MIX_EPSILON_REASON_ID = "MIX_EPSILON"
 
 #: Absolute tolerance for the "policy probabilities sum to 1.0" check.
 POLICY_SUM_TOL = 1e-6
@@ -193,6 +199,24 @@ class EvEstimate(BaseModel):
         }
 
 
+class ExecutionSampling(BaseModel):
+    """Post-SafetyMixer execution-sampler record (ADR-0018).
+
+    This record is present only when the independent epsilon sampler actually
+    fires. ``final_policy`` remains the SafetyMixer output; ``execution_policy``
+    is the auditable distribution induced by ``(1-epsilon) * final_policy +
+    epsilon * epsilon_distribution``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    sampler_version: str = Field(min_length=1)
+    epsilon: float = Field(ge=0.0, le=1.0)
+    epsilon_distribution: Policy
+    execution_policy: Policy
+    exploration_fired: bool
+
+
 class DecisionProvenanceLog(BaseModel):
     """One decision's full provenance record (Spec 6.11; the project core)."""
 
@@ -223,6 +247,7 @@ class DecisionProvenanceLog(BaseModel):
     # --- realised action ---
     selected_action: str
     sampling_seed: int | None
+    execution_sampling: ExecutionSampling | None = None
 
     # --- valuation and explanation contract ---
     ev_estimate: EvEstimate
@@ -262,10 +287,24 @@ class DecisionProvenanceLog(BaseModel):
             )
         self._check_selected_action()
         self._check_mixing_consistency()
+        self._check_execution_sampling_consistency()
         self._check_allowed_reason_ids_backed()
         return self
 
     def _check_selected_action(self) -> None:
+        if self.execution_sampling is not None and self.execution_sampling.exploration_fired:
+            execution_policy = self.execution_sampling.execution_policy
+            if self.selected_action not in execution_policy:
+                raise ValueError(
+                    f"selected_action {self.selected_action!r} is not a key of execution_policy"
+                )
+            if execution_policy[self.selected_action] <= 0.0:
+                raise ValueError(
+                    f"selected_action {self.selected_action!r} must have positive probability "
+                    f"in execution_policy (got {execution_policy[self.selected_action]})"
+                )
+            return
+
         if self.selected_action not in self.final_policy:
             raise ValueError(
                 f"selected_action {self.selected_action!r} is not a key of final_policy"
@@ -290,6 +329,50 @@ class DecisionProvenanceLog(BaseModel):
                 raise ValueError(
                     f"final_policy[{action!r}]={actual} does not match the alpha-mix "
                     f"{expected} of base/exploit at safety_alpha={alpha}"
+                )
+
+    def _check_execution_sampling_consistency(self) -> None:
+        has_epsilon_reason = MIX_EPSILON_REASON_ID in self.mix_reasons
+        if self.execution_sampling is None:
+            if has_epsilon_reason:
+                raise ValueError("MIX_EPSILON requires execution_sampling to be recorded")
+            return
+
+        sampling = self.execution_sampling
+        if not sampling.exploration_fired:
+            raise ValueError(
+                "execution_sampling may only be recorded when exploration_fired is true"
+            )
+        if not has_epsilon_reason:
+            raise ValueError("execution_sampling requires MIX_EPSILON in mix_reasons")
+        if sampling.epsilon <= 0.0:
+            raise ValueError("epsilon must be positive when exploration_fired is true")
+        if self.selected_action not in sampling.epsilon_distribution:
+            raise ValueError(
+                "selected_action must be present in epsilon_distribution when "
+                "exploration_fired is true"
+            )
+        if sampling.epsilon_distribution[self.selected_action] <= 0.0:
+            raise ValueError(
+                "selected_action must have positive probability in epsilon_distribution "
+                "when exploration_fired is true"
+            )
+
+        epsilon = sampling.epsilon
+        actions = (
+            set(self.final_policy)
+            | set(sampling.epsilon_distribution)
+            | set(sampling.execution_policy)
+        )
+        for action in actions:
+            expected = (1.0 - epsilon) * self.final_policy.get(
+                action, 0.0
+            ) + epsilon * sampling.epsilon_distribution.get(action, 0.0)
+            actual = sampling.execution_policy.get(action, 0.0)
+            if abs(actual - expected) > MIXING_ABS_TOL:
+                raise ValueError(
+                    f"execution_policy[{action!r}]={actual} does not match the "
+                    f"epsilon execution mix {expected} at epsilon={epsilon}"
                 )
 
     def _check_allowed_reason_ids_backed(self) -> None:

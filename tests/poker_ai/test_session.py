@@ -102,6 +102,46 @@ def test_positive_alpha_writes_rule_exploit_reasons_closed_world():
     DecisionProvenanceLog.model_validate(log.model_dump(mode="json"))
 
 
+def test_epsilon_one_writes_epsilon_reason_and_manifest_config():
+    result = run_session(20260704, 5, exploration_epsilon=1.0)
+
+    assert "exploration_epsilon=1.0" in result.manifest.description
+    sampler_configs = [c for c in result.manifest.configs if c.name == "execution_sampler"]
+    assert len(sampler_configs) == 1
+    assert sampler_configs[0].path == "inline:epsilon-uniform-v1:epsilon=1"
+
+    for log in result.logs:
+        assert log.final_policy == log.base_policy
+        assert log.mix_reasons == ["MIX_EPSILON"]
+        assert log.allowed_reason_ids == ["MIX_EPSILON"]
+        assert log.execution_sampling is not None
+        assert log.execution_sampling.epsilon == 1.0
+        assert set(log.execution_sampling.epsilon_distribution) == {"FOLD", "CALL"}
+        assert log.selected_action in log.execution_sampling.epsilon_distribution
+        DecisionProvenanceLog.model_validate(log.model_dump(mode="json"))
+
+
+def test_epsilon_only_does_not_allow_policy_reasons_from_exploit_provider():
+    result = run_session(
+        20260704,
+        1,
+        leak_detector=_positive_fixture_detector(),
+        safety_alpha=0.0,
+        exploration_epsilon=1.0,
+        exploit_provider=_StaticExploitProvider(),
+    )
+    log = result.logs[0]
+
+    assert log.detected_leaks
+    assert log.final_policy == log.base_policy
+    assert log.exploit_policy == {"CALL": 1.0}
+    assert log.trigger_reasons == []
+    assert log.mix_reasons == ["MIX_EPSILON"]
+    assert log.allowed_reason_ids == ["MIX_EPSILON"]
+    assert log.execution_sampling is not None
+    DecisionProvenanceLog.model_validate(log.model_dump(mode="json"))
+
+
 def test_positive_alpha_writes_nodelock_solver_provenance_to_dpl():
     result = run_session(
         20260704,

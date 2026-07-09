@@ -80,7 +80,7 @@ def _valid_manifest() -> dict:
             "argv": ["--manifest", "demo.json"],
         },
         "versions": {
-            "reason_ontology_version": "1.0.0",
+            "reason_ontology_version": "1.1.0",
             "cluster_def_version": "1.0.0",
             "strategy_table_version": "1.0.0",
             "baseline_table_version": "1.0.0",

@@ -59,6 +59,43 @@ def test_policy_and_sampling_reasons_are_structurally_separated(valid_dpl):
     assert policy_ids.isdisjoint(sampling_ids)
 
 
+def test_epsilon_explanation_separates_final_policy_from_execution(valid_dpl):
+    valid_dpl["detected_leaks"] = []
+    valid_dpl["trigger_reasons"] = []
+    valid_dpl["mix_reasons"] = ["MIX_EPSILON"]
+    valid_dpl["allowed_reason_ids"] = ["MIX_EPSILON"]
+    valid_dpl["base_policy"] = {"CHECK": 1.0}
+    valid_dpl["exploit_policy"] = {"CHECK": 1.0}
+    valid_dpl["safety_alpha"] = 0.0
+    valid_dpl["final_policy"] = {"CHECK": 1.0}
+    valid_dpl["selected_action"] = "BET_75"
+    valid_dpl["execution_sampling"] = {
+        "sampler_version": "epsilon-uniform-v1",
+        "epsilon": 1.0,
+        "epsilon_distribution": {"CHECK": 0.5, "BET_75": 0.5},
+        "execution_policy": {"CHECK": 0.5, "BET_75": 0.5},
+        "exploration_fired": True,
+    }
+    dpl = DecisionProvenanceLog.model_validate(valid_dpl)
+
+    explanation = generate_template_explanation(dpl)
+
+    assert explanation.policy_reasons.reason_ids == []
+    assert [c.reason_id for c in explanation.sampling_reasons.mix_reasons] == ["MIX_EPSILON"]
+    assert explanation.sampling_reasons.selected_action_probability.value == pytest.approx(0.5)
+    assert explanation.sampling_reasons.selected_action_probability.source_path == (
+        "dpl.execution_sampling.execution_policy['BET_75']"
+    )
+    assert explanation.counterfactual.final_selected_action_probability.value == pytest.approx(0.0)
+    assert (
+        explanation.counterfactual.final_selected_action_probability.derivation
+        == "missing action treated as 0 by DPL final-policy semantics"
+    )
+    assert "epsilon exploration fired" in explanation.rendered_text
+    assert "LEAK_" not in explanation.rendered_text
+    assert "TRG_" not in explanation.rendered_text
+
+
 def test_numeric_claims_have_sources_and_decision_ev_delta_is_dpl_derived(valid_dpl):
     dpl = DecisionProvenanceLog.model_validate(valid_dpl)
 

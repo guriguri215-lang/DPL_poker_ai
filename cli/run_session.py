@@ -75,6 +75,12 @@ def main(argv: list[str] | None = None) -> int:
         help="SafetyMixer alpha in [0, 1] (default: 0.0, or 1.0 with --leaky-fixture)",
     )
     parser.add_argument(
+        "--exploration-epsilon",
+        type=float,
+        default=0.0,
+        help="post-SafetyMixer epsilon exploration rate in [0, 1] (default: 0.0)",
+    )
+    parser.add_argument(
         "--leaky-fixture",
         action="store_true",
         help="use a public fixture baseline that produces leak/exploit smoke output",
@@ -109,6 +115,7 @@ def main(argv: list[str] | None = None) -> int:
         git_commit=_current_git_commit(),
         leak_detector=leak_detector,
         safety_alpha=safety_alpha,
+        exploration_epsilon=args.exploration_epsilon,
         exploit_provider=exploit_provider,
     )
     jsonl_path = write_jsonl(result.logs, args.out_dir / f"{result.session_id}.dpl.jsonl")

@@ -22,7 +22,7 @@
 #   becomes ["LEAK_R001","TRG_R001","TRG_R002","TRG_R003","MIX_R001"].
 
 schema_version: "1.0.0"
-ontology_version: "1.0.0"
+ontology_version: "1.1.0"
 
 namespaces:
   LEAK:
@@ -110,3 +110,11 @@ reasons:
       frequency. This is an execution reason (why this action this time), not a
       policy reason (why the action is in the policy at all).
     source_ref: "AI Spec 6.10 R010 / 6.9"
+  - id: MIX_EPSILON
+    namespace: MIX
+    label: action_sampled_by_epsilon_exploration
+    description: >-
+      The selected action was drawn by the post-SafetyMixer epsilon exploration
+      sampler from its explicit legal-action distribution, leaving the final
+      policy unchanged.
+    source_ref: "ADR-0018"
