@@ -225,6 +225,9 @@ def build_manifest(
     num_hands: int,
     *,
     git_commit: str = "unknown",
+    git_dirty: bool = False,
+    entrypoint: str = "cli/run_session.py",
+    argv: list[str] | None = None,
     output_paths: list[str] | None = None,
     leak_detector: LeakDetector | None = None,
     safety_alpha: float = 0.0,
@@ -245,10 +248,11 @@ def build_manifest(
     ]
     code = CodeProvenance(
         git_commit=git_commit,
+        git_dirty=git_dirty,
         package_version="0.0.0",
         python_version=platform.python_version(),
-        entrypoint="cli/run_session.py",
-        argv=list(sys.argv[1:]),
+        entrypoint=entrypoint,
+        argv=list(sys.argv[1:] if argv is None else argv),
     )
     return RunManifest(
         run_id=_session_id_for(seed),
