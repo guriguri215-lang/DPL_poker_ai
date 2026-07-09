@@ -101,13 +101,7 @@ def _sampling_reason_set(dpl: DecisionProvenanceLog) -> SamplingReasonSet:
         )
     return SamplingReasonSet(
         selected_action=dpl.selected_action,
-        selected_action_probability=_claim(
-            "selected_action_probability",
-            dpl.final_policy[dpl.selected_action],
-            unit="probability",
-            source_kind="dpl",
-            source_path=f"dpl.final_policy[{dpl.selected_action!r}]",
-        ),
+        selected_action_probability=_selected_action_probability(dpl),
         sampling_seed=seed,
         mix_reasons=mix_reasons,
     )
@@ -184,7 +178,8 @@ def _counterfactual(
 ) -> CounterfactualExplanation:
     baseline_probability_claim = _baseline_selected_action_probability(dpl)
     baseline_probability = baseline_probability_claim.value
-    final_probability = dpl.final_policy[dpl.selected_action]
+    final_probability_claim = _final_selected_action_probability(dpl)
+    final_probability = final_probability_claim.value
     text = (
         "Without the policy adjustment, the selected action would use the base-policy "
         f"probability {_fmt_pct(baseline_probability)} instead of the final-policy "
@@ -195,13 +190,7 @@ def _counterfactual(
         title="Counterfactual",
         text=text,
         baseline_selected_action_probability=baseline_probability_claim,
-        final_selected_action_probability=_claim(
-            "final_selected_action_probability",
-            final_probability,
-            unit="probability",
-            source_kind="dpl",
-            source_path=f"dpl.final_policy[{dpl.selected_action!r}]",
-        ),
+        final_selected_action_probability=final_probability_claim,
         decision_ev_delta=decision_ev_delta,
     )
 
@@ -339,6 +328,43 @@ def _baseline_selected_action_probability(dpl: DecisionProvenanceLog) -> Numeric
     )
 
 
+def _final_selected_action_probability(dpl: DecisionProvenanceLog) -> NumericClaim:
+    if dpl.selected_action in dpl.final_policy:
+        return _claim(
+            "final_selected_action_probability",
+            dpl.final_policy[dpl.selected_action],
+            unit="probability",
+            source_kind="dpl",
+            source_path=f"dpl.final_policy[{dpl.selected_action!r}]",
+        )
+    return _claim(
+        "final_selected_action_probability",
+        0.0,
+        unit="probability",
+        source_kind="dpl_derived",
+        source_path="dpl.final_policy",
+        derivation="missing action treated as 0 by DPL final-policy semantics",
+    )
+
+
+def _selected_action_probability(dpl: DecisionProvenanceLog) -> NumericClaim:
+    if dpl.execution_sampling is not None and dpl.execution_sampling.exploration_fired:
+        return _claim(
+            "selected_action_probability",
+            dpl.execution_sampling.execution_policy[dpl.selected_action],
+            unit="probability",
+            source_kind="dpl",
+            source_path=(f"dpl.execution_sampling.execution_policy[{dpl.selected_action!r}]"),
+        )
+    return _claim(
+        "selected_action_probability",
+        dpl.final_policy[dpl.selected_action],
+        unit="probability",
+        source_kind="dpl",
+        source_path=f"dpl.final_policy[{dpl.selected_action!r}]",
+    )
+
+
 def _observation_text(
     dpl: DecisionProvenanceLog,
     allowed_detected_leaks: list[tuple[int, DetectedLeak]],
@@ -392,6 +418,18 @@ def _adjustment_text(
     mix_text = "No sampling reason is cited."
     if sampling_reasons.mix_reasons:
         mix_text = f" Sampling reason(s): {_join_labels(sampling_reasons.mix_reasons)}."
+    if dpl.execution_sampling is not None and dpl.execution_sampling.exploration_fired:
+        final_probability = _final_selected_action_probability(dpl).value
+        return (
+            f"The final policy is the safety mix with alpha {_fmt_number(dpl.safety_alpha)}. "
+            f"It assigns {dpl.selected_action} final-policy probability "
+            f"{_fmt_pct(final_probability)}. The realised action is {dpl.selected_action} "
+            f"with execution-sampling probability "
+            f"{_fmt_pct(sampling_reasons.selected_action_probability.value)} because "
+            f"epsilon exploration fired. The decision-level final-minus-base EV is "
+            f"{_fmt_signed(ev_breakdown.decision_ev_delta.value)} "
+            f"{ev_breakdown.decision_ev_delta.unit}.{solver_text} {mix_text}"
+        )
     return (
         f"The final policy is the safety mix with alpha {_fmt_number(dpl.safety_alpha)}. "
         f"The realised action is {dpl.selected_action} with final-policy probability "

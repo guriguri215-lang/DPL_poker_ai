@@ -108,9 +108,82 @@ def test_decide_is_reproducible():
     assert _agent().decide(obs) == _agent().decide(obs)
 
 
+def test_exploration_epsilon_zero_matches_default_decision():
+    import random
+
+    obs = _observation_from_scenario(generate_scenario(random.Random(5), "SC0"))
+    default = _agent().decide(obs)
+    explicit_zero = HeroAgent(
+        get_baseline_strategy(),
+        get_bucket_definition(),
+        exploration_epsilon=0.0,
+    ).decide(obs)
+
+    assert explicit_zero == default
+
+
+def test_epsilon_one_records_exploration_without_changing_final_policy():
+    import random
+
+    obs = _observation_from_scenario(generate_scenario(random.Random(5), "SC0"))
+    result = HeroAgent(
+        get_baseline_strategy(),
+        get_bucket_definition(),
+        exploration_epsilon=1.0,
+    ).decide(obs)
+
+    assert is_pure_base(result.base_policy, result.final_policy)
+    assert result.mix_reasons == ["MIX_EPSILON"]
+    assert result.execution_sampling is not None
+    assert result.execution_sampling.epsilon == pytest.approx(1.0)
+    assert result.selected_action in result.execution_sampling.epsilon_distribution
+    assert result.execution_sampling.epsilon_distribution[result.selected_action] > 0.0
+
+
+def test_epsilon_only_does_not_record_policy_reasons_from_exploit_provider():
+    import random
+
+    obs = _observation_from_scenario(generate_scenario(random.Random(5), "SC0"))
+    result = HeroAgent(
+        get_baseline_strategy(),
+        get_bucket_definition(),
+        safety_alpha=0.0,
+        exploration_epsilon=1.0,
+        exploit_provider=_StaticExploitProvider(),
+    ).decide(obs)
+
+    assert is_pure_base(result.base_policy, result.final_policy)
+    assert result.mix_reasons == ["MIX_EPSILON"]
+    assert result.applied_leak_reason_ids == []
+    assert result.trigger_reasons == []
+
+
+def test_epsilon_with_policy_mix_records_policy_and_sampling_reasons():
+    import random
+
+    obs = _observation_from_scenario(generate_scenario(random.Random(5), "SC0"))
+    result = HeroAgent(
+        get_baseline_strategy(),
+        get_bucket_definition(),
+        safety_alpha=0.25,
+        exploration_epsilon=1.0,
+        exploit_provider=_StaticExploitProvider(),
+    ).decide(obs)
+
+    assert result.mix_reasons == ["MIX_R001", "MIX_EPSILON"]
+    assert result.applied_leak_reason_ids == ["LEAK_R008"]
+    assert result.trigger_reasons == ["TRG_R001", "TRG_R002"]
+    assert result.execution_sampling is not None
+
+
 def test_agent_rejects_alpha_outside_unit_interval():
     with pytest.raises(ValueError, match="safety_alpha"):
         HeroAgent(get_baseline_strategy(), get_bucket_definition(), safety_alpha=1.5)
+
+
+def test_agent_rejects_epsilon_outside_unit_interval():
+    with pytest.raises(ValueError, match="exploration_epsilon"):
+        HeroAgent(get_baseline_strategy(), get_bucket_definition(), exploration_epsilon=1.5)
 
 
 def test_positive_alpha_mixes_base_with_rule_exploit():

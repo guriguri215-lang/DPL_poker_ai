@@ -28,7 +28,13 @@ from dataclasses import dataclass
 
 from poker_core.card import Card
 from poker_core.combo import Combo
-from poker_core.dpl_schema import MIXING_ABS_TOL, DetectedLeak, HandBucket
+from poker_core.dpl_schema import (
+    MIX_EPSILON_REASON_ID,
+    MIXING_ABS_TOL,
+    DetectedLeak,
+    ExecutionSampling,
+    HandBucket,
+)
 from poker_core.range_model import Range
 from poker_core.showdown_ev import DEFAULT_EV_UNIT, ShowdownEquity, showdown_equity
 from poker_core.state_cluster import classify_board, cluster_def_version
@@ -37,7 +43,7 @@ from .actions import legal_actions
 from .baseline_strategy import FACING_ALL_IN, BaselineStrategy, build_situation_key
 from .exploit import ExploitProvider, RuleExploitProvider
 from .hand_bucket import BucketDefinition, classify_combo
-from .mixer import ActionSelector, safety_mix
+from .mixer import EPSILON_SAMPLER_VERSION, ExecutionSampler, safety_mix
 
 #: EV definition label recorded in the DPL for the task-3 decision EV (Solver 8.3).
 EV_DEFINITION = "incremental_ev_from_current_node"
@@ -75,6 +81,7 @@ class DecisionResult:
     final_policy: dict[str, float]
     selected_action: str
     sampling_seed: int
+    execution_sampling: ExecutionSampling | None
     base_ev: float
     exploit_ev: float
     final_ev: float
@@ -112,13 +119,19 @@ class HeroAgent:
         bucket_def: BucketDefinition,
         *,
         safety_alpha: float = 0.0,
+        exploration_epsilon: float = 0.0,
         exploit_provider: ExploitProvider | None = None,
     ) -> None:
         if not math.isfinite(safety_alpha) or not 0.0 <= safety_alpha <= 1.0:
             raise ValueError(f"safety_alpha must be finite and in [0, 1], got {safety_alpha}")
+        if not math.isfinite(exploration_epsilon) or not 0.0 <= exploration_epsilon <= 1.0:
+            raise ValueError(
+                f"exploration_epsilon must be finite and in [0, 1], got {exploration_epsilon}"
+            )
         self.baseline = baseline
         self.bucket_def = bucket_def
         self.safety_alpha = safety_alpha
+        self.exploration_epsilon = exploration_epsilon
         self.exploit_provider = exploit_provider or RuleExploitProvider()
 
     def decide(
@@ -157,15 +170,34 @@ class HeroAgent:
         )
         exploit_policy = exploit.policy
         final_policy = safety_mix(base_policy, exploit_policy, self.safety_alpha)
-        mix_reasons = (
+        policy_mix_reasons = (
             ["MIX_R001"]
             if self.safety_alpha > 0.0 and not _policies_equal(base_policy, final_policy)
             else []
         )
-        trigger_reasons = list(exploit.trigger_reasons) if mix_reasons else []
 
         sampling_seed = _sampling_seed_for(obs.session_id, obs.hand_id)
-        selected_action = ActionSelector(sampling_seed).select(final_policy)
+        sample = ExecutionSampler(epsilon=self.exploration_epsilon).sample(
+            final_policy=final_policy,
+            legal_actions=legal,
+            seed=sampling_seed,
+        )
+        execution_sampling = (
+            ExecutionSampling(
+                sampler_version=EPSILON_SAMPLER_VERSION,
+                epsilon=sample.epsilon,
+                epsilon_distribution=sample.epsilon_distribution or {},
+                execution_policy=sample.execution_policy or {},
+                exploration_fired=True,
+            )
+            if sample.exploration_fired
+            else None
+        )
+        mix_reasons = [*policy_mix_reasons]
+        if sample.exploration_fired:
+            mix_reasons.append(MIX_EPSILON_REASON_ID)
+        policy_mix_applied = bool(policy_mix_reasons)
+        trigger_reasons = list(exploit.trigger_reasons) if policy_mix_applied else []
 
         return DecisionResult(
             state_cluster=state_cluster,
@@ -175,18 +207,21 @@ class HeroAgent:
             base_policy=base_policy,
             exploit_policy=exploit_policy,
             final_policy=final_policy,
-            selected_action=selected_action,
+            selected_action=sample.selected_action,
             sampling_seed=sampling_seed,
+            execution_sampling=execution_sampling,
             base_ev=policy_ev(base_policy, action_ev),
             exploit_ev=policy_ev(exploit_policy, action_ev),
             final_ev=policy_ev(final_policy, action_ev),
             ev_unit=DEFAULT_EV_UNIT,
             ev_definition=EV_DEFINITION,
-            applied_leak_reason_ids=list(exploit.applied_leak_reason_ids) if mix_reasons else [],
+            applied_leak_reason_ids=(
+                list(exploit.applied_leak_reason_ids) if policy_mix_applied else []
+            ),
             trigger_reasons=trigger_reasons,
             mix_reasons=mix_reasons,
-            exploit_source=exploit.exploit_source if mix_reasons else NO_EXPLOIT_SOURCE,
-            solver_result_id=exploit.solver_result_id if mix_reasons else None,
+            exploit_source=exploit.exploit_source if policy_mix_applied else NO_EXPLOIT_SOURCE,
+            solver_result_id=exploit.solver_result_id if policy_mix_applied else None,
         )
 
 

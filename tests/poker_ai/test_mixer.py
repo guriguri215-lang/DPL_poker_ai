@@ -6,7 +6,14 @@ import math
 
 import pytest
 
-from poker_ai.mixer import ActionSelector, is_pure_base, safety_mix
+from poker_ai.mixer import (
+    ActionSelector,
+    ExecutionSampler,
+    epsilon_execution_policy,
+    is_pure_base,
+    safety_mix,
+    uniform_legal_distribution,
+)
 from poker_core.dpl_schema import MIXING_ABS_TOL
 
 BASE = {"FOLD": 0.7, "CALL": 0.3}
@@ -69,6 +76,56 @@ def test_action_selector_distribution_is_roughly_proportional():
 def test_action_selector_raises_on_empty_mass():
     with pytest.raises(ValueError, match="positive probability"):
         ActionSelector(1).select({"FOLD": 0.0, "CALL": 0.0})
+
+
+def test_execution_sampler_epsilon_zero_matches_action_selector():
+    seed = 12345
+    sample = ExecutionSampler(epsilon=0.0).sample(
+        final_policy=BASE,
+        legal_actions=("FOLD", "CALL"),
+        seed=seed,
+    )
+    assert sample.selected_action == ActionSelector(seed).select(BASE)
+    assert sample.exploration_fired is False
+    assert sample.epsilon_distribution is None
+    assert sample.execution_policy is None
+
+
+def test_execution_sampler_epsilon_one_samples_only_legal_distribution():
+    final_policy = {"CALL": 1.0}
+    seen = {
+        ExecutionSampler(epsilon=1.0)
+        .sample(final_policy=final_policy, legal_actions=("FOLD", "CALL"), seed=seed)
+        .selected_action
+        for seed in range(30)
+    }
+
+    assert seen == {"FOLD", "CALL"}
+    sample = ExecutionSampler(epsilon=1.0).sample(
+        final_policy=final_policy,
+        legal_actions=("FOLD", "CALL"),
+        seed=1,
+    )
+    assert sample.exploration_fired is True
+    assert sample.epsilon_distribution == {"FOLD": 0.5, "CALL": 0.5}
+    assert sample.execution_policy == {"CALL": 0.5, "FOLD": 0.5}
+
+
+def test_execution_sampler_rejects_bad_epsilon_and_legal_set():
+    with pytest.raises(ValueError, match="epsilon"):
+        ExecutionSampler(epsilon=1.1)
+    with pytest.raises(ValueError, match="legal_actions"):
+        ExecutionSampler(epsilon=1.0).sample(final_policy=BASE, legal_actions=(), seed=1)
+
+
+def test_uniform_legal_distribution_requires_unique_actions():
+    with pytest.raises(ValueError, match="duplicates"):
+        uniform_legal_distribution(("FOLD", "FOLD"))
+
+
+def test_epsilon_execution_policy_mixes_over_union():
+    policy = epsilon_execution_policy({"CALL": 1.0}, {"FOLD": 0.5, "CALL": 0.5}, 0.25)
+    assert policy == pytest.approx({"CALL": 0.875, "FOLD": 0.125})
 
 
 def test_is_pure_base_detects_deviation():

@@ -1,4 +1,4 @@
-"""SafetyMixer and ActionSelector (AI Spec 6.8/6.9; DPL mixing contract).
+"""SafetyMixer, ActionSelector and ExecutionSampler.
 
 The SafetyMixer forms the realised policy as the safety mixture
 ``final = (1 - alpha) * base + alpha * exploit`` over the union of actions -- the
@@ -8,14 +8,20 @@ fixtures may pass ``alpha > 0`` to exercise the rule-based exploit boundary.
 
 The ActionSelector realises one concrete action by sampling the final policy with a
 per-decision seed, so a run is reproducible: the same seed yields the same action.
+ADR-0018 adds an independent post-SafetyMixer ExecutionSampler for epsilon
+exploration. It leaves ``final_policy`` unchanged and records the explicit
+execution distribution only when the epsilon branch fires.
 """
 
 from __future__ import annotations
 
 import math
 import random
+from dataclasses import dataclass
 
 from poker_core.dpl_schema import MIXING_ABS_TOL, POLICY_SUM_TOL
+
+EPSILON_SAMPLER_VERSION = "epsilon-uniform-v1"
 
 
 def safety_mix(
@@ -72,6 +78,121 @@ class ActionSelector:
         return positive[-1][0]
 
 
+@dataclass(frozen=True)
+class ExecutionSample:
+    """Concrete action plus optional ADR-0018 epsilon sampling metadata."""
+
+    selected_action: str
+    exploration_fired: bool
+    sampler_version: str
+    epsilon: float
+    epsilon_distribution: dict[str, float] | None
+    execution_policy: dict[str, float] | None
+
+
+class ExecutionSampler:
+    """Sample after SafetyMixer, optionally firing epsilon exploration (ADR-0018)."""
+
+    def __init__(self, *, epsilon: float = 0.0, sampler_version: str = EPSILON_SAMPLER_VERSION):
+        if not math.isfinite(epsilon) or not 0.0 <= epsilon <= 1.0:
+            raise ValueError(f"epsilon must be finite and in [0, 1], got {epsilon}")
+        if not sampler_version:
+            raise ValueError("sampler_version must not be empty")
+        self.epsilon = epsilon
+        self.sampler_version = sampler_version
+
+    def sample(
+        self,
+        *,
+        final_policy: dict[str, float],
+        legal_actions: tuple[str, ...],
+        seed: int,
+    ) -> ExecutionSample:
+        """Return an executed action without mutating ``final_policy``.
+
+        The epsilon distribution is uniform over the provided legal action list.
+        At ``epsilon = 0`` this delegates to :class:`ActionSelector` exactly, so
+        the legacy seeded action sequence is preserved.
+        """
+        q_epsilon = uniform_legal_distribution(legal_actions)
+        execution_policy = epsilon_execution_policy(final_policy, q_epsilon, self.epsilon)
+
+        if self.epsilon <= 0.0:
+            return ExecutionSample(
+                selected_action=ActionSelector(seed).select(final_policy),
+                exploration_fired=False,
+                sampler_version=self.sampler_version,
+                epsilon=self.epsilon,
+                epsilon_distribution=None,
+                execution_policy=None,
+            )
+
+        if self.epsilon >= 1.0:
+            return ExecutionSample(
+                selected_action=ActionSelector(seed).select(q_epsilon),
+                exploration_fired=True,
+                sampler_version=self.sampler_version,
+                epsilon=self.epsilon,
+                epsilon_distribution=q_epsilon,
+                execution_policy=execution_policy,
+            )
+
+        rng = random.Random(seed)
+        if rng.random() < self.epsilon:
+            selected_action = _sample_with_rng(q_epsilon, rng)
+            return ExecutionSample(
+                selected_action=selected_action,
+                exploration_fired=True,
+                sampler_version=self.sampler_version,
+                epsilon=self.epsilon,
+                epsilon_distribution=q_epsilon,
+                execution_policy=execution_policy,
+            )
+        return ExecutionSample(
+            selected_action=_sample_with_rng(final_policy, rng),
+            exploration_fired=False,
+            sampler_version=self.sampler_version,
+            epsilon=self.epsilon,
+            epsilon_distribution=None,
+            execution_policy=None,
+        )
+
+
+def uniform_legal_distribution(legal_actions: tuple[str, ...]) -> dict[str, float]:
+    """Uniform distribution over a stable, non-empty legal action tuple."""
+    if not legal_actions:
+        raise ValueError("legal_actions must not be empty")
+    if any(not action for action in legal_actions):
+        raise ValueError("legal_actions must not contain an empty action")
+    if len(set(legal_actions)) != len(legal_actions):
+        raise ValueError("legal_actions must not contain duplicates")
+    probability = 1.0 / len(legal_actions)
+    return {action: probability for action in legal_actions}
+
+
+def epsilon_execution_policy(
+    final_policy: dict[str, float],
+    epsilon_distribution: dict[str, float],
+    epsilon: float,
+) -> dict[str, float]:
+    """Audit distribution ``(1-epsilon) * final_policy + epsilon * q_epsilon``."""
+    if not math.isfinite(epsilon) or not 0.0 <= epsilon <= 1.0:
+        raise ValueError(f"epsilon must be finite and in [0, 1], got {epsilon}")
+    for name, policy in (
+        ("final_policy", final_policy),
+        ("epsilon_distribution", epsilon_distribution),
+    ):
+        total = math.fsum(policy.values())
+        if abs(total - 1.0) > POLICY_SUM_TOL:
+            raise ValueError(f"{name} must sum to 1.0, got {total}")
+    actions = list(dict.fromkeys((*final_policy, *epsilon_distribution)))
+    return {
+        action: (1.0 - epsilon) * final_policy.get(action, 0.0)
+        + epsilon * epsilon_distribution.get(action, 0.0)
+        for action in actions
+    }
+
+
 def is_pure_base(base_policy: dict[str, float], final_policy: dict[str, float]) -> bool:
     """True if ``final_policy`` equals ``base_policy`` within the mixing tolerance.
 
@@ -81,3 +202,17 @@ def is_pure_base(base_policy: dict[str, float], final_policy: dict[str, float]) 
     return all(
         abs(final_policy.get(a, 0.0) - base_policy.get(a, 0.0)) <= MIXING_ABS_TOL for a in actions
     )
+
+
+def _sample_with_rng(policy: dict[str, float], rng: random.Random) -> str:
+    positive = [(action, prob) for action, prob in policy.items() if prob > 0.0]
+    if not positive:
+        raise ValueError("policy has no action with positive probability")
+    total = math.fsum(prob for _action, prob in positive)
+    threshold = rng.random() * total
+    cumulative = 0.0
+    for action, prob in positive:
+        cumulative += prob
+        if threshold < cumulative:
+            return action
+    return positive[-1][0]

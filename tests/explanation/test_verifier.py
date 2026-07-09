@@ -60,6 +60,26 @@ def _append_unallowed_detected_leak(valid_dpl):
     )
 
 
+def _make_epsilon_dpl(valid_dpl):
+    valid_dpl["detected_leaks"] = []
+    valid_dpl["trigger_reasons"] = []
+    valid_dpl["mix_reasons"] = ["MIX_EPSILON"]
+    valid_dpl["allowed_reason_ids"] = ["MIX_EPSILON"]
+    valid_dpl["base_policy"] = {"CHECK": 1.0}
+    valid_dpl["exploit_policy"] = {"CHECK": 1.0}
+    valid_dpl["safety_alpha"] = 0.0
+    valid_dpl["final_policy"] = {"CHECK": 1.0}
+    valid_dpl["selected_action"] = "BET_75"
+    valid_dpl["execution_sampling"] = {
+        "sampler_version": "epsilon-uniform-v1",
+        "epsilon": 1.0,
+        "epsilon_distribution": {"CHECK": 0.5, "BET_75": 0.5},
+        "execution_policy": {"CHECK": 0.5, "BET_75": 0.5},
+        "exploration_fired": True,
+    }
+    return DecisionProvenanceLog.model_validate(valid_dpl)
+
+
 def _refresh_rendered_text(payload):
     lines = [f"{stage['title']}: {stage['text']}" for stage in payload["stages"]]
     lines.append(f"{payload['counterfactual']['title']}: {payload['counterfactual']['text']}")
@@ -85,6 +105,15 @@ def test_verifier_accepts_template_explanation(valid_dpl):
     result = verify_explanation(payload, dpl)
 
     assert result.passed
+
+
+def test_verifier_accepts_epsilon_exploration_explanation(valid_dpl):
+    dpl = _make_epsilon_dpl(valid_dpl)
+    explanation = generate_template_explanation(dpl)
+
+    result = verify_explanation(explanation, dpl)
+
+    assert result.passed, result.issues
 
 
 def test_verifier_accepts_template_explanation_with_solver_diagnostics(valid_dpl):
@@ -125,6 +154,17 @@ def test_verifier_rejects_rendered_text_fabrication(valid_dpl):
     assert "rendered_text_mismatch" in _codes(result)
     assert "surface_reason_not_allowed" in _codes(result)
     assert "surface_numeric_unbacked" in _codes(result)
+
+
+def test_verifier_flags_unallowed_mix_epsilon_surface_reason(valid_dpl):
+    dpl, payload = _valid_explanation_payload(valid_dpl)
+    payload["stages"][3]["text"] += " Unallowed MIX_EPSILON fired."
+    _refresh_rendered_text(payload)
+
+    result = verify_explanation(payload, dpl)
+
+    assert not result.passed
+    assert "surface_reason_not_allowed" in _codes(result)
 
 
 def test_verifier_rejects_ev_value_tampering(valid_dpl):

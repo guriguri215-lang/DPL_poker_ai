@@ -17,15 +17,16 @@ from poker_core.reason_ontology import (
 def test_packaged_ontology_loads_and_is_cached():
     onto = get_ontology()
     assert onto is get_ontology()  # lru_cache returns the same instance
-    assert onto.ontology_version == "1.0.0"
+    assert onto.ontology_version == "1.1.0"
 
 
 def test_namespace_counts_match_spec():
     onto = get_ontology()
     assert len(onto.ids_in("LEAK")) == 8  # AI Spec 6.6 R001..R008
     assert len(onto.ids_in("TRG")) == 3  # AI Spec 6.10 R007..R009
-    assert len(onto.ids_in("MIX")) == 1  # AI Spec 6.10 R010
-    assert len(onto.reasons) == 12
+    assert len(onto.ids_in("MIX")) == 2  # AI Spec 6.10 R010 + ADR-0018
+    assert len(onto.reasons) == 13
+    assert "MIX_EPSILON" in onto.ids_in("MIX")
 
 
 def test_every_id_prefix_matches_declared_namespace():

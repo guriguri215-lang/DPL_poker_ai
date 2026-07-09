@@ -50,6 +50,7 @@ from .decision import HeroAgent, Observation
 from .exploit import ExploitProvider
 from .hand_bucket import BUCKET_DEF_PATH, bucket_def_version, get_bucket_definition
 from .leak import LeakDetector, action_baseline_table_sha256
+from .mixer import EPSILON_SAMPLER_VERSION
 from .observation import ObservationTracker
 from .opponent import StubOpponent
 from .scenario import SCENARIO_SCHEMA_VERSION, Scenario, generate_scenarios
@@ -83,6 +84,7 @@ def _build_dpl(
     tracker: ObservationTracker,
     leak_detector: LeakDetector,
     safety_alpha: float,
+    exploration_epsilon: float,
     exploit_provider: ExploitProvider | None,
 ) -> DecisionProvenanceLog:
     """Run one decision and assemble its validated DPL."""
@@ -124,6 +126,7 @@ def _build_dpl(
         get_baseline_strategy(),
         get_bucket_definition(),
         safety_alpha=safety_alpha,
+        exploration_epsilon=exploration_epsilon,
         exploit_provider=exploit_provider,
     )
     result = agent.decide(observation, detected_leaks=detected_leaks)
@@ -169,6 +172,7 @@ def _build_dpl(
         final_policy=result.final_policy,
         selected_action=result.selected_action,
         sampling_seed=result.sampling_seed,
+        execution_sampling=result.execution_sampling,
         ev_estimate=ev,
         allowed_reason_ids=allowed_reason_ids,
         baseline_table_version=leak_detector.baseline_table_version,
@@ -181,6 +185,7 @@ def iter_session_logs(
     *,
     leak_detector: LeakDetector | None = None,
     safety_alpha: float = 0.0,
+    exploration_epsilon: float = 0.0,
     exploit_provider: ExploitProvider | None = None,
 ) -> Iterator[DecisionProvenanceLog]:
     """Yield one validated DPL per generated hand (deterministic for a seed)."""
@@ -196,6 +201,7 @@ def iter_session_logs(
             tracker=tracker,
             leak_detector=detector,
             safety_alpha=safety_alpha,
+            exploration_epsilon=exploration_epsilon,
             exploit_provider=exploit_provider,
         )
 
@@ -211,6 +217,21 @@ def _action_baseline_config_ref(detector: LeakDetector) -> ConfigRef:
         role="baseline_table",
         path=f"inline:{detector.baseline_table_version}",
         sha256=action_baseline_table_sha256(detector.baseline_table),
+    )
+
+
+def _execution_sampler_config_ref(exploration_epsilon: float) -> ConfigRef:
+    payload = {
+        "sampler_version": EPSILON_SAMPLER_VERSION,
+        "epsilon": exploration_epsilon,
+        "epsilon_distribution": "legal_uniform",
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return ConfigRef(
+        name="execution_sampler",
+        role="other",
+        path=f"inline:{EPSILON_SAMPLER_VERSION}:epsilon={exploration_epsilon:g}",
+        sha256=hashlib.sha256(encoded).hexdigest(),
     )
 
 
@@ -231,6 +252,7 @@ def build_manifest(
     output_paths: list[str] | None = None,
     leak_detector: LeakDetector | None = None,
     safety_alpha: float = 0.0,
+    exploration_epsilon: float = 0.0,
 ) -> RunManifest:
     """Build the RunManifest pinning versions, the seed and config hashes (M-7)."""
     detector = leak_detector or LeakDetector()
@@ -245,6 +267,7 @@ def build_manifest(
         _config_ref(BUCKET_DEF_PATH, name="hand_bucket_def", role="other"),
         _config_ref(BASELINE_PATH, name="baseline_strategy", role="strategy_table"),
         _action_baseline_config_ref(detector),
+        _execution_sampler_config_ref(exploration_epsilon),
     ]
     code = CodeProvenance(
         git_commit=git_commit,
@@ -259,7 +282,7 @@ def build_manifest(
         description=(
             f"task-3 vertical slice; scenario_schema={SCENARIO_SCHEMA_VERSION}, "
             f"hand_bucket_def={bucket_def_version()}, hands={num_hands}, "
-            f"safety_alpha={safety_alpha}"
+            f"safety_alpha={safety_alpha}, exploration_epsilon={exploration_epsilon}"
         ),
         code=code,
         versions=versions,
@@ -283,6 +306,7 @@ def run_session(
     git_commit: str = "unknown",
     leak_detector: LeakDetector | None = None,
     safety_alpha: float = 0.0,
+    exploration_epsilon: float = 0.0,
     exploit_provider: ExploitProvider | None = None,
 ) -> SessionResult:
     """Run a full session in memory: validated DPLs plus the manifest."""
@@ -293,6 +317,7 @@ def run_session(
             num_hands,
             leak_detector=detector,
             safety_alpha=safety_alpha,
+            exploration_epsilon=exploration_epsilon,
             exploit_provider=exploit_provider,
         )
     )
@@ -302,6 +327,7 @@ def run_session(
         git_commit=git_commit,
         leak_detector=detector,
         safety_alpha=safety_alpha,
+        exploration_epsilon=exploration_epsilon,
     )
     return SessionResult(_session_id_for(seed), logs, manifest)
 

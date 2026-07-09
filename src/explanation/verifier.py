@@ -30,7 +30,7 @@ _FIELD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _DETECTED_CLAIM_RE = re.compile(
     r"detected_leaks\[(?P<index>\d+)\]\.(?P<field>observed_rate|baseline_rate|confidence)"
 )
-_SURFACE_REASON_RE = re.compile(r"\b(?:LEAK|TRG|MIX)_R\d+\b")
+_SURFACE_REASON_RE = re.compile(r"\b(?:LEAK|TRG|MIX)_[A-Z0-9_]+\b")
 _SURFACE_NUMERIC_RE = re.compile(
     r"(?P<value>[+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*(?P<unit>%|bb)(?![A-Za-z0-9_])"
 )
@@ -501,6 +501,19 @@ class _ExplanationVerifier:
                 "dpl.base_policy",
                 "missing action treated as 0 by DPL mixing semantics",
             )
+        elif claim.name == "final_selected_action_probability":
+            if self.dpl.selected_action in self.dpl.final_policy:
+                self._add(
+                    "numeric_derivation_unexpected",
+                    f"{location}.source_kind",
+                    "final selected-action probability is present in DPL final_policy",
+                )
+            expected = (
+                0.0,
+                "probability",
+                "dpl.final_policy",
+                "missing action treated as 0 by DPL final-policy semantics",
+            )
         else:
             self._add(
                 "numeric_derivation_unknown",
@@ -688,8 +701,18 @@ class _ExplanationVerifier:
 
     def _expected_direct_dpl_tokens(self, claim_name: str) -> tuple[PathToken, ...] | None:
         action = self.dpl.selected_action
+        selected_action_tokens = (("attr", "final_policy"), ("key", action))
+        if (
+            self.dpl.execution_sampling is not None
+            and self.dpl.execution_sampling.exploration_fired
+        ):
+            selected_action_tokens = (
+                ("attr", "execution_sampling"),
+                ("attr", "execution_policy"),
+                ("key", action),
+            )
         fixed: dict[str, tuple[PathToken, ...]] = {
-            "selected_action_probability": (("attr", "final_policy"), ("key", action)),
+            "selected_action_probability": selected_action_tokens,
             "final_selected_action_probability": (("attr", "final_policy"), ("key", action)),
             "baseline_selected_action_probability": (("attr", "base_policy"), ("key", action)),
             "sampling_seed": (("attr", "sampling_seed"),),
@@ -753,6 +776,11 @@ class _ExplanationVerifier:
             ("attr", "exploit_policy"),
             ("attr", "final_policy"),
         }:
+            return "probability"
+        if len(tokens) >= 2 and tokens[:2] == (
+            ("attr", "execution_sampling"),
+            ("attr", "execution_policy"),
+        ):
             return "probability"
         if len(tokens) == 3 and tokens[0] == ("attr", "detected_leaks"):
             field = tokens[2]
