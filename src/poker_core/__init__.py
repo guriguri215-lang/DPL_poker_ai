@@ -13,11 +13,15 @@ from .card import DECK_SIZE, RANKS, SUITS, Card, cards_mask, parse_cards
 from .combo import Combo
 from .dpl_schema import (
     DPL_SCHEMA_VERSION,
+    DPL_SCHEMA_VERSION_V1,
     MIX_EPSILON_REASON_ID,
     DecisionProvenanceLog,
+    DecisionProvenanceLogV1,
     DetectedLeak,
     EvEstimate,
     ExecutionSampling,
+    load_dpl,
+    load_dpl_json,
 )
 from .hand_evaluator import (
     HandCategory,
@@ -69,6 +73,7 @@ from .strategy_table import (
 __all__ = [
     "DECK_SIZE",
     "DPL_SCHEMA_VERSION",
+    "DPL_SCHEMA_VERSION_V1",
     "EV_DEFINITION",
     "MANIFEST_SCHEMA_VERSION",
     "MIX_EPSILON_REASON_ID",
@@ -85,6 +90,7 @@ __all__ = [
     "ComponentVersions",
     "ConfigRef",
     "DecisionProvenanceLog",
+    "DecisionProvenanceLogV1",
     "DetectedLeak",
     "EvEstimate",
     "ExecutionSampling",
@@ -110,6 +116,8 @@ __all__ = [
     "get_ontology",
     "hand_strength",
     "load_cluster_definition",
+    "load_dpl",
+    "load_dpl_json",
     "load_ontology",
     "parse_cards",
     "showdown_equity",

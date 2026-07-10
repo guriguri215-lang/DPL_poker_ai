@@ -24,7 +24,7 @@ from poker_ai.leak import (
     LeakDetectorConfig,
     leaky_fixture_action_baseline_table,
 )
-from poker_ai.session import run_session, write_jsonl, write_manifest
+from poker_ai.session import run_session, write_session_bundle
 
 
 def _current_git_commit() -> str:
@@ -118,14 +118,11 @@ def main(argv: list[str] | None = None) -> int:
         exploration_epsilon=args.exploration_epsilon,
         exploit_provider=exploit_provider,
     )
-    jsonl_path = write_jsonl(result.logs, args.out_dir / f"{result.session_id}.dpl.jsonl")
-    manifest_path = write_manifest(
-        result.manifest, args.out_dir / f"{result.session_id}.manifest.json"
-    )
+    jsonl_path, manifest_path = write_session_bundle(result, args.out_dir)
 
     detected_leaks = sum(len(log.detected_leaks) for log in result.logs)
     mixed_decisions = sum(1 for log in result.logs if log.mix_reasons)
-    print(f"session {result.session_id}: {len(result.logs)} decisions validated against DPL v1")
+    print(f"session {result.session_id}: {len(result.logs)} decisions validated against DPL v2")
     print(f"detected_leaks={detected_leaks}")
     print(f"mixed_decisions={mixed_decisions}")
     print(f"wrote {jsonl_path}")

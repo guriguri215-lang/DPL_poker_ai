@@ -30,6 +30,7 @@ _FIELD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _DETECTED_CLAIM_RE = re.compile(
     r"detected_leaks\[(?P<index>\d+)\]\.(?P<field>observed_rate|baseline_rate|confidence)"
 )
+_DETECTED_CONFIDENCE_PATH_RE = re.compile(r"dpl\.detected_leaks\[(?P<index>\d+)\]\.confidence")
 _SURFACE_REASON_RE = re.compile(r"\b(?:LEAK|TRG|MIX)_[A-Z0-9_]+\b")
 _SURFACE_NUMERIC_RE = re.compile(
     r"(?P<value>[+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*(?P<unit>%|bb)(?![A-Za-z0-9_])"
@@ -358,8 +359,103 @@ class _ExplanationVerifier:
 
     def _verify_numeric_claims(self) -> None:
         self._verify_required_solver_diagnostic_claims()
+        self._verify_confidence_claim_cardinality()
         for location, claim in self._numeric_claims():
             self._verify_numeric_claim(location, claim)
+
+    def _verify_confidence_claim_cardinality(self) -> None:
+        expected_indices = {
+            index
+            for index, leak in enumerate(self.dpl.detected_leaks)
+            if leak.reason_id in set(self.dpl.allowed_reason_ids)
+        }
+        claims_by_index: dict[int, list[tuple[str, NumericClaim]]] = {}
+        validation_index = next(
+            index
+            for index, stage in enumerate(self.explanation.stages)
+            if stage.stage == "validation"
+        )
+        validation_prefix = f"stages[{validation_index}].numeric_claims["
+
+        for location, claim in self._numeric_claims():
+            name_match = _DETECTED_CLAIM_RE.fullmatch(claim.name)
+            name_index = (
+                int(name_match.group("index"))
+                if name_match is not None and name_match.group("field") == "confidence"
+                else None
+            )
+            path_match = _DETECTED_CONFIDENCE_PATH_RE.fullmatch(claim.source_path)
+            path_index = int(path_match.group("index")) if path_match is not None else None
+            if name_index is None and path_index is None:
+                continue
+            if name_index is not None and path_index is not None and name_index != path_index:
+                self._add(
+                    "confidence_claim_wrong_index",
+                    location,
+                    f"claim name index {name_index} does not match source path index {path_index}",
+                )
+            index = name_index if name_index is not None else path_index
+            assert index is not None
+            claims_by_index.setdefault(index, []).append((location, claim))
+
+        for index in expected_indices:
+            matches = claims_by_index.get(index, [])
+            if not matches:
+                self._add(
+                    "confidence_claim_missing",
+                    "stages.validation.numeric_claims",
+                    f"missing detected_leaks[{index}].confidence claim",
+                )
+                continue
+            if len(matches) != 1:
+                self._add(
+                    "confidence_claim_duplicate",
+                    "stages.validation.numeric_claims",
+                    f"detected_leaks[{index}].confidence must appear exactly once",
+                )
+            expected_name = f"detected_leaks[{index}].confidence"
+            expected_path = f"dpl.detected_leaks[{index}].confidence"
+            for location, claim in matches:
+                if not location.startswith(validation_prefix):
+                    self._add(
+                        "confidence_claim_wrong_stage",
+                        location,
+                        "detected leak confidence claims must appear only in validation stage",
+                    )
+                if claim.name != expected_name:
+                    self._add(
+                        "confidence_claim_name_mismatch",
+                        f"{location}.name",
+                        f"expected {expected_name!r}",
+                    )
+                if claim.source_path != expected_path:
+                    self._add(
+                        "confidence_claim_path_mismatch",
+                        f"{location}.source_path",
+                        f"expected {expected_path!r}",
+                    )
+                if claim.source_kind != "dpl":
+                    self._add(
+                        "confidence_claim_source_kind_mismatch",
+                        f"{location}.source_kind",
+                        "detected leak confidence must be a direct DPL claim",
+                    )
+                if claim.unit != "probability":
+                    self._add(
+                        "confidence_claim_unit_mismatch",
+                        f"{location}.unit",
+                        "detected leak confidence must use unit 'probability'",
+                    )
+
+        for index, matches in claims_by_index.items():
+            if index in expected_indices:
+                continue
+            for location, _claim in matches:
+                self._add(
+                    "confidence_claim_not_allowed",
+                    location,
+                    f"detected_leaks[{index}].confidence is not allowed for explanation",
+                )
 
     def _numeric_claims(self) -> Iterator[tuple[str, NumericClaim]]:
         yield (

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 from pathlib import Path
 
 import explanation.verifier as verifier_module
@@ -105,6 +106,54 @@ def test_verifier_accepts_template_explanation(valid_dpl):
     result = verify_explanation(payload, dpl)
 
     assert result.passed
+
+
+def _confidence_claim(payload):
+    return next(
+        claim
+        for claim in payload["stages"][2]["numeric_claims"]
+        if claim["name"] == "detected_leaks[0].confidence"
+    )
+
+
+def test_verifier_requires_exactly_one_confidence_claim(valid_dpl):
+    dpl, payload = _valid_explanation_payload(valid_dpl)
+    payload["stages"][2]["numeric_claims"] = [
+        claim
+        for claim in payload["stages"][2]["numeric_claims"]
+        if claim["name"] != "detected_leaks[0].confidence"
+    ]
+
+    missing = verify_explanation(payload, dpl)
+    assert "confidence_claim_missing" in _codes(missing)
+
+    _dpl, payload = _valid_explanation_payload(valid_dpl)
+    payload["stages"][2]["numeric_claims"].append(copy.deepcopy(_confidence_claim(payload)))
+    duplicate = verify_explanation(payload, dpl)
+    assert "confidence_claim_duplicate" in _codes(duplicate)
+
+
+def test_verifier_rejects_confidence_claim_outside_validation_stage(valid_dpl):
+    dpl, payload = _valid_explanation_payload(valid_dpl)
+    claim = _confidence_claim(payload)
+    payload["stages"][2]["numeric_claims"].remove(claim)
+    payload["stages"][0]["numeric_claims"].append(claim)
+
+    result = verify_explanation(payload, dpl)
+    assert "confidence_claim_wrong_stage" in _codes(result)
+
+
+def test_verifier_rejects_confidence_wrong_index_path_and_unit(valid_dpl):
+    dpl, payload = _valid_explanation_payload(valid_dpl)
+    claim = _confidence_claim(payload)
+    claim["name"] = "detected_leaks[1].confidence"
+    claim["unit"] = "score"
+
+    result = verify_explanation(payload, dpl)
+    codes = _codes(result)
+    assert "confidence_claim_wrong_index" in codes
+    assert "numeric_unit_mismatch" in codes
+    assert "confidence_claim_missing" in codes
 
 
 def test_verifier_accepts_epsilon_exploration_explanation(valid_dpl):

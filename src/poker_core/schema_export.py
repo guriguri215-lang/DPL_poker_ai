@@ -18,7 +18,7 @@ import argparse
 import json
 from pathlib import Path
 
-from .dpl_schema import DecisionProvenanceLog
+from .dpl_schema import DecisionProvenanceLog, DecisionProvenanceLogV1
 from .reason_ontology import ReasonOntology
 from .run_manifest import RunManifest
 from .strategy_table import StrategyTable
@@ -26,6 +26,7 @@ from .strategy_table import StrategyTable
 #: Contract name -> pydantic model exported as JSON Schema.
 SCHEMA_MODELS: dict[str, type] = {
     "decision_provenance_log": DecisionProvenanceLog,
+    "decision_provenance_log_v1": DecisionProvenanceLogV1,
     "run_manifest": RunManifest,
     "reason_ontology": ReasonOntology,
     "strategy_table": StrategyTable,
