@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import math
+from decimal import Decimal, localcontext
+from math import comb
+
 import pytest
 
 from poker_ai.leak import (
@@ -12,6 +16,8 @@ from poker_ai.leak import (
     LeakDetectorConfig,
     action_baseline_table_from_strategy_table,
     action_baseline_table_sha256,
+    beta_binomial_upper_tail,
+    classify_ground_truth_boundary,
     leaky_fixture_action_baseline_table,
 )
 from poker_ai.observation import ObservationTracker
@@ -68,7 +74,7 @@ def test_positive_action_leak_matches_dpl_detected_leak_contract():
     assert leak.observed_rate == pytest.approx(0.75)
     assert leak.baseline_rate == pytest.approx(0.25)
     assert leak.effective_sample_size == 4
-    assert leak.confidence == pytest.approx(1.0)
+    assert leak.confidence == pytest.approx(0.8125)
 
 
 def test_negative_case_below_sample_floor():
@@ -83,14 +89,105 @@ def test_negative_case_below_deviation_threshold():
     assert leaks == []
 
 
+def test_negative_case_below_posterior_confidence_threshold():
+    tracker = _tracker_with_actions(["BET_ALL_IN", "BET_ALL_IN", "BET_ALL_IN", "CHECK"])
+    leaks = _detector(
+        baseline_rate=0.25,
+        min_effective_sample_size=4,
+        min_deviation=0.25,
+        min_confidence=0.9,
+    ).detect(tracker.snapshot())
+    assert leaks == []
+
+
+def test_structurally_ineligible_q_is_not_emitted():
+    tracker = _tracker_with_actions(["BET_ALL_IN"] * 20)
+    assert _detector(baseline_rate=0.75, min_confidence=0.0).detect(tracker.snapshot()) == []
+
+
 def test_threshold_boundary_is_inclusive():
     tracker = _tracker_with_actions(["BET_ALL_IN", "BET_ALL_IN", "BET_ALL_IN", "CHECK"])
-    leaks = _detector(baseline_rate=0.50, min_deviation=0.25, min_confidence=0.5).detect(
+    leaks = _detector(baseline_rate=0.50, min_deviation=0.25, min_confidence=0.3).detect(
         tracker.snapshot()
     )
     assert len(leaks) == 1
     assert leaks[0].observed_rate - leaks[0].baseline_rate == pytest.approx(0.25)
-    assert leaks[0].confidence == pytest.approx(0.5)
+    assert leaks[0].confidence == pytest.approx(0.3671875)
+
+
+def _decimal_binomial_cdf(*, k: int, n: int, q: str) -> Decimal:
+    with localcontext() as context:
+        context.prec = 80
+        probability = Decimal(q)
+        one_minus = Decimal(1) - probability
+        return sum(
+            Decimal(comb(n + 1, j)) * probability**j * one_minus ** (n + 1 - j)
+            for j in range(k + 1)
+        )
+
+
+@pytest.mark.parametrize(
+    ("k", "n", "baseline", "tau", "expected"),
+    [
+        (0, 0, 0.25, 0.25, 0.5),
+        (3, 4, 0.25, 0.25, 0.8125),
+        (10, 10, 0.0, 0.25, 0.9999997615814209),
+        (0, 10, 0.0, 0.25, 0.04223513603210449),
+    ],
+)
+def test_beta_binomial_upper_tail_known_values(k, n, baseline, tau, expected):
+    assert beta_binomial_upper_tail(
+        k=k,
+        n=n,
+        baseline_rate=baseline,
+        tau=tau,
+    ) == pytest.approx(expected, abs=1e-14)
+
+
+def test_beta_binomial_upper_tail_matches_independent_decimal_reference():
+    expected = _decimal_binomial_cdf(k=731, n=1000, q="0.712345678901")
+    actual = beta_binomial_upper_tail(
+        k=731,
+        n=1000,
+        baseline_rate=0.462345678901,
+        tau=0.25,
+    )
+    assert actual == pytest.approx(float(expected), abs=1e-12)
+    assert math.isfinite(actual)
+    assert 0.0 <= actual <= 1.0
+
+
+def test_beta_binomial_upper_tail_is_monotone_in_success_count():
+    scores = [beta_binomial_upper_tail(k=k, n=100, baseline_rate=0.4, tau=0.25) for k in range(101)]
+    assert scores == sorted(scores)
+
+
+def test_beta_binomial_upper_tail_q_boundary_and_invalid_inputs():
+    assert beta_binomial_upper_tail(k=10, n=10, baseline_rate=0.75, tau=0.25) == 0.0
+    with pytest.raises(ValueError, match="0 <= k <= n"):
+        beta_binomial_upper_tail(k=2, n=1, baseline_rate=0.0, tau=0.25)
+    with pytest.raises(ValueError, match="tau"):
+        beta_binomial_upper_tail(k=0, n=1, baseline_rate=0.0, tau=0.0)
+
+
+def test_action_group_duplicates_are_rejected_before_counting():
+    with pytest.raises(ValueError, match="duplicate actions"):
+        ActionLeakRule(
+            reason_id="LEAK_R008",
+            leak_type="bet_too_often_when_checked_to",
+            action_group=("BET", "BET"),
+            baseline_rate=0.25,
+            direction="decrease_bet_frequency_when_checked_to",
+        )
+
+
+def test_ground_truth_decimal_boundary_policy_is_deterministic():
+    assert classify_ground_truth_boundary(p_true="0.75", q="0.75") == "indifference"
+    assert classify_ground_truth_boundary(p_true="0.750000000001", q="0.75") == "indifference"
+    assert classify_ground_truth_boundary(p_true="0.750000000002", q="0.75") == "positive"
+    assert classify_ground_truth_boundary(p_true="0.749999999998", q="0.75") == "negative"
+    with pytest.raises(TypeError, match="not floats"):
+        classify_ground_truth_boundary(p_true=0.75, q="0.75")
 
 
 def test_ontology_label_mismatch_is_rejected():

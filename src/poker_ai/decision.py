@@ -41,8 +41,9 @@ from poker_core.state_cluster import classify_board, cluster_def_version
 
 from .actions import legal_actions
 from .baseline_strategy import FACING_ALL_IN, BaselineStrategy, build_situation_key
-from .exploit import ExploitProvider, RuleExploitProvider
+from .exploit import ExploitProvider, RuleExploitProvider, validate_provider_confidence_config
 from .hand_bucket import BucketDefinition, classify_combo
+from .leak import LeakDetectorConfig
 from .mixer import EPSILON_SAMPLER_VERSION, ExecutionSampler, safety_mix
 
 #: EV definition label recorded in the DPL for the task-3 decision EV (Solver 8.3).
@@ -121,6 +122,7 @@ class HeroAgent:
         safety_alpha: float = 0.0,
         exploration_epsilon: float = 0.0,
         exploit_provider: ExploitProvider | None = None,
+        confidence_config: LeakDetectorConfig | None = None,
     ) -> None:
         if not math.isfinite(safety_alpha) or not 0.0 <= safety_alpha <= 1.0:
             raise ValueError(f"safety_alpha must be finite and in [0, 1], got {safety_alpha}")
@@ -132,7 +134,11 @@ class HeroAgent:
         self.bucket_def = bucket_def
         self.safety_alpha = safety_alpha
         self.exploration_epsilon = exploration_epsilon
-        self.exploit_provider = exploit_provider or RuleExploitProvider()
+        self.exploit_provider = exploit_provider or RuleExploitProvider(
+            confidence_config=confidence_config
+        )
+        if exploit_provider is not None and confidence_config is not None:
+            validate_provider_confidence_config(exploit_provider, confidence_config)
 
     def decide(
         self,

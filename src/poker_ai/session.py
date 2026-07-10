@@ -26,7 +26,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-from poker_core.dpl_schema import DecisionProvenanceLog, EvEstimate
+from poker_core.dpl_schema import DPL_SCHEMA_VERSION, DecisionProvenanceLog, EvEstimate
 from poker_core.range_model import Range
 from poker_core.reason_ontology import get_ontology
 from poker_core.run_manifest import (
@@ -49,10 +49,16 @@ from .baseline_strategy import (
 from .decision import HeroAgent, Observation
 from .exploit import ExploitProvider
 from .hand_bucket import BUCKET_DEF_PATH, bucket_def_version, get_bucket_definition
-from .leak import LeakDetector, action_baseline_table_sha256
+from .leak import LeakDetector
 from .mixer import EPSILON_SAMPLER_VERSION
-from .observation import ObservationTracker
+from .observation import ActionStats, ObservationTracker
 from .opponent import StubOpponent
+from .posterior_bundle import (
+    PosteriorBundleParts,
+    build_posterior_bundle_parts,
+    validate_posterior_bundle,
+    write_posterior_artifacts,
+)
 from .scenario import SCENARIO_SCHEMA_VERSION, Scenario, generate_scenarios
 
 #: EV source for every task-3 DPL: exact showdown enumeration (ADR-0008).
@@ -70,6 +76,7 @@ class SessionResult:
     session_id: str
     logs: list[DecisionProvenanceLog]
     manifest: RunManifest
+    posterior_bundle: PosteriorBundleParts
 
 
 def _session_id_for(seed: int) -> str:
@@ -128,6 +135,7 @@ def _build_dpl(
         safety_alpha=safety_alpha,
         exploration_epsilon=exploration_epsilon,
         exploit_provider=exploit_provider,
+        confidence_config=leak_detector.config,
     )
     result = agent.decide(observation, detected_leaks=detected_leaks)
     leak_reason_ids = (
@@ -157,6 +165,7 @@ def _build_dpl(
     return DecisionProvenanceLog(
         hand_id=hand_id,
         session_id=session_id,
+        schema_version=DPL_SCHEMA_VERSION,
         state_cluster=result.state_cluster,
         cluster_def_version=result.cluster_def_version,
         hand_bucket=result.hand_bucket,
@@ -187,10 +196,11 @@ def iter_session_logs(
     safety_alpha: float = 0.0,
     exploration_epsilon: float = 0.0,
     exploit_provider: ExploitProvider | None = None,
+    _tracker: ObservationTracker | None = None,
 ) -> Iterator[DecisionProvenanceLog]:
     """Yield one validated DPL per generated hand (deterministic for a seed)."""
     session_id = _session_id_for(seed)
-    tracker = ObservationTracker()
+    tracker = _tracker or ObservationTracker()
     detector = leak_detector or LeakDetector()
     for index, scenario in enumerate(generate_scenarios(seed, num_hands)):
         hand_id = f"{session_id}-H{index:05d}"
@@ -209,15 +219,6 @@ def iter_session_logs(
 def _config_ref(path: Path, *, name: str, role: str) -> ConfigRef:
     sha = hashlib.sha256(path.read_bytes()).hexdigest()
     return ConfigRef(name=name, role=role, path=path.name, sha256=sha)
-
-
-def _action_baseline_config_ref(detector: LeakDetector) -> ConfigRef:
-    return ConfigRef(
-        name="action_baseline_table",
-        role="baseline_table",
-        path=f"inline:{detector.baseline_table_version}",
-        sha256=action_baseline_table_sha256(detector.baseline_table),
-    )
 
 
 def _execution_sampler_config_ref(exploration_epsilon: float) -> ConfigRef:
@@ -253,9 +254,18 @@ def build_manifest(
     leak_detector: LeakDetector | None = None,
     safety_alpha: float = 0.0,
     exploration_epsilon: float = 0.0,
+    action_stats: tuple[ActionStats, ...] | list[ActionStats] = (),
+    posterior_bundle: PosteriorBundleParts | None = None,
 ) -> RunManifest:
     """Build the RunManifest pinning versions, the seed and config hashes (M-7)."""
     detector = leak_detector or LeakDetector()
+    bundle = posterior_bundle or build_posterior_bundle_parts(
+        detector,
+        action_stats,
+        opponent_id=OPPONENT_ID,
+        horizon=num_hands,
+        seed=seed,
+    )
     versions = ComponentVersions(
         reason_ontology_version=get_ontology().ontology_version,
         cluster_def_version=cluster_def_version(),
@@ -266,7 +276,8 @@ def build_manifest(
         _config_ref(CLUSTER_DEF_PATH, name="state_cluster", role="cluster_def"),
         _config_ref(BUCKET_DEF_PATH, name="hand_bucket_def", role="other"),
         _config_ref(BASELINE_PATH, name="baseline_strategy", role="strategy_table"),
-        _action_baseline_config_ref(detector),
+        bundle.estimator_ref,
+        bundle.baseline_ref,
         _execution_sampler_config_ref(exploration_epsilon),
     ]
     code = CodeProvenance(
@@ -295,7 +306,7 @@ def build_manifest(
                 split="training",
             )
         ],
-        outputs=[_artifact_ref(path) for path in output_paths or []],
+        outputs=[bundle.snapshot_ref, *(_artifact_ref(path) for path in output_paths or [])],
     )
 
 
@@ -311,6 +322,7 @@ def run_session(
 ) -> SessionResult:
     """Run a full session in memory: validated DPLs plus the manifest."""
     detector = leak_detector or LeakDetector()
+    tracker = ObservationTracker()
     logs = list(
         iter_session_logs(
             seed,
@@ -319,7 +331,15 @@ def run_session(
             safety_alpha=safety_alpha,
             exploration_epsilon=exploration_epsilon,
             exploit_provider=exploit_provider,
+            _tracker=tracker,
         )
+    )
+    bundle = build_posterior_bundle_parts(
+        detector,
+        tracker.snapshot(),
+        opponent_id=OPPONENT_ID,
+        horizon=num_hands,
+        seed=seed,
     )
     manifest = build_manifest(
         seed,
@@ -328,12 +348,23 @@ def run_session(
         leak_detector=detector,
         safety_alpha=safety_alpha,
         exploration_epsilon=exploration_epsilon,
+        action_stats=tracker.snapshot(),
+        posterior_bundle=bundle,
     )
-    return SessionResult(_session_id_for(seed), logs, manifest)
+    return SessionResult(_session_id_for(seed), logs, manifest, bundle)
 
 
-def write_jsonl(logs: list[DecisionProvenanceLog], path: Path | str) -> Path:
-    """Write DPLs as JSONL (one decision per line) and return the path."""
+def write_jsonl(
+    logs: list[DecisionProvenanceLog],
+    path: Path | str,
+    *,
+    manifest: RunManifest,
+    bundle_root: Path | str,
+) -> Path:
+    """Write posterior DPL v2 JSONL after its contextual bundle hard gate passes."""
+    validate_posterior_bundle(manifest, bundle_root)
+    if any(log.schema_version != manifest.versions.dpl_schema_version for log in logs):
+        raise ValueError("DPL log version does not match the posterior manifest")
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("w", encoding="utf-8") as fh:
@@ -343,11 +374,37 @@ def write_jsonl(logs: list[DecisionProvenanceLog], path: Path | str) -> Path:
 
 
 def write_manifest(manifest: RunManifest, path: Path | str) -> Path:
-    """Write the RunManifest as JSON and return the path."""
+    """Write a posterior RunManifest after validating its sibling bundle."""
     out = Path(path)
+    validate_posterior_bundle(manifest, out.parent)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(
         json.dumps(manifest.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
     return out
+
+
+def write_session_bundle(
+    result: SessionResult,
+    out_dir: Path | str,
+    *,
+    dpl_filename: str | None = None,
+    manifest_filename: str | None = None,
+) -> tuple[Path, Path]:
+    """Write canonical provenance, DPL JSONL, and manifest as one gated bundle."""
+    root = Path(out_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    write_posterior_artifacts(result.posterior_bundle, root)
+    validate_posterior_bundle(result.manifest, root)
+    dpl_path = write_jsonl(
+        result.logs,
+        root / (dpl_filename or f"{result.session_id}.dpl.jsonl"),
+        manifest=result.manifest,
+        bundle_root=root,
+    )
+    manifest_path = write_manifest(
+        result.manifest,
+        root / (manifest_filename or f"{result.session_id}.manifest.json"),
+    )
+    return dpl_path, manifest_path

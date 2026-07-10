@@ -1,4 +1,4 @@
-"""Tests for the Decision Provenance Log schema v1 (ADR-0001, ADR-0005/0006/0008)."""
+"""Tests for current DPL v2 and read-only historical DPL v1 loading."""
 
 from __future__ import annotations
 
@@ -7,8 +7,12 @@ from pydantic import ValidationError
 
 from poker_core.dpl_schema import (
     DPL_SCHEMA_VERSION,
+    DPL_SCHEMA_VERSION_V1,
     DecisionProvenanceLog,
+    DecisionProvenanceLogV1,
     EvEstimate,
+    load_dpl,
+    load_dpl_json,
 )
 
 
@@ -21,6 +25,32 @@ def test_valid_dpl_round_trips(valid_dpl):
     # JSON round-trip preserves the record
     again = DecisionProvenanceLog.model_validate_json(dpl.model_dump_json())
     assert again == dpl
+
+
+def test_version_dispatch_keeps_v1_read_only_without_relabelling(valid_dpl):
+    valid_dpl["schema_version"] = DPL_SCHEMA_VERSION_V1
+    legacy = load_dpl(valid_dpl)
+
+    assert isinstance(legacy, DecisionProvenanceLogV1)
+    assert legacy.schema_version == "1.0.0"
+    assert load_dpl_json(legacy.model_dump_json()) == legacy
+    with pytest.raises(ValidationError):
+        DecisionProvenanceLog.model_validate(valid_dpl)
+
+
+def test_version_dispatch_rejects_unknown_dpl_version(valid_dpl):
+    valid_dpl["schema_version"] = "3.0.0"
+    with pytest.raises(ValueError, match="unsupported DPL schema_version"):
+        load_dpl(valid_dpl)
+
+
+def test_version_dispatch_rejects_missing_dpl_version(valid_dpl):
+    valid_dpl.pop("schema_version")
+
+    with pytest.raises(ValueError, match="schema_version is required"):
+        load_dpl(valid_dpl)
+    with pytest.raises(ValidationError, match="schema_version"):
+        DecisionProvenanceLog.model_validate(valid_dpl)
 
 
 # --- policy distribution validation ---------------------------------------

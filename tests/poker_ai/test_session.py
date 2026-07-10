@@ -17,13 +17,13 @@ from poker_ai.leak import (
     LeakDetectorConfig,
     leaky_fixture_action_baseline_table,
 )
+from poker_ai.posterior_bundle import load_posterior_run_bundle
 from poker_ai.session import (
     EV_SOURCE,
     build_manifest,
     iter_session_logs,
     run_session,
-    write_jsonl,
-    write_manifest,
+    write_session_bundle,
 )
 from poker_core.dpl_schema import DecisionProvenanceLog
 from poker_core.run_manifest import RunManifest
@@ -170,7 +170,7 @@ def test_custom_leak_baseline_version_is_stamped_on_manifest_and_logs():
     assert result.manifest.versions.baseline_table_version == "fixture-action-baseline"
     baseline_configs = [c for c in result.manifest.configs if c.name == "action_baseline_table"]
     assert len(baseline_configs) == 1
-    assert baseline_configs[0].path == "inline:fixture-action-baseline"
+    assert baseline_configs[0].path == "provenance/action_baseline_table.json"
     assert len(baseline_configs[0].sha256) == 64
 
 
@@ -238,8 +238,10 @@ def test_hand_buckets_and_actions_have_variety():
 
 
 def test_seed_reproducible_jsonl(tmp_path):
-    a = write_jsonl(list(iter_session_logs(42, HANDS)), tmp_path / "a.jsonl")
-    b = write_jsonl(list(iter_session_logs(42, HANDS)), tmp_path / "b.jsonl")
+    first = run_session(42, HANDS)
+    second = run_session(42, HANDS)
+    a, _ = write_session_bundle(first, tmp_path / "a")
+    b, _ = write_session_bundle(second, tmp_path / "b")
     assert a.read_bytes() == b.read_bytes()
 
 
@@ -270,10 +272,21 @@ def test_manifest_config_hashes_are_reproducible():
     assert [c.sha256 for c in first.configs] == [c.sha256 for c in second.configs]
 
 
+def test_posterior_1000_hand_session_regression():
+    result = run_session(20260710, 1000)
+
+    assert len(result.logs) == 1000
+    assert all(log.schema_version == "2.0.0" for log in result.logs)
+    snapshot = json.loads(
+        result.posterior_bundle.artifacts["provenance/action_stats_terminal_snapshots.json"]
+    )
+    r007_records = [record for record in snapshot["records"] if record["rule_id"] == "LEAK_R007"]
+    assert sum(record["n"] for record in r007_records) == 1000
+
+
 def test_run_session_writes_and_reloads(tmp_path):
     result = run_session(7, HANDS, git_commit="unknown")
-    jsonl_path = write_jsonl(result.logs, tmp_path / f"{result.session_id}.jsonl")
-    manifest_path = write_manifest(result.manifest, tmp_path / f"{result.session_id}.manifest.json")
+    jsonl_path, manifest_path = write_session_bundle(result, tmp_path)
 
     lines = jsonl_path.read_text(encoding="utf-8").splitlines()
     assert len(lines) == HANDS
@@ -282,6 +295,8 @@ def test_run_session_writes_and_reloads(tmp_path):
 
     reloaded = RunManifest.model_validate(json.loads(manifest_path.read_text(encoding="utf-8")))
     assert reloaded.run_id == result.session_id
+    validated = load_posterior_run_bundle(manifest_path)
+    assert validated.manifest.run_id == result.session_id
 
 
 def test_leaky_fixture_cli_smoke_writes_detected_leaks_and_mix(tmp_path, capsys):

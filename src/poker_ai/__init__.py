@@ -36,6 +36,7 @@ from .exploit import (
     RuleExploitProvider,
     RuleExploitResult,
     nodelock_config_from_leaks,
+    validate_provider_confidence_config,
 )
 from .hand_bucket import (
     BUCKET_NAMES_WEAK_TO_STRONG,
@@ -48,14 +49,23 @@ from .hand_bucket import (
 )
 from .leak import (
     ActionBaselineTable,
+    ActionLeakCandidateScore,
     ActionLeakRule,
     LeakDetector,
     LeakDetectorConfig,
+    beta_binomial_upper_tail,
+    classify_ground_truth_boundary,
     default_action_baseline_table,
+    score_action_leak_candidate,
 )
 from .mixer import ActionSelector, is_pure_base, safety_mix
 from .observation import ActionStats, ObservationTracker
 from .opponent import HiddenStrategyAccessError, OpponentAction, StubOpponent
+from .posterior_bundle import (
+    ValidatedPosteriorBundle,
+    load_posterior_run_bundle,
+    validate_posterior_bundle,
+)
 from .scenario import (
     SCENARIO_SCHEMA_VERSION,
     Scenario,
@@ -69,6 +79,7 @@ from .session import (
     run_session,
     write_jsonl,
     write_manifest,
+    write_session_bundle,
 )
 
 __all__ = [
@@ -80,6 +91,7 @@ __all__ = [
     "SCENARIO_SCHEMA_VERSION",
     "ActionSelector",
     "ActionBaselineTable",
+    "ActionLeakCandidateScore",
     "ActionLeakRule",
     "ActionStats",
     "BaselineStrategy",
@@ -102,6 +114,8 @@ __all__ = [
     "SessionResult",
     "StubOpponent",
     "baseline_table_version",
+    "beta_binomial_upper_tail",
+    "classify_ground_truth_boundary",
     "bucket_def_version",
     "build_manifest",
     "build_situation_key",
@@ -118,11 +132,17 @@ __all__ = [
     "legal_actions",
     "load_baseline_strategy",
     "load_bucket_definition",
+    "load_posterior_run_bundle",
     "nodelock_config_from_leaks",
     "policy_ev",
     "run_session",
+    "score_action_leak_candidate",
     "safety_mix",
     "strength_percentile",
+    "validate_provider_confidence_config",
     "write_jsonl",
     "write_manifest",
+    "write_session_bundle",
+    "validate_posterior_bundle",
+    "ValidatedPosteriorBundle",
 ]

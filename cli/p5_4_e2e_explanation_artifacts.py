@@ -36,6 +36,7 @@ from poker_ai.leak import (
     LeakDetectorConfig,
     leaky_fixture_action_baseline_table,
 )
+from poker_ai.posterior_bundle import write_posterior_artifacts
 from poker_ai.session import build_manifest, run_session, write_jsonl, write_manifest
 from poker_core.dpl_schema import DecisionProvenanceLog, DetectedLeak
 from poker_core.run_manifest import ArtifactRef
@@ -288,7 +289,13 @@ def main(argv: list[str] | None = None) -> int:
     summary_path = args.out_dir / f"{session.session_id}.verifier_summary.json"
     manifest_path = args.out_dir / f"{session.session_id}.manifest.json"
 
-    write_jsonl(session.logs, dpl_path)
+    write_posterior_artifacts(session.posterior_bundle, args.out_dir)
+    write_jsonl(
+        session.logs,
+        dpl_path,
+        manifest=session.manifest,
+        bundle_root=args.out_dir,
+    )
     _write_explanations_jsonl(explanations, explanations_path)
 
     failures = _verify_all(session.logs, explanations)
@@ -320,8 +327,10 @@ def main(argv: list[str] | None = None) -> int:
         argv=raw_argv,
         leak_detector=detector,
         safety_alpha=args.safety_alpha,
+        posterior_bundle=session.posterior_bundle,
     )
     manifest.outputs = [
+        session.posterior_bundle.snapshot_ref,
         _artifact_ref(repo_root, dpl_path),
         _artifact_ref(repo_root, explanations_path),
         _artifact_ref(repo_root, summary_path),

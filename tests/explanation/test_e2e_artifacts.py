@@ -72,6 +72,7 @@ def test_p5_4_artifact_cli_writes_verified_leaky_fixture_outputs(tmp_path, capsy
         "S20260704.dpl.jsonl",
         "S20260704.explanations.jsonl",
         "S20260704.verifier_summary.json",
+        "action_stats_terminal_snapshots",
     }
     assert all(output.sha256 for output in manifest.outputs)
 

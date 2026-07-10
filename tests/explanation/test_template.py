@@ -13,7 +13,7 @@ from explanation import (
     generate_template_explanation,
 )
 from explanation.contract import STAGE_ORDER
-from poker_core.dpl_schema import DecisionProvenanceLog
+from poker_core.dpl_schema import DecisionProvenanceLog, load_dpl
 from poker_core.reason_ontology import get_ontology
 
 
@@ -29,6 +29,16 @@ def test_template_explanation_has_five_stages_and_counterfactual(valid_dpl):
     assert explanation.counterfactual.title == "Counterfactual"
     assert "Counterfactual:" in explanation.rendered_text
     assert explanation.dpl_ref == "S0001:H000421"
+
+
+def test_template_preserves_historical_v1_source_schema_version(valid_dpl):
+    valid_dpl["schema_version"] = "1.0.0"
+    legacy = load_dpl(valid_dpl)
+
+    explanation = generate_template_explanation(legacy)
+
+    assert legacy.schema_version == "1.0.0"
+    assert explanation.source_dpl_schema_version == "1.0.0"
 
 
 def test_explanation_contract_exports_valid_json_schema(valid_dpl):

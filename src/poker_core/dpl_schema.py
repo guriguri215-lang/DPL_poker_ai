@@ -1,4 +1,4 @@
-"""Decision Provenance Log (DPL) schema v1 -- the project's core contract.
+"""Decision Provenance Log (DPL) versioned schemas -- the project's core contract.
 
 The DPL is the structured, auditable record of *why* the AI adjusted its policy
 on a single decision. Every downstream artefact (template explanations, the
@@ -38,8 +38,10 @@ pydantic model, which is the canonical validator.
 
 from __future__ import annotations
 
+import json
 import math
-from typing import Annotated, Literal
+from collections.abc import Mapping
+from typing import Annotated, Any, ClassVar, Literal
 
 from pydantic import (
     AfterValidator,
@@ -52,8 +54,11 @@ from pydantic import (
 
 from .reason_ontology import get_ontology
 
-#: Current DPL schema version. Bump (with an ADR) on any breaking change.
-DPL_SCHEMA_VERSION = "1.0.0"
+#: Historical MVP-score DPL version retained for read-only loading.
+DPL_SCHEMA_VERSION_V1 = "1.0.0"
+
+#: Current posterior-confidence DPL version (ADR-0019).
+DPL_SCHEMA_VERSION = "2.0.0"
 
 #: MIX reason recorded only when the ADR-0018 epsilon branch actually fires.
 MIX_EPSILON_REASON_ID = "MIX_EPSILON"
@@ -221,11 +226,12 @@ class DecisionProvenanceLog(BaseModel):
     """One decision's full provenance record (Spec 6.11; the project core)."""
 
     model_config = ConfigDict(extra="forbid")
+    supported_schema_version: ClassVar[str] = DPL_SCHEMA_VERSION
 
     # --- identity / versioning ---
     hand_id: str
     session_id: str
-    schema_version: str = DPL_SCHEMA_VERSION
+    schema_version: str = Field(json_schema_extra={"const": DPL_SCHEMA_VERSION})
 
     # --- situation ---
     state_cluster: str
@@ -257,10 +263,10 @@ class DecisionProvenanceLog(BaseModel):
     @field_validator("schema_version")
     @classmethod
     def _supported_schema_version(cls, value: str) -> str:
-        if value != DPL_SCHEMA_VERSION:
+        if value != cls.supported_schema_version:
             raise ValueError(
                 f"unsupported DPL schema_version {value!r}; "
-                f"this build writes {DPL_SCHEMA_VERSION!r}"
+                f"this model supports {cls.supported_schema_version!r}"
             )
         return value
 
@@ -394,3 +400,37 @@ class DecisionProvenanceLog(BaseModel):
     def ev_for_explanation(self) -> dict[str, float | None] | None:
         """EV payload the explanation may cite, or ``None`` (ADR-0008)."""
         return self.ev_estimate.explanation_values()
+
+
+class DecisionProvenanceLogV1(DecisionProvenanceLog):
+    """Historical MVP-confidence DPL model retained for read-only loading."""
+
+    supported_schema_version: ClassVar[str] = DPL_SCHEMA_VERSION_V1
+    schema_version: str = Field(json_schema_extra={"const": DPL_SCHEMA_VERSION_V1})
+
+
+LoadedDecisionProvenanceLog = DecisionProvenanceLog | DecisionProvenanceLogV1
+
+
+def load_dpl(payload: Mapping[str, Any]) -> LoadedDecisionProvenanceLog:
+    """Load a DPL by dispatching on ``schema_version`` before validation.
+
+    Version 1 is never converted or relabelled as version 2. New writes must use
+    :class:`DecisionProvenanceLog` and explicitly record version 2.
+    """
+    if "schema_version" not in payload:
+        raise ValueError("DPL schema_version is required for version dispatch")
+    version = payload["schema_version"]
+    if version == DPL_SCHEMA_VERSION:
+        return DecisionProvenanceLog.model_validate(payload)
+    if version == DPL_SCHEMA_VERSION_V1:
+        return DecisionProvenanceLogV1.model_validate(payload)
+    raise ValueError(f"unsupported DPL schema_version {version!r}")
+
+
+def load_dpl_json(raw: str | bytes | bytearray) -> LoadedDecisionProvenanceLog:
+    """Load versioned DPL JSON without implicitly upgrading historical data."""
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise ValueError("DPL JSON must contain an object")
+    return load_dpl(payload)
