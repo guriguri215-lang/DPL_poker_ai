@@ -1,6 +1,9 @@
 # configs/opponents/test
 
-Opponent model configs for the **test** split: unseen leak amounts, unseen leak
-types and composite leaks. Loaded only by the evaluation CLI, each setting
-evaluated once (runs audited via the manifest). Placeholder until Phase 6.
-Physically separated from training/validation (REV-20260702 5.3).
+Reserved physical boundary for future unseen-amount, unseen-type, and composite
+Test opponents. P6-3 deliberately places no Test payload or immutable Test batch
+here. Normal Training/Validation catalog access rejects this split before file
+inspection.
+
+Test population, opening, execution, batch freezing, and attempt ledgers require
+the separate pre-Test research gate and are not part of P6-3.
