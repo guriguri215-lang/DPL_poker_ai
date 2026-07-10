@@ -1,0 +1,79 @@
+{
+  "artifact_sha256": "e463a8651412b9569334f27c5fe23d95be7e68f6c6d32d377857bfbf3105aa74",
+  "artifact_type": "frozen-equilibrium",
+  "equilibrium_version": "river-large-bet-equilibrium-v1",
+  "game": {
+    "bet_fraction": "0.75",
+    "board": "As Ks Qh 2d 7c",
+    "builder": "poker_solver.river_tree.build_river_game",
+    "builder_version": "river-single-bet-v1",
+    "ip_range": {
+      "6h6c": "1",
+      "7h7d": "1",
+      "QsQd": "1"
+    },
+    "oop_range": {
+      "5h5c": "1",
+      "AhAd": "1",
+      "JhJd": "1"
+    },
+    "pot": "8"
+  },
+  "schema_version": "1.0.0",
+  "solver": {
+    "algorithm": "cfr-plus",
+    "average_delay": 100,
+    "implementation": "poker_solver.cfr_plus.solve_cfr_plus",
+    "iterations": 10000
+  },
+  "strategy": {
+    "IP:6h6c:vs_bet": {
+      "CALL": "0.17891215554304316",
+      "FOLD": "0.8210878444569569"
+    },
+    "IP:6h6c:vs_check": {
+      "BET": "0.5143329844503716",
+      "CHECK": "0.48566701554962854"
+    },
+    "IP:7h7d:vs_bet": {
+      "CALL": "0.767698415354561",
+      "FOLD": "0.23230158464543907"
+    },
+    "IP:7h7d:vs_check": {
+      "BET": "0.6000292162189884",
+      "CHECK": "0.3999707837810116"
+    },
+    "IP:QsQd:vs_bet": {
+      "CALL": "0.767698415354561",
+      "FOLD": "0.23230158464543907"
+    },
+    "IP:QsQd:vs_check": {
+      "BET": "0.6000292162189884",
+      "CHECK": "0.3999707837810116"
+    },
+    "OOP:5h5c:start": {
+      "BET": "0.2571456203159498",
+      "CHECK": "0.7428543796840502"
+    },
+    "OOP:5h5c:vs_bet": {
+      "CALL": "0",
+      "FOLD": "1"
+    },
+    "OOP:AhAd:start": {
+      "BET": "0.6000093087076104",
+      "CHECK": "0.39999069129238957"
+    },
+    "OOP:AhAd:vs_bet": {
+      "CALL": "1",
+      "FOLD": "0"
+    },
+    "OOP:JhJd:start": {
+      "BET": "0.0000012380282546726628",
+      "CHECK": "0.9999987619717453"
+    },
+    "OOP:JhJd:vs_bet": {
+      "CALL": "0.40001805085338993",
+      "FOLD": "0.5999819491466101"
+    }
+  }
+}

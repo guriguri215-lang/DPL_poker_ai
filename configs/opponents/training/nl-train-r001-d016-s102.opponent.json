@@ -1,0 +1,15 @@
+{
+  "schema_version": "1.0.0",
+  "generator_version": "nodelock-opponent-config-v1",
+  "opponent_id": "nl-train-r001-d016-s102",
+  "opponent_version": "1.0.0",
+  "split": "training",
+  "equilibrium_version": "river-large-bet-equilibrium-v1",
+  "equilibrium_artifact_sha256": "e463a8651412b9569334f27c5fe23d95be7e68f6c6d32d377857bfbf3105aa74",
+  "opponent_position": "IP",
+  "leak_vector": {"LEAK_R001": "0.16"},
+  "combo_allocation": "baseline_scaled",
+  "lock_mode": "HARD",
+  "unlocked_policy_mode": "fix_to_baseline",
+  "seed": 102
+}
