@@ -12,6 +12,7 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 from opponents import load_training_catalog
 from opponents.model import OpponentModelConfig
@@ -21,6 +22,7 @@ from .p6_7 import (
     REPETITION_SEEDS,
     STREAM_NAMES,
     PrimaryCandidate,
+    StreamRoot,
     derive_stream_root,
     primary_candidate_grid,
     validate_primary_candidate_grid,
@@ -29,8 +31,11 @@ from .p6_7 import (
 
 TRAINING_BATCH_SCHEMA_VERSION = "phase6-training-batch-manifest-v1"
 TRAINING_ARTIFACT_SCHEMA_VERSION = "phase6-training-artifact-v1"
+TRAINING_EXECUTION_ARTIFACT_SCHEMA_VERSION = "phase6-training-execution-artifact-v1"
 TRAINING_SELECTION_SCHEMA_VERSION = "phase6-training-selection-report-v1"
 TRAINING_RUNNER_VERSION = "p6-7-training-only-runner-v1"
+TRAINING_EXECUTION_ADAPTER_VERSION = "p6-7-training-execution-adapter-v1"
+TRAINING_EXECUTION_RECORD_SCHEMA_VERSION = "phase6-training-execution-record-v1"
 HORIZONS = (50, 200, 1000)
 
 _ARTIFACT_TYPES = (
@@ -43,6 +48,7 @@ _ARTIFACT_TYPES = (
 _SESSION_ARTIFACT_TYPES = frozenset(_ARTIFACT_TYPES[:3])
 _CANDIDATE_ARTIFACT_TYPES = frozenset(_ARTIFACT_TYPES[3:])
 _SHA256_CHARS = frozenset("0123456789abcdef")
+_TRAINING_EXECUTION_BUNDLE_KIND = "training_execution"
 
 
 @dataclass(frozen=True, order=True, slots=True)
@@ -103,6 +109,428 @@ class TrainingBatchPlan:
 class TrainingArtifactBundle:
     root: Path
     references: dict[str, dict[str, object]]
+
+
+@dataclass(frozen=True, slots=True)
+class TrainingSessionRequest:
+    """One approved Training session with all candidate-independent stream roots."""
+
+    key: TrainingSessionKey
+    candidate: PrimaryCandidate
+    opponent: OpponentModelConfig
+    stream_roots: tuple[StreamRoot, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class TrainingSessionResult:
+    """The three session-level products returned by a Training execution backend."""
+
+    split: str
+    key: TrainingSessionKey
+    stream_roots: tuple[StreamRoot, ...]
+    terminal_candidate_snapshot: object
+    hero_policy_snapshot: object
+    exact_ev_cell: object
+
+
+@dataclass(frozen=True, slots=True)
+class TrainingCandidateRequest:
+    """All completed session products required to evaluate one candidate."""
+
+    candidate: PrimaryCandidate
+    session_results: tuple[TrainingSessionResult, ...]
+    session_join_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class TrainingCandidateResult:
+    """The two candidate-level products returned by a Training execution backend."""
+
+    split: str
+    candidate_id: str
+    session_join_sha256: str
+    calibration_cell: object
+    aggregate_metrics: object
+
+
+class TrainingExecutionBackend(Protocol):
+    """Training-only bridge to existing session, solver, and evaluator execution."""
+
+    backend_id: str
+    backend_version: str
+
+    def run_sessions(
+        self, requests: Sequence[TrainingSessionRequest]
+    ) -> Sequence[TrainingSessionResult]: ...
+
+    def evaluate_candidates(
+        self, requests: Sequence[TrainingCandidateRequest]
+    ) -> Sequence[TrainingCandidateResult]: ...
+
+
+def run_training_execution_adapter(
+    plan: TrainingBatchPlan,
+    backend: TrainingExecutionBackend,
+) -> dict[str, tuple[TrainingArtifactRecord, ...]]:
+    """Execute an approved plan through a Training-only backend and bind provenance."""
+    _validate_plan(plan)
+    backend_identity = _backend_identity(backend)
+    opponents = {item.opponent_id: item for item in load_training_catalog()}
+    candidates = {item.candidate_id: item for item in plan.candidates}
+    requests = tuple(
+        TrainingSessionRequest(
+            key=key,
+            candidate=candidates[key.candidate_id],
+            opponent=opponents[key.opponent_id],
+            stream_roots=tuple(
+                derive_stream_root(
+                    split="training",
+                    opponent_id=key.opponent_id,
+                    horizon=key.horizon,
+                    repetition_id=key.repetition_id,
+                    stream_name=stream_name,
+                )
+                for stream_name in STREAM_NAMES
+            ),
+        )
+        for key in plan.sessions
+    )
+    session_results = tuple(backend.run_sessions(requests))
+    if [item.key for item in session_results if isinstance(item, TrainingSessionResult)] != [
+        item.key for item in requests
+    ] or len(session_results) != len(requests):
+        raise ValueError("Training backend session results are missing, duplicate, or out of order")
+
+    session_records: dict[str, list[TrainingArtifactRecord]] = {
+        artifact_type: [] for artifact_type in _SESSION_ARTIFACT_TYPES
+    }
+    normalized_results: list[TrainingSessionResult] = []
+    for request, result in zip(requests, session_results, strict=True):
+        if not isinstance(result, TrainingSessionResult):
+            raise TypeError("Training backend must return TrainingSessionResult values")
+        if result.split != "training":
+            raise ValueError("Training backend returned a non-Training split")
+        if result.key != request.key or result.stream_roots != request.stream_roots:
+            raise ValueError("Training backend session provenance does not match its request")
+        values = {
+            "terminal_candidate_snapshots": _canonical_backend_payload(
+                result.terminal_candidate_snapshot
+            ),
+            "hero_policy_snapshots": _canonical_backend_payload(result.hero_policy_snapshot),
+            "exact_ev_cells": _canonical_backend_payload(result.exact_ev_cell),
+        }
+        normalized = TrainingSessionResult(
+            result.split,
+            result.key,
+            result.stream_roots,
+            values["terminal_candidate_snapshots"],
+            values["hero_policy_snapshots"],
+            values["exact_ev_cells"],
+        )
+        normalized_results.append(normalized)
+        for artifact_type, value in values.items():
+            payload = _session_execution_payload(
+                plan, request, artifact_type, value, backend_identity
+            )
+            session_records[artifact_type].append(_record_for_payload(request.key, payload))
+
+    results_by_candidate: dict[str, list[TrainingSessionResult]] = {
+        candidate.candidate_id: [] for candidate in plan.candidates
+    }
+    for result in normalized_results:
+        results_by_candidate[result.key.candidate_id].append(result)
+    candidate_requests = tuple(
+        TrainingCandidateRequest(
+            candidate,
+            tuple(results_by_candidate[candidate.candidate_id]),
+            _candidate_session_join_sha256(candidate.candidate_id, session_records),
+        )
+        for candidate in plan.candidates
+    )
+    candidate_results = tuple(backend.evaluate_candidates(candidate_requests))
+    if [
+        item.candidate_id for item in candidate_results if isinstance(item, TrainingCandidateResult)
+    ] != [item.candidate.candidate_id for item in candidate_requests] or len(
+        candidate_results
+    ) != len(candidate_requests):
+        raise ValueError(
+            "Training backend candidate results are missing, duplicate, or out of order"
+        )
+
+    candidate_records: dict[str, list[TrainingArtifactRecord]] = {
+        artifact_type: [] for artifact_type in _CANDIDATE_ARTIFACT_TYPES
+    }
+    for request, result in zip(candidate_requests, candidate_results, strict=True):
+        if not isinstance(result, TrainingCandidateResult):
+            raise TypeError("Training backend must return TrainingCandidateResult values")
+        if result.split != "training":
+            raise ValueError("Training backend returned a non-Training split")
+        if (
+            result.candidate_id != request.candidate.candidate_id
+            or result.session_join_sha256 != request.session_join_sha256
+        ):
+            raise ValueError("Training backend candidate provenance does not match its request")
+        values = {
+            "calibration_cells": _canonical_backend_payload(result.calibration_cell),
+            "aggregate_metrics": _canonical_backend_payload(result.aggregate_metrics),
+        }
+        for artifact_type, value in values.items():
+            payload = _candidate_execution_payload(
+                plan, request, artifact_type, value, backend_identity
+            )
+            candidate_records[artifact_type].append(
+                _candidate_record_for_payload(request.candidate.candidate_id, payload)
+            )
+
+    records = {
+        artifact_type: tuple(
+            session_records[artifact_type]
+            if artifact_type in session_records
+            else candidate_records[artifact_type]
+        )
+        for artifact_type in _ARTIFACT_TYPES
+    }
+    verify_training_execution_records(plan, records)
+    return records
+
+
+def verify_training_execution_records(
+    plan: TrainingBatchPlan,
+    records_by_type: Mapping[str, Sequence[TrainingArtifactRecord]],
+) -> None:
+    """Independently reconstruct every adapter envelope and five-way Training join."""
+    _validate_plan(plan)
+    if set(records_by_type) != set(_ARTIFACT_TYPES):
+        raise ValueError("Training execution records must contain exactly five result types")
+    expected_sessions = set(plan.sessions)
+    candidate_ids = {candidate.candidate_id for candidate in plan.candidates}
+    candidates = {item.candidate_id: item for item in plan.candidates}
+    opponents = {item.opponent_id: item for item in load_training_catalog()}
+    backend_identity: dict[str, str] | None = None
+    session_records: dict[str, list[TrainingArtifactRecord]] = {}
+
+    for artifact_type in _ARTIFACT_TYPES:
+        records = tuple(records_by_type[artifact_type])
+        _validate_artifact_records(
+            artifact_type,
+            records,
+            expected_sessions=expected_sessions,
+            candidate_ids=candidate_ids,
+        )
+        for record in records:
+            payload = record.payload
+            if not isinstance(payload, dict):
+                raise ValueError("Training execution payload must be an object")
+            common_fields = {
+                "schema_version",
+                "adapter_version",
+                "artifact_type",
+                "training_batch_manifest_sha256",
+                "split",
+                "candidate",
+                "backend",
+                "result",
+            }
+            expected_fields = (
+                common_fields | {"session", "opponent", "stream_roots"}
+                if artifact_type in _SESSION_ARTIFACT_TYPES
+                else common_fields | {"source_session_join_sha256"}
+            )
+            if set(payload) != expected_fields:
+                raise ValueError("Training execution payload fields are not closed-world")
+            if (
+                payload["schema_version"] != TRAINING_EXECUTION_RECORD_SCHEMA_VERSION
+                or payload["adapter_version"] != TRAINING_EXECUTION_ADAPTER_VERSION
+                or payload["artifact_type"] != artifact_type
+                or payload["training_batch_manifest_sha256"] != plan.manifest_sha256
+                or payload["split"] != "training"
+            ):
+                raise ValueError("Training execution payload provenance mismatch")
+            current_backend = payload["backend"]
+            if not isinstance(current_backend, dict):
+                raise ValueError("Training execution backend identity must be an object")
+            _validate_backend_identity(current_backend)
+            if backend_identity is None:
+                backend_identity = current_backend
+            elif current_backend != backend_identity:
+                raise ValueError("Training execution records mix backend identities")
+            expected_candidate = candidates[record.candidate_id]
+            if payload["candidate"] != _candidate_entry(expected_candidate):
+                raise ValueError("Training execution candidate provenance mismatch")
+            _canonical_backend_payload(payload["result"])
+            if artifact_type in _SESSION_ARTIFACT_TYPES:
+                key = record.session_key()
+                expected_roots = _stream_root_entries(key)
+                if (
+                    payload["session"] != key.canonical_payload()
+                    or payload["opponent"] != _opponent_entry(opponents[key.opponent_id])
+                    or payload["stream_roots"] != expected_roots
+                ):
+                    raise ValueError("Training execution session provenance mismatch")
+        if artifact_type in _SESSION_ARTIFACT_TYPES:
+            session_records[artifact_type] = list(records)
+
+    for artifact_type in _CANDIDATE_ARTIFACT_TYPES:
+        for record in records_by_type[artifact_type]:
+            expected_join = _candidate_session_join_sha256(record.candidate_id, session_records)
+            if record.payload["source_session_join_sha256"] != expected_join:
+                raise ValueError(
+                    "Training candidate result is not bound to its complete session join"
+                )
+
+
+def _backend_identity(backend: TrainingExecutionBackend) -> dict[str, str]:
+    identity = {
+        "backend_id": getattr(backend, "backend_id", None),
+        "backend_version": getattr(backend, "backend_version", None),
+    }
+    _validate_backend_identity(identity)
+    return identity
+
+
+def _validate_backend_identity(identity: Mapping[str, object]) -> None:
+    if set(identity) != {"backend_id", "backend_version"} or any(
+        not isinstance(value, str)
+        or not value
+        or not value.isascii()
+        or any(character not in "abcdefghijklmnopqrstuvwxyz0123456789._-" for character in value)
+        for value in identity.values()
+    ):
+        raise ValueError("Training backend identity must use lowercase stable identifiers")
+
+
+def _canonical_backend_payload(payload: object) -> object:
+    try:
+        raw = canonical_json_bytes(payload)
+        return json.loads(raw)
+    except (TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Training backend payload is not canonical-JSON compatible") from exc
+
+
+def _candidate_entry(candidate: PrimaryCandidate) -> dict[str, object]:
+    return {"candidate_id": candidate.candidate_id, "config": candidate.canonical_payload()}
+
+
+def _opponent_entry(opponent: OpponentModelConfig) -> dict[str, object]:
+    return {
+        "opponent_id": opponent.opponent_id,
+        "config_sha256": opponent.config_sha256,
+        "config": opponent.canonical_payload(),
+    }
+
+
+def _stream_root_entries(key: TrainingSessionKey) -> list[dict[str, object]]:
+    return [
+        {"digest": root.digest, "payload": root.payload}
+        for stream_name in STREAM_NAMES
+        for root in (
+            derive_stream_root(
+                split="training",
+                opponent_id=key.opponent_id,
+                horizon=key.horizon,
+                repetition_id=key.repetition_id,
+                stream_name=stream_name,
+            ),
+        )
+    ]
+
+
+def _session_execution_payload(
+    plan: TrainingBatchPlan,
+    request: TrainingSessionRequest,
+    artifact_type: str,
+    result: object,
+    backend_identity: dict[str, str],
+) -> dict[str, object]:
+    return {
+        "schema_version": TRAINING_EXECUTION_RECORD_SCHEMA_VERSION,
+        "adapter_version": TRAINING_EXECUTION_ADAPTER_VERSION,
+        "artifact_type": artifact_type,
+        "training_batch_manifest_sha256": plan.manifest_sha256,
+        "split": "training",
+        "candidate": _candidate_entry(request.candidate),
+        "session": request.key.canonical_payload(),
+        "opponent": _opponent_entry(request.opponent),
+        "stream_roots": [
+            {"digest": root.digest, "payload": root.payload} for root in request.stream_roots
+        ],
+        "backend": backend_identity,
+        "result": result,
+    }
+
+
+def _candidate_execution_payload(
+    plan: TrainingBatchPlan,
+    request: TrainingCandidateRequest,
+    artifact_type: str,
+    result: object,
+    backend_identity: dict[str, str],
+) -> dict[str, object]:
+    return {
+        "schema_version": TRAINING_EXECUTION_RECORD_SCHEMA_VERSION,
+        "adapter_version": TRAINING_EXECUTION_ADAPTER_VERSION,
+        "artifact_type": artifact_type,
+        "training_batch_manifest_sha256": plan.manifest_sha256,
+        "split": "training",
+        "candidate": _candidate_entry(request.candidate),
+        "source_session_join_sha256": request.session_join_sha256,
+        "backend": backend_identity,
+        "result": result,
+    }
+
+
+def _record_for_payload(
+    key: TrainingSessionKey, payload: dict[str, object]
+) -> TrainingArtifactRecord:
+    return TrainingArtifactRecord(
+        candidate_id=key.candidate_id,
+        opponent_id=key.opponent_id,
+        horizon=key.horizon,
+        repetition_id=key.repetition_id,
+        payload=payload,
+        payload_sha256=sha256_bytes(canonical_json_bytes(payload)),
+    )
+
+
+def _candidate_record_for_payload(
+    candidate_id: str, payload: dict[str, object]
+) -> TrainingArtifactRecord:
+    return TrainingArtifactRecord(
+        candidate_id=candidate_id,
+        payload=payload,
+        payload_sha256=sha256_bytes(canonical_json_bytes(payload)),
+    )
+
+
+def _candidate_session_join_sha256(
+    candidate_id: str,
+    records_by_type: Mapping[str, Sequence[TrainingArtifactRecord]],
+) -> str:
+    hashes_by_type: dict[str, dict[TrainingSessionKey, str]] = {}
+    for artifact_type in _SESSION_ARTIFACT_TYPES:
+        hashes_by_type[artifact_type] = {
+            record.session_key(): record.payload_sha256
+            for record in records_by_type[artifact_type]
+            if record.candidate_id == candidate_id
+        }
+    keys = sorted(hashes_by_type["terminal_candidate_snapshots"])
+    if not keys or any(set(values) != set(keys) for values in hashes_by_type.values()):
+        raise ValueError("Training candidate session join is incomplete")
+    payload = {
+        "candidate_id": candidate_id,
+        "sessions": [
+            {
+                "session": key.canonical_payload(),
+                "terminal_candidate_snapshot_sha256": hashes_by_type[
+                    "terminal_candidate_snapshots"
+                ][key],
+                "hero_policy_snapshot_sha256": hashes_by_type["hero_policy_snapshots"][key],
+                "exact_ev_cell_sha256": hashes_by_type["exact_ev_cells"][key],
+            }
+            for key in keys
+        ],
+    }
+    return sha256_bytes(canonical_json_bytes(payload))
 
 
 def build_training_batch_plan(
@@ -179,6 +607,7 @@ def build_training_batch_plan(
             "session_count": 12960,
             "stream_root_count": 3240,
         },
+        "artifact_bundle": _training_execution_artifact_bundle_contract(),
         "performance_based_top_n": None,
     }
     raw = canonical_json_bytes(manifest)
@@ -200,6 +629,15 @@ def write_training_artifact_bundle(
     expected_sessions = set(plan.sessions)
     candidate_ids = {candidate.candidate_id for candidate in plan.candidates}
     payloads: dict[str, bytes] = {"training_batch_manifest": plan.manifest_bytes}
+    execution_record_flags = [
+        _is_execution_record_candidate(artifact_type, record.payload)
+        for artifact_type in _ARTIFACT_TYPES
+        for record in records_by_type[artifact_type]
+    ]
+    if not all(execution_record_flags):
+        raise ValueError("Training execution manifest requires execution records")
+    verify_training_execution_records(plan, records_by_type)
+    artifact_schema_version = TRAINING_EXECUTION_ARTIFACT_SCHEMA_VERSION
 
     for artifact_type in _ARTIFACT_TYPES:
         records = tuple(records_by_type[artifact_type])
@@ -218,7 +656,7 @@ def write_training_artifact_bundle(
             )
         )
         payload = {
-            "schema_version": TRAINING_ARTIFACT_SCHEMA_VERSION,
+            "schema_version": artifact_schema_version,
             "artifact_type": artifact_type,
             "training_batch_manifest_sha256": plan.manifest_sha256,
             "records": [record.canonical_payload() for record in records],
@@ -286,6 +724,11 @@ def verify_training_artifact_bundle(bundle: TrainingArtifactBundle) -> None:
     manifest = payloads["training_batch_manifest"]
     candidate_ids, expected_sessions = _validate_manifest_payload(manifest)
     manifest_hash = sha256_bytes(raw_by_name["training_batch_manifest"])
+    records_by_type: dict[str, tuple[TrainingArtifactRecord, ...]] = {}
+    bundle_contract = manifest["artifact_bundle"]
+    expected_artifact_schemas = {
+        item["artifact_type"]: item["schema_version"] for item in bundle_contract["artifacts"]
+    }
     for artifact_type in _ARTIFACT_TYPES:
         payload = payloads[artifact_type]
         if set(payload) != {
@@ -296,19 +739,31 @@ def verify_training_artifact_bundle(bundle: TrainingArtifactBundle) -> None:
         }:
             raise ValueError("Training result artifact fields are not closed-world")
         if (
-            payload["schema_version"] != TRAINING_ARTIFACT_SCHEMA_VERSION
+            payload["schema_version"] != expected_artifact_schemas[artifact_type]
             or payload["artifact_type"] != artifact_type
             or payload["training_batch_manifest_sha256"] != manifest_hash
             or not isinstance(payload["records"], list)
         ):
             raise ValueError("Training result artifact provenance mismatch")
         records = tuple(_record_from_payload(item) for item in payload["records"])
+        records_by_type[artifact_type] = records
         _validate_artifact_records(
             artifact_type,
             records,
             expected_sessions=expected_sessions,
             candidate_ids=candidate_ids,
         )
+
+    verified_plan = TrainingBatchPlan(
+        manifest=manifest,
+        manifest_bytes=raw_by_name["training_batch_manifest"],
+        manifest_sha256=manifest_hash,
+        candidates=primary_candidate_grid(
+            sampling_contract_sha256=manifest["sampling_contract_sha256"]
+        ),
+        sessions=tuple(sorted(expected_sessions)),
+    )
+    verify_training_execution_records(verified_plan, records_by_type)
 
     selection = payloads["training_selection_report"]
     if set(selection) != {
@@ -385,6 +840,8 @@ def _validate_plan(plan: TrainingBatchPlan) -> None:
         raise ValueError("Training manifest candidate set differs from the plan")
     if expected_sessions != set(plan.sessions):
         raise ValueError("Training manifest session set differs from the plan")
+    if plan.manifest["sessions"] != [session.canonical_payload() for session in plan.sessions]:
+        raise ValueError("Training manifest session order differs from the plan")
 
 
 def _validate_artifact_records(
@@ -419,6 +876,51 @@ def _validate_artifact_records(
         ids = [record.candidate_id for record in records]
         if len(ids) != len(set(ids)) or set(ids) != candidate_ids:
             raise ValueError(f"{artifact_type} does not exactly join the candidate set")
+
+
+def _is_execution_record_candidate(artifact_type: str, payload: object) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    marker_fields = {
+        "adapter_version",
+        "training_batch_manifest_sha256",
+        "backend",
+        "stream_roots",
+        "source_session_join_sha256",
+    }
+    common_fields = {
+        "schema_version",
+        "adapter_version",
+        "artifact_type",
+        "training_batch_manifest_sha256",
+        "split",
+        "candidate",
+        "backend",
+        "result",
+    }
+    expected_fields = (
+        common_fields | {"session", "opponent", "stream_roots"}
+        if artifact_type in _SESSION_ARTIFACT_TYPES
+        else common_fields | {"source_session_join_sha256"}
+    )
+    return (
+        payload.get("schema_version") == TRAINING_EXECUTION_RECORD_SCHEMA_VERSION
+        or bool(set(payload) & marker_fields)
+        or set(payload) == expected_fields
+    )
+
+
+def _training_execution_artifact_bundle_contract() -> dict[str, object]:
+    return {
+        "bundle_kind": _TRAINING_EXECUTION_BUNDLE_KIND,
+        "artifacts": [
+            {
+                "artifact_type": artifact_type,
+                "schema_version": TRAINING_EXECUTION_ARTIFACT_SCHEMA_VERSION,
+            }
+            for artifact_type in _ARTIFACT_TYPES
+        ],
+    }
 
 
 def _validate_sha256(value: object, label: str) -> str:
@@ -467,6 +969,7 @@ def _validate_manifest_payload(
         "sessions",
         "stream_roots",
         "expected_cardinality",
+        "artifact_bundle",
         "performance_based_top_n",
     }:
         raise ValueError("Training batch manifest fields are not closed-world")
@@ -475,12 +978,11 @@ def _validate_manifest_payload(
         or manifest["artifact_type"] != "training_batch_manifest"
         or manifest["runner_version"] != TRAINING_RUNNER_VERSION
         or manifest["split"] != "training"
+        or manifest["artifact_bundle"] != _training_execution_artifact_bundle_contract()
         or manifest["performance_based_top_n"] is not None
     ):
         raise ValueError("Training batch manifest version or split is invalid")
-    sampling_hash = _validate_sha256(
-        manifest["sampling_contract_sha256"], "sampling contract hash"
-    )
+    sampling_hash = _validate_sha256(manifest["sampling_contract_sha256"], "sampling contract hash")
     opponents = manifest["opponents"]
     candidates = manifest["candidates"]
     repetitions = manifest["repetitions"]
@@ -563,13 +1065,23 @@ __all__ = [
     "HORIZONS",
     "TRAINING_ARTIFACT_SCHEMA_VERSION",
     "TRAINING_BATCH_SCHEMA_VERSION",
+    "TRAINING_EXECUTION_ADAPTER_VERSION",
+    "TRAINING_EXECUTION_ARTIFACT_SCHEMA_VERSION",
+    "TRAINING_EXECUTION_RECORD_SCHEMA_VERSION",
     "TRAINING_RUNNER_VERSION",
     "TRAINING_SELECTION_SCHEMA_VERSION",
     "TrainingArtifactBundle",
     "TrainingArtifactRecord",
     "TrainingBatchPlan",
+    "TrainingCandidateRequest",
+    "TrainingCandidateResult",
+    "TrainingExecutionBackend",
     "TrainingSessionKey",
+    "TrainingSessionRequest",
+    "TrainingSessionResult",
     "build_training_batch_plan",
+    "run_training_execution_adapter",
+    "verify_training_execution_records",
     "verify_training_artifact_bundle",
     "write_training_artifact_bundle",
 ]
