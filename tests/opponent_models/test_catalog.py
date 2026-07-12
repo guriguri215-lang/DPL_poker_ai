@@ -17,20 +17,40 @@ from opponents.catalog import (
 from opponents.model import OpponentModelConfig
 
 
-def test_catalog_has_nine_reproducible_training_and_validation_models():
+def test_catalog_has_nine_reproducible_models_per_development_split():
     training = load_training_catalog()
     validation = load_validation_catalog()
     catalog = (*training, *validation)
 
-    assert len(training) == 5
-    assert len(validation) == 4
-    assert len(catalog) == 9
+    assert len(training) == 9
+    assert len(validation) == 9
+    assert len(catalog) == 18
     assert {config.split for config in training} == {"training"}
     assert {config.split for config in validation} == {"validation"}
     assert len({config.opponent_id for config in catalog}) == len(catalog)
     assert len({config.config_sha256 for config in catalog}) == len(catalog)
-    assert {config.seed for config in training} == {100, 101, 102, 103, 104}
-    assert {config.seed for config in validation} == {201, 202, 203, 204}
+    assert {config.seed for config in training} == {
+        100,
+        101,
+        102,
+        103,
+        104,
+        630732,
+        630740,
+        630832,
+        630840,
+    }
+    assert {config.seed for config in validation} == {
+        201,
+        202,
+        203,
+        204,
+        640000,
+        640728,
+        640736,
+        640828,
+        640836,
+    }
     for config in catalog:
         rebuilt = OpponentModelConfig.from_payload(config.canonical_payload())
         assert rebuilt == config
@@ -45,21 +65,27 @@ def test_catalog_uses_preregistered_training_and_validation_delta_sets():
     assert {str(amount) for config in training for amount in config.leak_amounts.values()} == {
         "0.08",
         "0.16",
+        "0.32",
+        "0.4",
     }
     assert {str(amount) for config in validation for amount in config.leak_amounts.values()} == {
         "0.12",
         "0.24",
+        "0.28",
+        "0.36",
     }
     assert {reason for config in training for reason in config.leak_amounts} == {
         "LEAK_R001",
         "LEAK_R007",
+        "LEAK_R008",
     }
     assert {reason for config in validation for reason in config.leak_amounts} == {
         "LEAK_R001",
         "LEAK_R007",
+        "LEAK_R008",
     }
     assert sum(not config.leak_vector for config in training) == 1
-    assert all(config.leak_vector for config in validation)
+    assert sum(not config.leak_vector for config in validation) == 1
 
 
 def test_normal_loader_rejects_test_before_touching_catalog_root():
