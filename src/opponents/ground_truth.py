@@ -23,6 +23,17 @@ class TrueLeakMeasurement:
     true_leak: Decimal
 
 
+@dataclass(frozen=True, slots=True)
+class IndependentActionRate:
+    """One independently measured action rate and its opportunity reach."""
+
+    reason_id: str
+    action: str
+    phase: str
+    action_rate: Decimal
+    opportunity_reach: Decimal
+
+
 _GROUND_TRUTH_TARGETS: dict[str, tuple[str, str]] = {
     "LEAK_R001": ("vs_bet", "FOLD"),
     "LEAK_R002": ("vs_bet", "CALL"),
@@ -84,6 +95,44 @@ def extract_true_leaks(
     return tuple(measurements)
 
 
+def extract_independent_action_rates(
+    game: Game,
+    profile: StrategyProfile,
+    config: OpponentModelConfig,
+    *,
+    reason_ids: tuple[str, ...],
+) -> tuple[IndependentActionRate, ...]:
+    """Measure requested action rates without detector or synthesis metadata."""
+    validate_profile(game, profile)
+    if not reason_ids or len(set(reason_ids)) != len(reason_ids):
+        raise ValueError("reason_ids must be non-empty and unique")
+    unknown = set(reason_ids) - set(_GROUND_TRUTH_TARGETS)
+    if unknown:
+        raise ValueError(f"unsupported ground-truth reasons {sorted(unknown)}")
+    reaches = _decimal_infoset_reach(game.root, profile)
+    measurements: list[IndependentActionRate] = []
+    for reason_id in reason_ids:
+        phase, action = _GROUND_TRUTH_TARGETS[reason_id]
+        action_rate, opportunity_reach = _aggregate_rate_and_reach(
+            game,
+            profile,
+            reaches,
+            actor=config.opponent_position,
+            phase=phase,
+            action=action,
+        )
+        measurements.append(
+            IndependentActionRate(
+                reason_id,
+                action,
+                phase,
+                action_rate,
+                opportunity_reach,
+            )
+        )
+    return tuple(measurements)
+
+
 def _decimal_infoset_reach(node: Node, profile: StrategyProfile) -> dict[str, Decimal]:
     reaches: dict[str, Decimal] = {}
     with localcontext() as context:
@@ -121,6 +170,26 @@ def _aggregate_rate(
     phase: str,
     action: str,
 ) -> Decimal:
+    rate, _reach = _aggregate_rate_and_reach(
+        game,
+        profile,
+        reaches,
+        actor=actor,
+        phase=phase,
+        action=action,
+    )
+    return rate
+
+
+def _aggregate_rate_and_reach(
+    game: Game,
+    profile: StrategyProfile,
+    reaches: dict[str, Decimal],
+    *,
+    actor: str,
+    phase: str,
+    action: str,
+) -> tuple[Decimal, Decimal]:
     prefix = f"{actor}:"
     suffix = f":{phase}"
     infosets = tuple(
@@ -145,4 +214,4 @@ def _aggregate_rate(
             ),
             Decimal(0),
         )
-        return numerator / denominator
+        return numerator / denominator, denominator
