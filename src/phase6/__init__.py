@@ -139,6 +139,16 @@ from .production_inputs import (
     validate_production_observation_registry,
     verify_production_calibration_inputs,
 )
+from .training_backend import (
+    AGGREGATE_RESULT_SCHEMA_VERSION,
+    CALIBRATION_RESULT_SCHEMA_VERSION,
+    EXACT_EV_RESULT_SCHEMA_VERSION,
+    HERO_POLICY_RESULT_SCHEMA_VERSION,
+    PRODUCTION_TRAINING_BACKEND_ID,
+    PRODUCTION_TRAINING_BACKEND_VERSION,
+    TERMINAL_RESULT_SCHEMA_VERSION,
+    ProductionTrainingExecutionBackend,
+)
 from .training_runner import (
     HORIZONS,
     TRAINING_ARTIFACT_SCHEMA_VERSION,
@@ -316,4 +326,12 @@ __all__ = [
     "verify_training_execution_records",
     "verify_training_artifact_bundle",
     "write_training_artifact_bundle",
+    "AGGREGATE_RESULT_SCHEMA_VERSION",
+    "CALIBRATION_RESULT_SCHEMA_VERSION",
+    "EXACT_EV_RESULT_SCHEMA_VERSION",
+    "HERO_POLICY_RESULT_SCHEMA_VERSION",
+    "PRODUCTION_TRAINING_BACKEND_ID",
+    "PRODUCTION_TRAINING_BACKEND_VERSION",
+    "TERMINAL_RESULT_SCHEMA_VERSION",
+    "ProductionTrainingExecutionBackend",
 ]
