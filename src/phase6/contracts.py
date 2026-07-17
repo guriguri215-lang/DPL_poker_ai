@@ -25,9 +25,11 @@ from poker_core.reason_ontology import get_ontology
 
 COVERAGE_CONTRACT_SCHEMA_VERSION = "coverage-semantics-v1"
 SELECTION_CONTRACT_SCHEMA_VERSION = "selection-metrics-v1"
+FULL_SELECTION_CONTRACT_SCHEMA_VERSION = "selection-metrics-v2"
 SEMANTIC_SOURCE_SCHEMA_VERSION = "phase6-semantic-source-v1"
 SEMANTIC_FIXTURE_SCHEMA_VERSION = "phase6-semantic-fixture-v1"
 PREREGISTRATION_SCHEMA_VERSION = "phase6-evaluation-preregistration-v1"
+FULL_SELECTION_PREREGISTRATION_SCHEMA_VERSION = "phase6-evaluation-preregistration-v2"
 ROOT_MANIFEST_SCHEMA_VERSION = "phase6-evaluation-manifest-v1"
 SERIES_REFERENCE_SCHEMA_VERSION = "phase6-evaluation-series-reference-v1"
 VALIDATION_BATCH_REFERENCE_SCHEMA_VERSION = "phase6-validation-batch-reference-v1"
@@ -190,6 +192,34 @@ _SELECTION_CONTRACT: dict[str, Any] = {
     "worst_case_penalty_usage": "excluded",
 }
 
+_FULL_SELECTION_KEYS: tuple[tuple[str, str], ...] = (
+    ("validation_macro_brier", "ascending"),
+    ("validation_micro_brier", "ascending"),
+    (GTO_FPR_METRIC_ID, "ascending"),
+    ("validation_macro_exploitation_efficiency", "descending"),
+    ("validation_macro_recall", "descending"),
+    ("validation_macro_precision", "descending"),
+    ("candidate_id", "lexicographic_ascending"),
+)
+
+_FULL_SELECTION_CONTRACT: dict[str, Any] = {
+    "schema_version": FULL_SELECTION_CONTRACT_SCHEMA_VERSION,
+    "artifact_type": "selection_metric_contract",
+    "gto_fpr": copy.deepcopy(_SELECTION_CONTRACT["gto_fpr"]),
+    "selection_keys": [
+        {"position": position, "metric_id": metric_id, "direction": direction}
+        for position, (metric_id, direction) in enumerate(_FULL_SELECTION_KEYS, start=1)
+    ],
+    "hard_constraints": [],
+    "atomic_group": ["opponent_id", "horizon"],
+    "undefined_policy": {
+        "gto_fpr": "fail_closed_no_partial_group_drop",
+        "selection_key_positions_4_through_6": "rank_undefined_as_worst",
+    },
+    "selection_order_status": "approved_adr_0021_0022",
+    "worst_case_penalty_usage": "excluded",
+}
+
 _ARTIFACT_VERSIONS = {
     "coverage_semantics_contract": COVERAGE_CONTRACT_SCHEMA_VERSION,
     "selection_metric_contract": SELECTION_CONTRACT_SCHEMA_VERSION,
@@ -233,6 +263,16 @@ class ValidatedPhase6ContractBundle:
     validation_batch_reference: dict[str, Any]
     selection_report_reference: dict[str, Any]
     coverage_evaluation: CoverageEvaluation
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatedFullSelectionPreregistration:
+    """Canonical additive v2 contract and its Validation preregistration."""
+
+    preregistration: dict[str, Any]
+    selection_contract: dict[str, Any]
+    preregistration_sha256: str
+    selection_contract_sha256: str
 
 
 def canonical_json_bytes(payload: object) -> bytes:
@@ -479,6 +519,171 @@ def validate_selection_metric_contract(payload: object) -> dict[str, Any]:
     if payload != _SELECTION_CONTRACT:
         raise ValueError("selection metric contract does not match the frozen v1 definition")
     return copy.deepcopy(payload)
+
+
+def full_selection_metric_contract_v2_payload() -> dict[str, Any]:
+    """Return the approved additive seven-key Validation selection contract."""
+    return copy.deepcopy(_FULL_SELECTION_CONTRACT)
+
+
+def validate_full_selection_metric_contract_v2(
+    payload: object,
+    *,
+    expected_sha256: str | None = None,
+) -> dict[str, Any]:
+    """Reject any change to the approved seven-key v2 selection contract."""
+    _require_fields(payload, set(_FULL_SELECTION_CONTRACT), "full selection metric contract")
+    assert isinstance(payload, dict)
+    if payload["schema_version"] != FULL_SELECTION_CONTRACT_SCHEMA_VERSION:
+        raise ValueError("unsupported full selection metric contract schema_version")
+    if payload["artifact_type"] != "selection_metric_contract":
+        raise ValueError("unsupported full selection metric contract artifact_type")
+    _require_fields(
+        payload["gto_fpr"],
+        set(_FULL_SELECTION_CONTRACT["gto_fpr"]),
+        "full selection GTO FPR contract",
+    )
+    if "worst_case_penalty" in json.dumps(
+        [payload["selection_keys"], payload["hard_constraints"]], sort_keys=True
+    ):
+        raise ValueError("worst_case_penalty is excluded from primary selection")
+    if payload != _FULL_SELECTION_CONTRACT:
+        raise ValueError("full selection metric contract does not match the approved v2 definition")
+    if expected_sha256 is not None:
+        if not isinstance(expected_sha256, str) or not _SHA256.fullmatch(expected_sha256):
+            raise ValueError("full selection contract expected hash must be lowercase SHA-256")
+        if sha256_bytes(canonical_json_bytes(payload)) != expected_sha256:
+            raise ValueError("full selection metric contract hash mismatch")
+    return copy.deepcopy(payload)
+
+
+def full_selection_preregistration_v2_payload(
+    *,
+    selection_contract_sha256: str,
+    sampling_contract_sha256: str,
+) -> dict[str, Any]:
+    """Build the Validation-only v2 preregistration hash joins."""
+    for value, label in (
+        (selection_contract_sha256, "selection contract hash"),
+        (sampling_contract_sha256, "sampling contract hash"),
+    ):
+        if not isinstance(value, str) or not _SHA256.fullmatch(value):
+            raise ValueError(f"{label} must be lowercase SHA-256")
+    return {
+        "schema_version": FULL_SELECTION_PREREGISTRATION_SCHEMA_VERSION,
+        "artifact_type": "phase6_evaluation_preregistration",
+        "split": "validation",
+        "selection_metric_contract": {
+            "artifact_type": "selection_metric_contract",
+            "schema_version": FULL_SELECTION_CONTRACT_SCHEMA_VERSION,
+            "sha256": selection_contract_sha256,
+        },
+        "sampling_contract": {
+            "artifact_type": "seed_sampling_contract",
+            "schema_version": "phase6-seed-sampling-contract-v2",
+            "sha256": sampling_contract_sha256,
+        },
+    }
+
+
+def validate_full_selection_preregistration_v2(
+    payload: object,
+    *,
+    selection_contract: object,
+    expected_sha256: str | None = None,
+) -> dict[str, Any]:
+    """Validate the v2 preregistration without accepting a v1 selection reference."""
+    contract = validate_full_selection_metric_contract_v2(selection_contract)
+    contract_sha256 = sha256_bytes(canonical_json_bytes(contract))
+    _require_fields(
+        payload,
+        {
+            "schema_version",
+            "artifact_type",
+            "split",
+            "selection_metric_contract",
+            "sampling_contract",
+        },
+        "full selection preregistration",
+    )
+    assert isinstance(payload, dict)
+    if (
+        payload["schema_version"] != FULL_SELECTION_PREREGISTRATION_SCHEMA_VERSION
+        or payload["artifact_type"] != "phase6_evaluation_preregistration"
+        or payload["split"] != "validation"
+    ):
+        raise ValueError("full selection preregistration identity is invalid")
+    selection_reference = payload["selection_metric_contract"]
+    _require_fields(
+        selection_reference,
+        {"artifact_type", "schema_version", "sha256"},
+        "full selection preregistration selection reference",
+    )
+    assert isinstance(selection_reference, dict)
+    if selection_reference != {
+        "artifact_type": "selection_metric_contract",
+        "schema_version": FULL_SELECTION_CONTRACT_SCHEMA_VERSION,
+        "sha256": contract_sha256,
+    }:
+        raise ValueError("full selection preregistration selection version/hash mismatch")
+    sampling_reference = payload["sampling_contract"]
+    _require_fields(
+        sampling_reference,
+        {"artifact_type", "schema_version", "sha256"},
+        "full selection preregistration sampling reference",
+    )
+    assert isinstance(sampling_reference, dict)
+    sampling_hash = sampling_reference.get("sha256")
+    if (
+        sampling_reference.get("artifact_type") != "seed_sampling_contract"
+        or sampling_reference.get("schema_version") != "phase6-seed-sampling-contract-v2"
+        or not isinstance(sampling_hash, str)
+        or not _SHA256.fullmatch(sampling_hash)
+    ):
+        raise ValueError("full selection preregistration sampling version/hash mismatch")
+    if expected_sha256 is not None:
+        if not isinstance(expected_sha256, str) or not _SHA256.fullmatch(expected_sha256):
+            raise ValueError(
+                "full selection preregistration expected hash must be lowercase SHA-256"
+            )
+        if sha256_bytes(canonical_json_bytes(payload)) != expected_sha256:
+            raise ValueError("full selection preregistration hash mismatch")
+    return copy.deepcopy(payload)
+
+
+def load_full_selection_preregistration_v2(
+    preregistration_path: Path | str,
+    *,
+    expected_sha256: str,
+    selection_contract_path: Path | str,
+    expected_selection_contract_sha256: str,
+) -> ValidatedFullSelectionPreregistration:
+    """Load canonical additive v2 files while leaving all v1 loaders unchanged."""
+    selection_contract = _load_canonical_path(
+        Path(selection_contract_path),
+        expected_selection_contract_sha256,
+        "full selection metric contract",
+    )
+    validated_contract = validate_full_selection_metric_contract_v2(
+        selection_contract,
+        expected_sha256=expected_selection_contract_sha256,
+    )
+    preregistration = _load_canonical_path(
+        Path(preregistration_path),
+        expected_sha256,
+        "full selection preregistration",
+    )
+    validated_preregistration = validate_full_selection_preregistration_v2(
+        preregistration,
+        selection_contract=validated_contract,
+        expected_sha256=expected_sha256,
+    )
+    return ValidatedFullSelectionPreregistration(
+        preregistration=validated_preregistration,
+        selection_contract=validated_contract,
+        preregistration_sha256=expected_sha256,
+        selection_contract_sha256=expected_selection_contract_sha256,
+    )
 
 
 def evaluate_coverage_semantics(

@@ -12,8 +12,11 @@ import pytest
 from phase6 import (
     COMPONENT_ROLES,
     COVERAGE_CONTRACT_SCHEMA_VERSION,
+    FULL_SELECTION_CONTRACT_SCHEMA_VERSION,
+    FULL_SELECTION_PREREGISTRATION_SCHEMA_VERSION,
     GTO_FPR_METRIC_ID,
     PREREGISTRATION_SCHEMA_VERSION,
+    PRIMARY_SELECTION_KEYS,
     ROOT_MANIFEST_SCHEMA_VERSION,
     SELECTION_CONTRACT_SCHEMA_VERSION,
     SELECTION_REPORT_REFERENCE_SCHEMA_VERSION,
@@ -27,9 +30,14 @@ from phase6 import (
     build_r008_fixture_payloads,
     canonical_json_bytes,
     evaluate_coverage_semantics,
+    full_selection_metric_contract_v2_payload,
+    full_selection_preregistration_v2_payload,
+    load_full_selection_preregistration_v2,
     load_phase6_contract_bundle,
     selection_metric_contract_payload,
     sha256_bytes,
+    validate_full_selection_metric_contract_v2,
+    validate_full_selection_preregistration_v2,
     validate_selection_metric_contract,
 )
 
@@ -486,3 +494,104 @@ def test_selection_contract_is_closed_world(mutator, message):
 
     with pytest.raises(ValueError, match=message):
         validate_selection_metric_contract(payload)
+
+
+def test_v1_selection_bytes_hash_and_loader_semantics_remain_frozen(tmp_path):
+    payload = selection_metric_contract_payload()
+    raw = canonical_json_bytes(payload)
+
+    assert len(raw) == 770
+    assert sha256_bytes(raw) == "65171acaa55ae63e2b4d29b1f2c6141e0d93298201e788211c799ef628a381ce"
+    assert validate_selection_metric_contract(payload) == payload
+
+    bundle = _build_bundle(tmp_path)
+    loaded = load_phase6_contract_bundle(bundle["root_path"], expected_sha256=bundle["root_sha256"])
+    assert loaded.selection_contract == payload
+
+
+def test_additive_v2_full_selection_contract_and_preregistration_join(tmp_path):
+    selection = full_selection_metric_contract_v2_payload()
+    selection_raw = canonical_json_bytes(selection)
+    selection_hash = sha256_bytes(selection_raw)
+    keys = tuple((item["metric_id"], item["direction"]) for item in selection["selection_keys"])
+
+    assert selection["schema_version"] == FULL_SELECTION_CONTRACT_SCHEMA_VERSION
+    assert keys == PRIMARY_SELECTION_KEYS
+    assert selection["gto_fpr"]["hard_constraint"] is None
+    assert selection["hard_constraints"] == []
+    assert selection["worst_case_penalty_usage"] == "excluded"
+    assert (
+        validate_full_selection_metric_contract_v2(selection, expected_sha256=selection_hash)
+        == selection
+    )
+
+    preregistration = full_selection_preregistration_v2_payload(
+        selection_contract_sha256=selection_hash,
+        sampling_contract_sha256="a" * 64,
+    )
+    preregistration_raw = canonical_json_bytes(preregistration)
+    preregistration_hash = sha256_bytes(preregistration_raw)
+    assert preregistration["schema_version"] == FULL_SELECTION_PREREGISTRATION_SCHEMA_VERSION
+    assert (
+        validate_full_selection_preregistration_v2(
+            preregistration,
+            selection_contract=selection,
+            expected_sha256=preregistration_hash,
+        )
+        == preregistration
+    )
+
+    selection_path = tmp_path / "selection-v2.json"
+    preregistration_path = tmp_path / "preregistration-v2.json"
+    selection_path.write_bytes(selection_raw)
+    preregistration_path.write_bytes(preregistration_raw)
+    loaded = load_full_selection_preregistration_v2(
+        preregistration_path,
+        expected_sha256=preregistration_hash,
+        selection_contract_path=selection_path,
+        expected_selection_contract_sha256=selection_hash,
+    )
+    assert loaded.selection_contract == selection
+    assert loaded.preregistration == preregistration
+
+
+@pytest.mark.parametrize(
+    "mutator",
+    [
+        lambda payload: payload["selection_keys"].pop(),
+        lambda payload: payload["selection_keys"].reverse(),
+        lambda payload: payload["selection_keys"][0].update({"direction": "descending"}),
+        lambda payload: payload["selection_keys"][1].update({"metric_id": "validation_ece"}),
+        lambda payload: payload["gto_fpr"].update({"hard_constraint": "0.1"}),
+        lambda payload: payload["hard_constraints"].append(
+            {"metric_id": GTO_FPR_METRIC_ID, "maximum": "0.1"}
+        ),
+        lambda payload: payload["selection_keys"].append(
+            {"position": 8, "metric_id": "worst_case_penalty", "direction": "ascending"}
+        ),
+    ],
+)
+def test_v2_rejects_selection_key_threshold_and_worst_case_mutations(mutator):
+    payload = full_selection_metric_contract_v2_payload()
+    mutator(payload)
+
+    with pytest.raises(ValueError):
+        validate_full_selection_metric_contract_v2(payload)
+
+
+def test_v2_preregistration_rejects_v1_or_mismatched_contract_reference():
+    selection = full_selection_metric_contract_v2_payload()
+    selection_hash = sha256_bytes(canonical_json_bytes(selection))
+    preregistration = full_selection_preregistration_v2_payload(
+        selection_contract_sha256=selection_hash,
+        sampling_contract_sha256="b" * 64,
+    )
+    preregistration["selection_metric_contract"]["schema_version"] = (
+        SELECTION_CONTRACT_SCHEMA_VERSION
+    )
+
+    with pytest.raises(ValueError, match="version/hash mismatch"):
+        validate_full_selection_preregistration_v2(
+            preregistration,
+            selection_contract=selection,
+        )
