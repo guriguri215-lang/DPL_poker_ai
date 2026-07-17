@@ -17,3 +17,16 @@ equilibrium used by Training.
 Normal loaders keep Validation separate from Training and reject Test access.
 The catalog does not define a GTO false-positive threshold or a worst-case
 penalty for primary selection.
+
+P6-8B adds a separate Validation freeze boundary. Its CLI accepts all QV5
+commit, runtime, dependency, path, command, attempt, and free-space values from
+a canonical external manifest; none are catalog defaults. Read-only preflight
+reconstructs the verified P6-8A plan and the completed production Training
+source before any freeze write is permitted.
+
+The approved attempt contract fixes exactly one planned attempt, a fresh output
+directory, atomic directory reservation, and an in-progress marker. Partial
+attempts are preserved, the same path is never retried, stale markers are never
+released automatically, and every retry requires separate human approval. The
+freeze command does not run a Validation backend, session, league, or writer,
+and it leaves the future output attempt path unreserved.
