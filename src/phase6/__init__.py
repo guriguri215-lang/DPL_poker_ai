@@ -181,6 +181,20 @@ from .training_runner import (
     verify_training_execution_records,
     write_training_artifact_bundle,
 )
+from .validation_backend import (
+    PRODUCTION_VALIDATION_BACKEND_ID,
+    PRODUCTION_VALIDATION_BACKEND_VERSION,
+    ProductionValidationExecutionBackend,
+)
+from .validation_cli import (
+    PRODUCTION_VALIDATION_CLI_VERSION,
+    PRODUCTION_VALIDATION_ENTRYPOINT,
+    PRODUCTION_VALIDATION_RUN_MANIFEST,
+    PRODUCTION_VALIDATION_RUN_SCHEMA_VERSION,
+    PreparedValidationRun,
+    prepare_validation_run,
+    verify_validation_run_manifest,
+)
 from .validation_execution import (
     PRIMARY_SELECTION_REPORT_SCHEMA_VERSION,
     SELECTED_CONFIG_LOCK_SCHEMA_VERSION,
@@ -454,6 +468,16 @@ __all__ = [
     "verify_validation_artifact_root",
     "verify_validation_execution_records",
     "write_validation_artifact_bundle",
+    "PRODUCTION_VALIDATION_BACKEND_ID",
+    "PRODUCTION_VALIDATION_BACKEND_VERSION",
+    "ProductionValidationExecutionBackend",
+    "PRODUCTION_VALIDATION_CLI_VERSION",
+    "PRODUCTION_VALIDATION_ENTRYPOINT",
+    "PRODUCTION_VALIDATION_RUN_MANIFEST",
+    "PRODUCTION_VALIDATION_RUN_SCHEMA_VERSION",
+    "PreparedValidationRun",
+    "prepare_validation_run",
+    "verify_validation_run_manifest",
     "AGGREGATE_RESULT_SCHEMA_VERSION",
     "CALIBRATION_RESULT_SCHEMA_VERSION",
     "EXACT_EV_RESULT_SCHEMA_VERSION",

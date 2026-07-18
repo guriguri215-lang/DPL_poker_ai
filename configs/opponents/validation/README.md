@@ -57,3 +57,21 @@ The root verifier independently rehashes every file, reconstructs every record
 and join from the saved batch manifest, and reruns the unchanged P6-7 ranker.
 P6-9A has no production run CLI, QV5 values, freeze, attempt reservation,
 marker, or production execution path.
+
+P6-9B adds the versioned production run boundary without selecting any QV5 or
+experiment values. Its CLI accepts only the absolute frozen input directory,
+the absolute fresh output directory, and the exactly-one attempt ID already
+recorded by QV5. The full Python executable, entrypoint, and canonical argv must
+exactly match the frozen planned command before the attempt can be reserved.
+
+The concrete Validation backend implements the unchanged P6-9A Protocol and
+uses only the frozen Validation catalog and approved digest sampling streams.
+The CLI preserves the P6-8B in-progress marker, writes the P6-9A immutable root
+under `validation-artifacts/validation`, and then saves a canonical run manifest
+binding the clean commit, runtime, dependency lock, frozen inputs, attempt,
+component provenance, production backend identity, and output root. The saved
+run verifier permits the approved output path to exist, but independently
+rehashes the frozen input bundle, reconstructs the plan, revalidates the marker
+and P6-9A root, and rejects Training/Test or non-production backend identities.
+This repo-only implementation does not choose QV5 values, freeze production
+inputs, reserve a production attempt, or execute production Validation.
