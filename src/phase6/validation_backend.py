@@ -83,12 +83,30 @@ class ProductionValidationExecutionBackend:
     backend_id = PRODUCTION_VALIDATION_BACKEND_ID
     backend_version = PRODUCTION_VALIDATION_BACKEND_VERSION
 
-    def __init__(self, plan: ValidationBatchPlan, *, repo_root: Path | str) -> None:
+    def __init__(
+        self,
+        plan: ValidationBatchPlan,
+        *,
+        repo_root: Path | str,
+        additional_candidates: Sequence[PrimaryCandidate] = (),
+    ) -> None:
         self._repo_root = Path(repo_root).resolve()
         verify_validation_batch_plan(plan, repo_root=self._repo_root)
         self._plan = plan
         self._context = _evaluation_context(plan, self._repo_root)
         self._candidates = {item.candidate_id: item for item in plan.candidates}
+        additions = tuple(additional_candidates)
+        if any(not isinstance(item, PrimaryCandidate) for item in additions):
+            raise TypeError("additional Validation candidates must be PrimaryCandidate values")
+        if len({item.candidate_id for item in additions}) != len(additions) or any(
+            item.candidate_id in self._candidates for item in additions
+        ):
+            raise ValueError("additional Validation candidate IDs must be unique and new")
+        sampling_hash = plan.manifest["sampling_contract"]["sha256"]
+        if any(item.sampling_contract_sha256 != sampling_hash for item in additions):
+            raise ValueError("additional Validation candidates must retain the sampling contract")
+        self._additional_candidate_ids = frozenset(item.candidate_id for item in additions)
+        self._candidates.update({item.candidate_id: item for item in additions})
         configs = tuple(sorted(load_validation_catalog(), key=lambda item: item.opponent_id))
         opponents = tuple(synthesize_opponent(config=config) for config in configs)
         self._opponents = {item.config.opponent_id: item for item in opponents}
@@ -130,6 +148,8 @@ class ProductionValidationExecutionBackend:
                 "sampling contract"
             )
         self._session_hashes: dict[ValidationSessionKey, tuple[str, str, str]] = {}
+        self._action_draw_audits: dict[ValidationSessionKey, tuple[dict[str, object], ...]] = {}
+        self._execution_events: dict[ValidationSessionKey, tuple[dict[str, object], ...]] = {}
         self._policy_cache: dict[
             tuple[str, str, int, int], tuple[StrategyProfile, StrategyProfile]
         ] = {}
@@ -170,6 +190,24 @@ class ProductionValidationExecutionBackend:
                 )
             )
         return tuple(results)
+
+    def action_draw_audits(self, key: ValidationSessionKey) -> tuple[dict[str, object], ...]:
+        """Return captured action-draw evidence for an additive candidate session."""
+        if key.candidate_id not in self._additional_candidate_ids:
+            raise ValueError("action-draw audits are limited to additional candidates")
+        try:
+            return self._action_draw_audits[key]
+        except KeyError as exc:
+            raise ValueError("additional candidate session has not been executed") from exc
+
+    def execution_events(self, key: ValidationSessionKey) -> tuple[dict[str, object], ...]:
+        """Return the exact transcript events captured for an additive candidate."""
+        if key.candidate_id not in self._additional_candidate_ids:
+            raise ValueError("execution events are limited to additional candidates")
+        try:
+            return self._execution_events[key]
+        except KeyError as exc:
+            raise ValueError("additional candidate session has not been executed") from exc
 
     def _validate_session_requests(
         self, requests: Sequence[ValidationSessionRequest]
@@ -225,11 +263,28 @@ class ProductionValidationExecutionBackend:
             approved = self._candidates.get(request.candidate.candidate_id)
             if approved is None or request.candidate != approved:
                 raise ValueError("Validation candidate request is not canonical")
-            expected_keys = tuple(
-                key
-                for key in self._plan.sessions
-                if key.candidate_id == request.candidate.candidate_id
-            )
+            if request.candidate.candidate_id in self._additional_candidate_ids:
+                coordinates = sorted(
+                    {
+                        (key.opponent_id, key.horizon, key.repetition_id)
+                        for key in self._plan.sessions
+                    }
+                )
+                expected_keys = tuple(
+                    ValidationSessionKey(
+                        request.candidate.candidate_id,
+                        opponent_id,
+                        horizon,
+                        repetition_id,
+                    )
+                    for opponent_id, horizon, repetition_id in coordinates
+                )
+            else:
+                expected_keys = tuple(
+                    key
+                    for key in self._plan.sessions
+                    if key.candidate_id == request.candidate.candidate_id
+                )
             actual_keys = tuple(item.key for item in request.session_results)
             if actual_keys != expected_keys or len(set(actual_keys)) != len(actual_keys):
                 raise ValueError("Validation candidate sessions do not match the approved plan")
@@ -249,6 +304,8 @@ class ProductionValidationExecutionBackend:
         roots = {root.payload["stream_name"]: root for root in request.stream_roots}
         counts: Counter[str] = Counter()
         transcript = hashlib.sha256()
+        action_draw_audits: list[dict[str, object]] = []
+        execution_events: list[dict[str, object]] = []
         for decision_index in range(request.key.horizon):
             deal = sample_observation_node(
                 self._registry,
@@ -313,7 +370,17 @@ class ProductionValidationExecutionBackend:
                     epsilon_action_stream_root=roots["epsilon_action"],
                 )
                 event["hero_action"] = _json_ready(action)
+                if request.key.candidate_id in self._additional_candidate_ids:
+                    action_draw_audits.append(
+                        {
+                            "decision_index": decision_index,
+                            "legal_actions": list(canonical_legal_actions(response.actions)),
+                            "audit": _json_ready(action),
+                        }
+                    )
             transcript.update(canonical_json_bytes(event))
+            if request.key.candidate_id in self._additional_candidate_ids:
+                execution_events.append(event)
 
         action_counts = {"BET": counts["BET"], "CHECK": counts["CHECK"]}
         terminal = {
@@ -357,6 +424,9 @@ class ProductionValidationExecutionBackend:
             "source_hero_policy_sha256": sha256_bytes(canonical_json_bytes(policy)),
             "cell": _exact_ev_payload(cell),
         }
+        if request.key.candidate_id in self._additional_candidate_ids:
+            self._action_draw_audits[request.key] = tuple(action_draw_audits)
+            self._execution_events[request.key] = tuple(execution_events)
         return ValidationSessionResult(
             "validation",
             request.key,

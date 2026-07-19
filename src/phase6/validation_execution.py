@@ -324,6 +324,293 @@ def run_validation_execution_adapter(
     return records
 
 
+def run_single_validation_candidate_execution(
+    plan: ValidationBatchPlan,
+    candidate: PrimaryCandidate,
+    backend: ValidationExecutionBackend,
+    *,
+    repo_root: Path | str,
+) -> dict[str, tuple[ValidationArtifactRecord, ...]]:
+    """Run one separately identified Validation-series candidate.
+
+    This additive boundary is intentionally outside the P6-9 complete-grid
+    adapter.  It preserves the verified P6-9 catalog, session coordinates,
+    sampling roots, evaluator, and record envelopes while keeping the supplied
+    candidate in a distinct series.  The P6-9 adapter and verifier continue to
+    require their original 16-candidate product.
+    """
+    verify_validation_batch_plan(plan, repo_root=repo_root)
+    if not isinstance(candidate, PrimaryCandidate):
+        raise TypeError("single Validation execution requires a PrimaryCandidate")
+    if candidate.candidate_id in {item.candidate_id for item in plan.candidates}:
+        raise ValueError("single Validation candidate must be distinct from the P6-9 grid")
+    backend_identity = _backend_identity(backend)
+    context = _evaluation_context(plan, Path(repo_root).resolve())
+    opponents = {key: value.config for key, value in context.opponents.items()}
+    keys = _single_candidate_session_keys(plan, candidate.candidate_id)
+    requests = tuple(
+        ValidationSessionRequest(
+            key,
+            candidate,
+            opponents[key.opponent_id],
+            _stream_roots(key),
+        )
+        for key in keys
+    )
+    results = tuple(backend.run_sessions(requests))
+    if (
+        len(results) != len(requests)
+        or tuple(item.key for item in results if isinstance(item, ValidationSessionResult)) != keys
+    ):
+        raise ValueError("single Validation session results are incomplete or out of order")
+
+    session_records: dict[str, list[ValidationArtifactRecord]] = {
+        name: [] for name in _SESSION_ARTIFACT_TYPE_ORDER
+    }
+    normalized: list[ValidationSessionResult] = []
+    for request, result in zip(requests, results, strict=True):
+        if not isinstance(result, ValidationSessionResult):
+            raise TypeError("Validation backend must return ValidationSessionResult values")
+        if (
+            result.split != "validation"
+            or result.key != request.key
+            or result.stream_roots != request.stream_roots
+        ):
+            raise ValueError("single Validation session provenance differs from its request")
+        values = tuple(_canonical_result(getattr(result, field)) for field in _RESULT_NAMES)
+        _validate_session_result_envelopes(request.key, values)
+        _validate_reconstructed_hero_policy(
+            candidate,
+            values[0],
+            values[1],
+            context.opponents[request.key.opponent_id],
+            context.dimension,
+        )
+        normalized.append(
+            ValidationSessionResult("validation", result.key, result.stream_roots, *values)
+        )
+        for artifact_type, value in zip(_SESSION_ARTIFACT_TYPE_ORDER, values, strict=True):
+            payload = _session_payload(plan, request, artifact_type, value, backend_identity)
+            session_records[artifact_type].append(_session_record(request.key, payload))
+
+    candidate_request = ValidationCandidateRequest(
+        candidate,
+        tuple(normalized),
+        _session_join_sha256(candidate.candidate_id, session_records),
+    )
+    candidate_results = tuple(backend.evaluate_candidates((candidate_request,)))
+    if len(candidate_results) != 1 or not isinstance(
+        candidate_results[0], ValidationCandidateResult
+    ):
+        raise ValueError("single Validation candidate result is missing or invalid")
+    candidate_result = candidate_results[0]
+    if (
+        candidate_result.split != "validation"
+        or candidate_result.candidate_id != candidate.candidate_id
+        or candidate_result.session_join_sha256 != candidate_request.session_join_sha256
+    ):
+        raise ValueError("single Validation candidate provenance differs from its request")
+    calibration = _canonical_result(candidate_result.calibration_cell)
+    aggregate = _canonical_result(candidate_result.aggregate_metrics)
+    _validate_candidate_result_envelopes(candidate_request, calibration, aggregate)
+    candidate_records = {
+        "validation_calibration_cells": (
+            _candidate_record(
+                candidate.candidate_id,
+                _candidate_payload(
+                    plan,
+                    candidate_request,
+                    "validation_calibration_cells",
+                    calibration,
+                    backend_identity,
+                ),
+            ),
+        ),
+        "validation_aggregate_metrics": (
+            _candidate_record(
+                candidate.candidate_id,
+                _candidate_payload(
+                    plan,
+                    candidate_request,
+                    "validation_aggregate_metrics",
+                    aggregate,
+                    backend_identity,
+                ),
+            ),
+        ),
+    }
+    records = {
+        name: tuple(session_records.get(name, candidate_records.get(name, ())))
+        for name in _ARTIFACT_TYPES
+    }
+    verify_single_validation_candidate_records(
+        plan,
+        candidate,
+        records,
+        repo_root=repo_root,
+    )
+    return records
+
+
+def verify_single_validation_candidate_records(
+    plan: ValidationBatchPlan,
+    candidate: PrimaryCandidate,
+    records_by_type: Mapping[str, Sequence[ValidationArtifactRecord]],
+    *,
+    repo_root: Path | str,
+) -> dict[str, object]:
+    """Independently reconstruct one non-P6-9 Validation series."""
+    verify_validation_batch_plan(plan, repo_root=repo_root)
+    if not isinstance(candidate, PrimaryCandidate):
+        raise TypeError("single Validation verifier requires a PrimaryCandidate")
+    if candidate.candidate_id in {item.candidate_id for item in plan.candidates}:
+        raise ValueError("single Validation candidate must remain outside the P6-9 grid")
+    if tuple(records_by_type) != _ARTIFACT_TYPES:
+        raise ValueError("single Validation records must use the canonical five-type order")
+    context = _evaluation_context(plan, Path(repo_root).resolve())
+    catalog = {
+        item["opponent_id"]: item for item in plan.manifest["validation_catalog_index"]["opponents"]
+    }
+    expected_keys = _single_candidate_session_keys(plan, candidate.candidate_id)
+    expected_set = set(expected_keys)
+    candidate_entry = _candidate_entry(candidate)
+    backend: dict[str, str] | None = None
+    session_records: dict[str, tuple[ValidationArtifactRecord, ...]] = {}
+    candidate_records: dict[str, tuple[ValidationArtifactRecord, ...]] = {}
+    for artifact_type in _ARTIFACT_TYPES:
+        records = tuple(records_by_type[artifact_type])
+        expected_count = len(expected_keys) if artifact_type in _SESSION_ARTIFACT_TYPES else 1
+        if len(records) != expected_count or any(
+            not isinstance(record, ValidationArtifactRecord) for record in records
+        ):
+            raise ValueError("single Validation artifact cardinality is invalid")
+        if [record.candidate_id for record in records] != [candidate.candidate_id] * len(records):
+            raise ValueError("single Validation artifact mixes candidate identities")
+        if artifact_type in _SESSION_ARTIFACT_TYPES:
+            keys = tuple(record.session_key() for record in records)
+            if keys != expected_keys or set(keys) != expected_set:
+                raise ValueError("single Validation session keys are incomplete or out of order")
+        elif any(
+            record.opponent_id is not None
+            or record.horizon is not None
+            or record.repetition_id is not None
+            for record in records
+        ):
+            raise ValueError("single Validation candidate artifact has session coordinates")
+        for record in records:
+            payload = record.payload
+            if not isinstance(payload, dict) or record.payload_sha256 != sha256_bytes(
+                canonical_json_bytes(payload)
+            ):
+                raise ValueError("single Validation record payload hash mismatch")
+            common = {
+                "schema_version",
+                "adapter_version",
+                "artifact_type",
+                "validation_batch_manifest_sha256",
+                "split",
+                "candidate",
+                "backend",
+                "result",
+            }
+            expected_fields = (
+                common | {"session", "opponent", "stream_roots"}
+                if artifact_type in _SESSION_ARTIFACT_TYPES
+                else common | {"source_session_join_sha256"}
+            )
+            if set(payload) != expected_fields or (
+                payload["schema_version"] != VALIDATION_EXECUTION_RECORD_SCHEMA_VERSION
+                or payload["adapter_version"] != VALIDATION_EXECUTION_ADAPTER_VERSION
+                or payload["artifact_type"] != artifact_type
+                or payload["validation_batch_manifest_sha256"] != plan.manifest_sha256
+                or payload["split"] != "validation"
+                or payload["candidate"] != candidate_entry
+            ):
+                raise ValueError("single Validation record provenance mismatch")
+            current_backend = payload["backend"]
+            _validate_backend_identity(current_backend)
+            if backend is None:
+                backend = current_backend
+            elif current_backend != backend:
+                raise ValueError("single Validation records mix backend identities")
+            if artifact_type in _SESSION_ARTIFACT_TYPES:
+                key = record.session_key()
+                if (
+                    payload["session"] != key.canonical_payload()
+                    or payload["opponent"] != catalog[key.opponent_id]
+                    or payload["stream_roots"] != _stream_root_entries(key)
+                ):
+                    raise ValueError("single Validation session provenance does not reconstruct")
+            elif payload["source_session_join_sha256"] != _session_join_sha256(
+                candidate.candidate_id, session_records
+            ):
+                raise ValueError("single Validation candidate result is not bound to all sessions")
+        if artifact_type in _SESSION_ARTIFACT_TYPES:
+            session_records[artifact_type] = records
+        else:
+            candidate_records[artifact_type] = records
+
+    session_results: list[ValidationSessionResult] = []
+    by_type = {
+        name: {record.session_key(): record for record in records}
+        for name, records in session_records.items()
+    }
+    for key in expected_keys:
+        values = tuple(
+            by_type[name][key].payload["result"] for name in _SESSION_ARTIFACT_TYPE_ORDER
+        )
+        _validate_session_result_envelopes(key, values)
+        _validate_reconstructed_hero_policy(
+            candidate,
+            values[0],
+            values[1],
+            context.opponents[key.opponent_id],
+            context.dimension,
+        )
+        session_results.append(
+            ValidationSessionResult("validation", key, _stream_roots(key), *values)
+        )
+    request = ValidationCandidateRequest(
+        candidate,
+        tuple(session_results),
+        _session_join_sha256(candidate.candidate_id, session_records),
+    )
+    calibration = candidate_records["validation_calibration_cells"][0].payload["result"]
+    aggregate = candidate_records["validation_aggregate_metrics"][0].payload["result"]
+    _validate_candidate_result_envelopes(request, calibration, aggregate)
+    expected_calibration, expected_aggregate, series = _candidate_products(
+        plan,
+        request,
+        context,
+    )
+    if calibration != expected_calibration or aggregate != expected_aggregate:
+        raise ValueError("single Validation calibration/aggregate does not reconstruct")
+    return {
+        "backend": backend,
+        "candidate_id": candidate.candidate_id,
+        "series_id": series.series_id,
+        "session_count": len(expected_keys),
+    }
+
+
+def _single_candidate_session_keys(
+    plan: ValidationBatchPlan,
+    candidate_id: str,
+) -> tuple[ValidationSessionKey, ...]:
+    if not isinstance(candidate_id, str) or not candidate_id or not candidate_id.isascii():
+        raise ValueError("single Validation candidate ID must be non-empty ASCII")
+    coordinates = sorted(
+        {(key.opponent_id, key.horizon, key.repetition_id) for key in plan.sessions}
+    )
+    keys = tuple(
+        ValidationSessionKey(candidate_id, opponent_id, horizon, repetition_id)
+        for opponent_id, horizon, repetition_id in coordinates
+    )
+    if len(keys) != 810:
+        raise ValueError("single Validation series must contain exactly 810 sessions")
+    return keys
+
+
 def verify_validation_execution_records(
     plan: ValidationBatchPlan,
     records_by_type: Mapping[str, Sequence[ValidationArtifactRecord]],
@@ -1854,7 +2141,9 @@ __all__ = [
     "ValidationExecutionBackend",
     "ValidationSessionRequest",
     "ValidationSessionResult",
+    "run_single_validation_candidate_execution",
     "run_validation_execution_adapter",
+    "verify_single_validation_candidate_records",
     "verify_validation_artifact_root",
     "verify_validation_execution_records",
     "write_validation_artifact_bundle",
