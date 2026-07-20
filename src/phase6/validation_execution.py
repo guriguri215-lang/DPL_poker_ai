@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, fields, is_dataclass
 from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 from pathlib import Path
@@ -44,11 +44,14 @@ from .calibration import (
     GROUND_TRUTH_SCHEMA_VERSION,
     TERMINAL_SNAPSHOT_SCHEMA_VERSION,
     CanonicalCalibrationArtifact,
+    ConfidenceValueReplacement,
     ExactEvObservation,
     SeriesCalibrationResult,
     calibration_series_id,
     evaluate_all_candidate_calibration,
     exact_ev_observation_sha256,
+    rebind_series_calibration,
+    revalue_series_confidence,
 )
 from .contracts import (
     ValidatedPhase6ContractBundle,
@@ -77,6 +80,11 @@ from .validation_runner import (
     ValidationSessionKey,
     verify_validation_batch_plan,
 )
+
+PolicyValidator = Callable[
+    [PrimaryCandidate, object, object, SynthesizedOpponent, Mapping[str, object]],
+    tuple[StrategyProfile, StrategyProfile],
+]
 
 VALIDATION_EXECUTION_ADAPTER_VERSION = "p6-9a-validation-execution-adapter-v1"
 VALIDATION_EXECUTION_RECORD_SCHEMA_VERSION = "phase6-validation-execution-record-v1"
@@ -330,6 +338,7 @@ def run_single_validation_candidate_execution(
     backend: ValidationExecutionBackend,
     *,
     repo_root: Path | str,
+    policy_validator: PolicyValidator | None = None,
 ) -> dict[str, tuple[ValidationArtifactRecord, ...]]:
     """Run one separately identified Validation-series candidate.
 
@@ -340,6 +349,7 @@ def run_single_validation_candidate_execution(
     require their original 16-candidate product.
     """
     verify_validation_batch_plan(plan, repo_root=repo_root)
+    validate_policy = policy_validator or _validate_reconstructed_hero_policy
     if not isinstance(candidate, PrimaryCandidate):
         raise TypeError("single Validation execution requires a PrimaryCandidate")
     if candidate.candidate_id in {item.candidate_id for item in plan.candidates}:
@@ -379,7 +389,7 @@ def run_single_validation_candidate_execution(
             raise ValueError("single Validation session provenance differs from its request")
         values = tuple(_canonical_result(getattr(result, field)) for field in _RESULT_NAMES)
         _validate_session_result_envelopes(request.key, values)
-        _validate_reconstructed_hero_policy(
+        validate_policy(
             candidate,
             values[0],
             values[1],
@@ -448,8 +458,240 @@ def run_single_validation_candidate_execution(
         candidate,
         records,
         repo_root=repo_root,
+        policy_validator=validate_policy,
     )
     return records
+
+
+def run_p6_10b_candidate_execution(
+    plan: ValidationBatchPlan,
+    candidate: PrimaryCandidate,
+    backend: ValidationExecutionBackend,
+    *,
+    repo_root: Path | str,
+    p6_10b_series_id: str,
+    confidence_values: (
+        Mapping[ValidationSessionKey, tuple[Decimal, bool]]
+        | Callable[[ValidationSessionKey], tuple[Decimal, bool]]
+        | None
+    ) = None,
+) -> dict[str, tuple[ValidationArtifactRecord, ...]]:
+    """Run one P6-10B series and optionally replace only its confidence values."""
+    policy_validator = getattr(backend, "validate_p6_10b_saved_policy", None)
+    if not callable(policy_validator):
+        raise TypeError("P6-10B backend must expose its additive policy verifier")
+    records = run_single_validation_candidate_execution(
+        plan,
+        candidate,
+        backend,
+        repo_root=repo_root,
+        policy_validator=policy_validator,
+    )
+    resolved_values = None
+    if confidence_values is not None:
+        resolved_values = (
+            {
+                key: confidence_values(key)
+                for key in _single_candidate_session_keys(plan, candidate.candidate_id)
+            }
+            if callable(confidence_values)
+            else confidence_values
+        )
+    request, source_series = _p6_10b_source_series(
+        plan,
+        candidate,
+        records,
+        repo_root=repo_root,
+        policy_validator=policy_validator,
+    )
+    series = rebind_series_calibration(source_series, p6_10b_series_id)
+    if resolved_values is not None:
+        coordinate_values = {
+            (key.opponent_id, key.horizon, key.repetition_id): value
+            for key, value in resolved_values.items()
+            if key.candidate_id == candidate.candidate_id
+        }
+        if len(coordinate_values) != len(resolved_values) or len(coordinate_values) != 810:
+            raise ValueError("P6-10B confidence values must cover exactly one 810-session series")
+        replacements = []
+        for cell in series.cells:
+            coordinate = (cell.key[1], cell.key[4], cell.key[5])
+            try:
+                confidence, emitted = coordinate_values[coordinate]
+            except KeyError as exc:
+                raise ValueError("P6-10B confidence values do not join calibration cells") from exc
+            replacements.append(ConfidenceValueReplacement(cell.key, confidence, emitted))
+        series = revalue_series_confidence(series, replacements)
+    calibration, aggregate = _p6_10b_candidate_payloads(request, series)
+    updated = dict(records)
+    for artifact_type, result in (
+        ("validation_calibration_cells", calibration),
+        ("validation_aggregate_metrics", aggregate),
+    ):
+        original = records[artifact_type][0].payload
+        payload = {**original, "result": result}
+        updated[artifact_type] = (_candidate_record(candidate.candidate_id, payload),)
+    result_records = {name: updated[name] for name in _ARTIFACT_TYPES}
+    verify_p6_10b_candidate_records(
+        plan,
+        candidate,
+        result_records,
+        repo_root=repo_root,
+        p6_10b_series_id=p6_10b_series_id,
+        confidence_values=resolved_values,
+        policy_validator=policy_validator,
+    )
+    return result_records
+
+
+def verify_p6_10b_candidate_records(
+    plan: ValidationBatchPlan,
+    candidate: PrimaryCandidate,
+    records_by_type: Mapping[str, Sequence[ValidationArtifactRecord]],
+    *,
+    repo_root: Path | str,
+    p6_10b_series_id: str,
+    confidence_values: Mapping[ValidationSessionKey, tuple[Decimal, bool]] | None = None,
+    policy_validator: PolicyValidator | None = None,
+) -> dict[str, object]:
+    """Verify additive P6-10B records while preserving the P6-9 verifier."""
+    if policy_validator is None:
+        raise TypeError("P6-10B verification requires its additive policy verifier")
+    records = {name: tuple(records_by_type[name]) for name in _ARTIFACT_TYPES}
+    request, source_series = _p6_10b_source_series(
+        plan,
+        candidate,
+        records,
+        repo_root=repo_root,
+        policy_validator=policy_validator,
+        accept_revalued=True,
+    )
+    expected_series = rebind_series_calibration(source_series, p6_10b_series_id)
+    if confidence_values is not None:
+        coordinate_values = {
+            (key.opponent_id, key.horizon, key.repetition_id): value
+            for key, value in confidence_values.items()
+            if key.candidate_id == candidate.candidate_id
+        }
+        if len(coordinate_values) != len(confidence_values) or len(coordinate_values) != 810:
+            raise ValueError("P6-10B confidence verifier requires exactly 810 values")
+        replacements = []
+        for cell in expected_series.cells:
+            coordinate = (cell.key[1], cell.key[4], cell.key[5])
+            if coordinate not in coordinate_values:
+                raise ValueError("P6-10B confidence verifier has an incomplete coordinate set")
+            confidence, emitted = coordinate_values[coordinate]
+            replacements.append(ConfidenceValueReplacement(cell.key, confidence, emitted))
+        expected_series = revalue_series_confidence(expected_series, replacements)
+    expected_calibration, expected_aggregate = _p6_10b_candidate_payloads(request, expected_series)
+    calibration = records["validation_calibration_cells"][0].payload["result"]
+    aggregate = records["validation_aggregate_metrics"][0].payload["result"]
+    if calibration != expected_calibration or aggregate != expected_aggregate:
+        raise ValueError("P6-10B confidence metrics do not independently reconstruct")
+
+    normal_calibration, normal_aggregate, _ = _candidate_products(
+        plan,
+        request,
+        _evaluation_context(plan, Path(repo_root).resolve()),
+        policy_validator=policy_validator,
+    )
+    normal = dict(records)
+    for artifact_type, result in (
+        ("validation_calibration_cells", normal_calibration),
+        ("validation_aggregate_metrics", normal_aggregate),
+    ):
+        original = records[artifact_type][0].payload
+        normal[artifact_type] = (
+            _candidate_record(candidate.candidate_id, {**original, "result": result}),
+        )
+    verified = verify_single_validation_candidate_records(
+        plan,
+        candidate,
+        normal,
+        repo_root=repo_root,
+        policy_validator=policy_validator,
+    )
+    return {
+        **verified,
+        "series_id": p6_10b_series_id,
+        "confidence_semantics": (
+            "bounded_legacy_score_not_probability"
+            if confidence_values is not None
+            else "posterior_probability"
+        ),
+    }
+
+
+def _p6_10b_source_series(
+    plan: ValidationBatchPlan,
+    candidate: PrimaryCandidate,
+    records: Mapping[str, Sequence[ValidationArtifactRecord]],
+    *,
+    repo_root: Path | str,
+    policy_validator: PolicyValidator,
+    accept_revalued: bool = False,
+) -> tuple[ValidationCandidateRequest, SeriesCalibrationResult]:
+    session_records = {name: tuple(records[name]) for name in _SESSION_ARTIFACT_TYPE_ORDER}
+    expected_keys = _single_candidate_session_keys(plan, candidate.candidate_id)
+    by_type = {
+        name: {record.session_key(): record for record in values}
+        for name, values in session_records.items()
+    }
+    session_results = []
+    for key in expected_keys:
+        values = tuple(
+            by_type[name][key].payload["result"] for name in _SESSION_ARTIFACT_TYPE_ORDER
+        )
+        _validate_session_result_envelopes(key, values)
+        session_results.append(
+            ValidationSessionResult("validation", key, _stream_roots(key), *values)
+        )
+    request = ValidationCandidateRequest(
+        candidate,
+        tuple(session_results),
+        _session_join_sha256(candidate.candidate_id, session_records),
+    )
+    calibration, aggregate, series = _candidate_products(
+        plan,
+        request,
+        _evaluation_context(plan, Path(repo_root).resolve()),
+        policy_validator=policy_validator,
+    )
+    if not accept_revalued:
+        actual_calibration = records["validation_calibration_cells"][0].payload["result"]
+        actual_aggregate = records["validation_aggregate_metrics"][0].payload["result"]
+        if actual_calibration != calibration or actual_aggregate != aggregate:
+            raise ValueError("P6-10B source series differs from default reconstruction")
+    return request, series
+
+
+def _p6_10b_candidate_payloads(
+    request: ValidationCandidateRequest,
+    series: SeriesCalibrationResult,
+) -> tuple[dict[str, object], dict[str, object]]:
+    common = {
+        "evaluator_version": CALIBRATION_EVALUATOR_VERSION,
+        "candidate_id": request.candidate.candidate_id,
+        "source_session_join_sha256": request.session_join_sha256,
+        "series_id": series.series_id,
+    }
+    calibration = {
+        "schema_version": VALIDATION_CALIBRATION_RESULT_SCHEMA_VERSION,
+        **common,
+        "cells": _json_ready(series.cells),
+    }
+    aggregate = {
+        "schema_version": VALIDATION_AGGREGATE_RESULT_SCHEMA_VERSION,
+        **common,
+        "terminal_snapshot_sha256": series.terminal_snapshot_sha256,
+        "ground_truth_sha256": series.ground_truth_sha256,
+        "exact_ev_sha256s": list(series.exact_ev_sha256s),
+        "atomic_groups": _json_ready(series.atomic_groups),
+        "macro": _json_ready(series.macro),
+        "micro": _json_ready(series.micro),
+        "gto_fpr": _json_ready(series.gto_fpr),
+    }
+    return calibration, aggregate
 
 
 def verify_single_validation_candidate_records(
@@ -458,9 +700,11 @@ def verify_single_validation_candidate_records(
     records_by_type: Mapping[str, Sequence[ValidationArtifactRecord]],
     *,
     repo_root: Path | str,
+    policy_validator: PolicyValidator | None = None,
 ) -> dict[str, object]:
     """Independently reconstruct one non-P6-9 Validation series."""
     verify_validation_batch_plan(plan, repo_root=repo_root)
+    validate_policy = policy_validator or _validate_reconstructed_hero_policy
     if not isinstance(candidate, PrimaryCandidate):
         raise TypeError("single Validation verifier requires a PrimaryCandidate")
     if candidate.candidate_id in {item.candidate_id for item in plan.candidates}:
@@ -560,7 +804,7 @@ def verify_single_validation_candidate_records(
             by_type[name][key].payload["result"] for name in _SESSION_ARTIFACT_TYPE_ORDER
         )
         _validate_session_result_envelopes(key, values)
-        _validate_reconstructed_hero_policy(
+        validate_policy(
             candidate,
             values[0],
             values[1],
@@ -582,6 +826,7 @@ def verify_single_validation_candidate_records(
         plan,
         request,
         context,
+        policy_validator=validate_policy,
     )
     if calibration != expected_calibration or aggregate != expected_aggregate:
         raise ValueError("single Validation calibration/aggregate does not reconstruct")
@@ -1145,6 +1390,8 @@ def _candidate_products(
     plan: ValidationBatchPlan,
     request: ValidationCandidateRequest,
     context: _EvaluationContext,
+    *,
+    policy_validator: PolicyValidator | None = None,
 ) -> tuple[dict[str, object], dict[str, object], SeriesCalibrationResult]:
     descriptor = _validation_series_descriptor(request.candidate, context)
     terminal_records: list[dict[str, object]] = []
@@ -1167,6 +1414,7 @@ def _candidate_products(
             opponent,
             request.candidate,
             context.dimension,
+            policy_validator=policy_validator,
         )
         terminal_records.append(
             _terminal_record(
@@ -1570,6 +1818,8 @@ def _recompute_exact_ev(
     opponent: SynthesizedOpponent,
     candidate: PrimaryCandidate,
     dimension: Mapping[str, object],
+    *,
+    policy_validator: PolicyValidator | None = None,
 ) -> ExactEvCell:
     terminal, policy, exact = values
     assert isinstance(terminal, dict)
@@ -1581,7 +1831,8 @@ def _recompute_exact_ev(
         or key.opponent_id != opponent.config.opponent_id
     ):
         raise ValueError("Validation Hero policy does not join the synthesized opponent/game")
-    base_policy, final_policy = _validate_reconstructed_hero_policy(
+    validate_policy = policy_validator or _validate_reconstructed_hero_policy
+    base_policy, final_policy = validate_policy(
         candidate,
         terminal,
         policy,

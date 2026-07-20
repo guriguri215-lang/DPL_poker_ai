@@ -327,11 +327,184 @@ class SeriesCalibrationResult:
 
 
 @dataclass(frozen=True, slots=True)
+class ConfidenceValueReplacement:
+    """Additive P6-10B score replacement for one existing calibration cell."""
+
+    key: CandidateKey
+    confidence: Decimal
+    emitted: bool
+
+
+@dataclass(frozen=True, slots=True)
 class CalibrationEvaluation:
     """All series, intentionally kept separate and ordered by series ID."""
 
     evaluator_version: str
     series: tuple[SeriesCalibrationResult, ...]
+
+
+def revalue_series_confidence(
+    source: SeriesCalibrationResult,
+    replacements: Sequence[ConfidenceValueReplacement],
+) -> SeriesCalibrationResult:
+    """Recompute existing metrics after changing only confidence score semantics.
+
+    P6-10B uses this additive API for the historical MVP score.  Labels,
+    reach weights, exact-EV cells, grouping, thresholds, and every efficiency
+    value remain those of the independently reconstructed source series.
+    """
+    if not isinstance(source, SeriesCalibrationResult):
+        raise TypeError("source must be a SeriesCalibrationResult")
+    values = tuple(replacements)
+    if any(not isinstance(item, ConfidenceValueReplacement) for item in values):
+        raise TypeError("replacements must contain ConfidenceValueReplacement values")
+    by_key = {item.key: item for item in values}
+    if len(by_key) != len(values) or set(by_key) != {item.key for item in source.cells}:
+        raise ValueError("confidence replacements must exactly cover the source cells")
+
+    cells: list[CalibrationCell] = []
+    with localcontext() as context:
+        context.prec = DECIMAL_PRECISION
+        context.rounding = ROUND_HALF_EVEN
+        for original in source.cells:
+            replacement = by_key[original.key]
+            confidence = replacement.confidence
+            if not confidence.is_finite() or not Decimal(0) <= confidence <= Decimal(1):
+                raise ValueError("replacement confidence must be finite and in [0, 1]")
+            brier = None
+            bin_index = None
+            if original.label is not None:
+                brier = (confidence - Decimal(original.label)) ** 2
+                bin_index = _bin_index(confidence)
+            cells.append(
+                CalibrationCell(
+                    key=original.key,
+                    q=original.q,
+                    true_rate=original.true_rate,
+                    reach_weight=original.reach_weight,
+                    confidence=confidence,
+                    structurally_eligible=original.structurally_eligible,
+                    predicted_positive=replacement.emitted,
+                    label=original.label,
+                    exclusion_status=original.exclusion_status,
+                    brier_component=brier,
+                    bin_index=bin_index,
+                )
+            )
+
+    source_groups = {(group.opponent_id, group.horizon): group for group in source.atomic_groups}
+    groups = []
+    for group_key in sorted(source_groups):
+        opponent_id, horizon = group_key
+        group_cells = [
+            cell for cell in cells if cell.key[1] == opponent_id and cell.key[4] == horizon
+        ]
+        groups.append(
+            AtomicGroupMetrics(
+                opponent_id=opponent_id,
+                horizon=horizon,
+                calibration=_metric_set(group_cells),
+                mean_cell_efficiency=source_groups[group_key].mean_cell_efficiency,
+            )
+        )
+    micro = MicroMetrics(
+        calibration=_metric_set(cells),
+        micro_mean_cell_efficiency=source.micro.micro_mean_cell_efficiency,
+    )
+    return SeriesCalibrationResult(
+        series_id=source.series_id,
+        terminal_snapshot_sha256=source.terminal_snapshot_sha256,
+        ground_truth_sha256=source.ground_truth_sha256,
+        exact_ev_sha256s=source.exact_ev_sha256s,
+        cells=tuple(cells),
+        atomic_groups=tuple(groups),
+        macro=_macro_metrics(groups),
+        micro=micro,
+        gto_fpr=_revalue_gto_fpr(cells, source.gto_fpr),
+    )
+
+
+def rebind_series_calibration(
+    source: SeriesCalibrationResult, series_id: str
+) -> SeriesCalibrationResult:
+    """Bind an additive P6-10B result to its full intervention-aware series ID."""
+    if not isinstance(source, SeriesCalibrationResult):
+        raise TypeError("source must be a SeriesCalibrationResult")
+    _validate_sha256(series_id, "P6-10B series ID")
+    cells = tuple(
+        CalibrationCell(
+            key=(series_id, *cell.key[1:]),
+            q=cell.q,
+            true_rate=cell.true_rate,
+            reach_weight=cell.reach_weight,
+            confidence=cell.confidence,
+            structurally_eligible=cell.structurally_eligible,
+            predicted_positive=cell.predicted_positive,
+            label=cell.label,
+            exclusion_status=cell.exclusion_status,
+            brier_component=cell.brier_component,
+            bin_index=cell.bin_index,
+        )
+        for cell in source.cells
+    )
+
+    def rebind_digest(kind: str, digest: str, ordinal: int | None = None) -> str:
+        payload: dict[str, object] = {
+            "schema_version": "phase6-p6-10b-series-rebind-v1",
+            "kind": kind,
+            "source_sha256": digest,
+            "series_id": series_id,
+        }
+        if ordinal is not None:
+            payload["ordinal"] = ordinal
+        return sha256_bytes(canonical_json_bytes(payload))
+
+    return SeriesCalibrationResult(
+        series_id=series_id,
+        terminal_snapshot_sha256=rebind_digest(
+            "terminal_snapshot", source.terminal_snapshot_sha256
+        ),
+        ground_truth_sha256=rebind_digest("ground_truth", source.ground_truth_sha256),
+        exact_ev_sha256s=tuple(
+            rebind_digest("exact_ev", digest, ordinal)
+            for ordinal, digest in enumerate(source.exact_ev_sha256s)
+        ),
+        cells=cells,
+        atomic_groups=source.atomic_groups,
+        macro=source.macro,
+        micro=source.micro,
+        gto_fpr=source.gto_fpr,
+    )
+
+
+def _revalue_gto_fpr(cells: Sequence[CalibrationCell], source: GtoFprSummary) -> GtoFprSummary:
+    groups: list[GtoFprGroup] = []
+    total_fp = 0
+    total_count = 0
+    for original in source.groups:
+        eligible = [
+            cell
+            for cell in cells
+            if cell.key[1] == original.opponent_id
+            and cell.key[4] == original.horizon
+            and cell.label is not None
+        ]
+        if len(eligible) != original.rate.denominator or any(cell.label != 0 for cell in eligible):
+            raise ValueError("replacement GTO scope differs from the source series")
+        false_positives = sum(cell.predicted_positive for cell in eligible)
+        rate = _rate_fraction(false_positives, len(eligible))
+        groups.append(GtoFprGroup(original.opponent_id, original.horizon, rate))
+        total_fp += false_positives
+        total_count += len(eligible)
+    return GtoFprSummary(
+        metric_id=source.metric_id,
+        groups=tuple(groups),
+        macro=_mean_metric(
+            [group.rate.value for group in groups if group.rate.value is not None],
+            METRIC_STATUS_NO_DEFINED_GROUPS,
+        ),
+        micro=_rate_fraction(total_fp, total_count),
+    )
 
 
 def calibration_series_id(
