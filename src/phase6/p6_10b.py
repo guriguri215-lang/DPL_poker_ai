@@ -152,6 +152,14 @@ def decimal_token(value):
     return "0" if wire in {"", "-0"} else wire
 
 
+def estimand_delta(ablation_value, primary_value):
+    with localcontext() as context:
+        context.prec = 50
+        context.rounding = ROUND_HALF_EVEN
+        difference = Decimal(ablation_value) - Decimal(primary_value)
+    return decimal_token(difference)
+
+
 def decimal_mean(values):
     if not values:
         return None
@@ -1652,8 +1660,7 @@ for ablation_id, entry in configs.items():
                 else "delta_validation_macro_exploitation_efficiency")
     expected_estimand = {"name": estimand, "ablation_value": ablation_value,
                          "selected_primary_value": primary_value,
-                         "delta": decimal_token(Decimal(ablation_value)
-                                                - Decimal(primary_value)),
+                         "delta": estimand_delta(ablation_value, primary_value),
                          "direction": "ablation_minus_selected_primary"}
     expected_limits = (["bounded-legacy-score-not-posterior-probability",
         "estimator-method-only-not-threshold-alpha-epsilon-or-floor",
@@ -3242,7 +3249,11 @@ def _nested(value: object, path: Sequence[str]) -> object:
 def _decimal_difference(left: object, right: object) -> str | None:
     if left is None or right is None:
         return None
-    return _decimal_wire(Decimal(str(left)) - Decimal(str(right)))
+    with localcontext() as context:
+        context.prec = 50
+        context.rounding = ROUND_HALF_EVEN
+        difference = Decimal(str(left)) - Decimal(str(right))
+    return _decimal_wire(difference)
 
 
 def _mean(values: Sequence[Decimal]) -> Decimal:

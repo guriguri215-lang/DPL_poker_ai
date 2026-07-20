@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
 import shutil
-import tempfile
 from dataclasses import replace
-from decimal import Decimal
+from decimal import ROUND_DOWN, ROUND_HALF_EVEN, Decimal, localcontext
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
@@ -37,6 +37,141 @@ from phase6.p6_7 import REPETITION_SEEDS, PrimaryCandidate
 from phase6.validation_execution import _backend_identity
 from phase6.validation_runner import ValidationSessionKey
 from poker_solver.game import Decision, Game, Terminal
+
+_PRECISION_50_ESTIMAND_CASES = (
+    (
+        "0.032986748833684122996726160624556761983269190784751",
+        "0.012945942450642294370403267922015549648665191628527",
+        "0.020040806383041828626322892702541212334603999156224",
+        "0.0200408063830418286263228927",
+    ),
+    (
+        "0.010506055943898203868466823944991007504731784632178",
+        "0.012764520537135088343830794336234383216058766400372",
+        "-0.002258464593236884475363970391243375711326981768194",
+        "-0.002258464593236884475363970391",
+    ),
+)
+_FRESH_RESULT_MARKER = "p6_10b_fresh_test_result.json"
+
+
+def _fresh_result_marker_path(result_root):
+    if (
+        result_root.name != p6_10b.P6_10B_RESULT_ROOT
+        or result_root.parent.name != p6_10b.P6_10B_PHYSICAL_DIRECTORY
+        or result_root.parent.parent.name != p6_10b.P6_10B_ARTIFACT_DIRECTORY
+    ):
+        raise ValueError("fresh P6-10B test result has a noncanonical path")
+    return result_root.parent.parent.parent / _FRESH_RESULT_MARKER
+
+
+def _require_fresh_test_result(result_root):
+    source_root = result_root.resolve()
+    repository_root = Path.cwd().resolve()
+    protected_roots = (repository_root / "experiments_output",)
+    for protected in protected_roots:
+        try:
+            source_root.relative_to(protected.resolve())
+        except ValueError:
+            continue
+        raise ValueError("fresh P6-10B test result must not be an immutable production tree")
+    marker_path = _fresh_result_marker_path(source_root)
+    marker = json.loads(marker_path.read_bytes())
+    expected = {
+        "artifact_type": "p6_10b_fresh_test_result",
+        "result_root_sha256": sha256_bytes(source_root.read_bytes()),
+    }
+    if marker != expected:
+        raise ValueError("fresh P6-10B test result marker mismatch")
+    return source_root
+
+
+def _generate_fresh_test_result(tmp_path):
+    repository_root = Path.cwd().resolve()
+    source_run = (
+        repository_root
+        / "experiments_output"
+        / "p6_10a_comparator_ablation_run_20260719"
+        / "phase6_p6_10a_run_manifest.json"
+    )
+    snapshot = p6_10b.load_p6_10a_snapshot(source_run, repo_root=repository_root)
+    batch = p6_10b.build_p6_10b_batch(snapshot)
+    artifact_parent = tmp_path / p6_10b.P6_10B_ARTIFACT_DIRECTORY
+    artifact_parent.mkdir()
+    bundle = p6_10b.execute_p6_10b(
+        snapshot,
+        batch,
+        artifact_parent / p6_10b.P6_10B_PHYSICAL_DIRECTORY,
+        repo_root=repository_root,
+    )
+    marker = {
+        "artifact_type": "p6_10b_fresh_test_result",
+        "result_root_sha256": bundle.root_manifest_sha256,
+    }
+    _fresh_result_marker_path(bundle.root_manifest_path).write_bytes(canonical_json_bytes(marker))
+    return _require_fresh_test_result(bundle.root_manifest_path)
+
+
+def test_fresh_result_guard_rejects_immutable_production_tree():
+    old_root = (
+        Path.cwd()
+        / "experiments_output"
+        / "p6_10b_confidence_provider_run_20260719"
+        / p6_10b.P6_10B_ARTIFACT_DIRECTORY
+        / p6_10b.P6_10B_PHYSICAL_DIRECTORY
+        / p6_10b.P6_10B_RESULT_ROOT
+    )
+    with pytest.raises(ValueError, match="must not be an immutable production tree"):
+        _require_fresh_test_result(old_root)
+
+
+@pytest.mark.parametrize(
+    ("ablation_value", "primary_value", "expected", "legacy_default_28"),
+    _PRECISION_50_ESTIMAND_CASES,
+)
+def test_decimal_difference_uses_explicit_precision_50(
+    ablation_value, primary_value, expected, legacy_default_28
+):
+    with localcontext() as global_context:
+        global_context.prec = 7
+        global_context.rounding = ROUND_DOWN
+        actual = p6_10b._decimal_difference(ablation_value, primary_value)
+
+    assert actual == expected
+    assert actual != legacy_default_28
+
+
+def test_decimal_difference_preserves_none_contract():
+    assert p6_10b._decimal_difference(None, "1") is None
+    assert p6_10b._decimal_difference("1", None) is None
+
+
+def test_embedded_verifier_estimand_delta_uses_independent_precision_50_path():
+    tree = ast.parse(p6_10b._INDEPENDENT_VERIFIER_SOURCE)
+    helpers = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in {"decimal_token", "estimand_delta"}
+    ]
+    namespace = {
+        "Decimal": Decimal,
+        "ROUND_HALF_EVEN": ROUND_HALF_EVEN,
+        "localcontext": localcontext,
+    }
+    exec(
+        compile(ast.Module(body=helpers, type_ignores=[]), "<precision-fixture>", "exec"), namespace
+    )
+
+    with localcontext() as global_context:
+        global_context.prec = 9
+        global_context.rounding = ROUND_DOWN
+        actual = tuple(
+            namespace["estimand_delta"](ablation_value, primary_value)
+            for ablation_value, primary_value, _expected, _legacy in _PRECISION_50_ESTIMAND_CASES
+        )
+
+    assert actual == tuple(case[2] for case in _PRECISION_50_ESTIMAND_CASES)
+    assert actual != tuple(case[3] for case in _PRECISION_50_ESTIMAND_CASES)
 
 
 def test_legacy_mvp_confidence_matches_independent_binary64_arithmetic():
@@ -469,15 +604,13 @@ def test_canonical_child_path_rejects_ads_and_noncanonical_aliases(tmp_path):
 
 
 def _rehash_valid_result_tamper(source_root, target_root, mode):
+    source_root = _require_fresh_test_result(source_root)
     source_dir = source_root.parent
     target_dir = target_root.parent
     target_dir.mkdir(parents=True)
     for source in source_dir.iterdir():
         target = target_dir / source.name
-        if source.name == p6_10b.P6_10B_RESULT_ROOT:
-            shutil.copyfile(source, target)
-        else:
-            os.link(source, target)
+        shutil.copyfile(source, target)
 
     def copy_for_write(source, target):
         target.unlink()
@@ -595,6 +728,59 @@ def _rehash_valid_result_tamper(source_root, target_root, mode):
     return sha256_bytes(root_raw)
 
 
+def _rewrite_primary_estimand_deltas(result_root, replacements):
+    root = json.loads(result_root.read_bytes())
+    report_ref = next(
+        ref for ref in root["artifacts"] if ref["name"] == "p6_10b_contract_closure_report"
+    )
+    report_path = result_root.parent / report_ref["path"]
+    report = json.loads(report_path.read_bytes())
+    for row in report["ablations"]:
+        if row["ablation_id"] in replacements:
+            row["primary_estimand"]["delta"] = replacements[row["ablation_id"]]
+    report_raw = canonical_json_bytes(report)
+    report_path.write_bytes(report_raw)
+    report_ref["sha256"] = sha256_bytes(report_raw)
+    report_ref["size_bytes"] = len(report_raw)
+    root_raw = canonical_json_bytes(root)
+    result_root.write_bytes(root_raw)
+    return sha256_bytes(root_raw)
+
+
+def test_independent_verifier_rejects_rehashed_default_precision_delta(tmp_path):
+    if os.environ.get("P6_10B_RUN_FRESH_FULL_CHAIN") != "1":
+        pytest.skip("set P6_10B_RUN_FRESH_FULL_CHAIN=1 for the generated full-chain fixture")
+    target_root = _generate_fresh_test_result(tmp_path)
+    corrected = {
+        "abl_confidence_mvp__v1": _PRECISION_50_ESTIMAND_CASES[0][2],
+        "abl_provider_rule__v1": _PRECISION_50_ESTIMAND_CASES[1][2],
+    }
+    report = json.loads((target_root.parent / p6_10b.P6_10B_REPORT).read_bytes())
+    assert {
+        row["ablation_id"]: row["primary_estimand"]["delta"] for row in report["ablations"]
+    } == corrected
+    valid_sha256 = sha256_bytes(target_root.read_bytes())
+
+    verified = run_p6_10b_independent_verifier(
+        target_root,
+        expected_sha256=valid_sha256,
+        repo_root=Path.cwd(),
+    )
+    assert verified["status"] == "verified"
+
+    tampered_sha256 = _rewrite_primary_estimand_deltas(
+        target_root,
+        {"abl_confidence_mvp__v1": _PRECISION_50_ESTIMAND_CASES[0][3]},
+    )
+    assert tampered_sha256 != valid_sha256
+    with pytest.raises(ValueError, match="report row reconstruction mismatch"):
+        run_p6_10b_independent_verifier(
+            target_root,
+            expected_sha256=tampered_sha256,
+            repo_root=Path.cwd(),
+        )
+
+
 @pytest.mark.parametrize(
     "mode",
     [
@@ -610,10 +796,10 @@ def _rehash_valid_result_tamper(source_root, target_root, mode):
     ],
 )
 def test_independent_verifier_rejects_rehashed_valid_result_tamper(tmp_path, mode):
-    source_value = os.environ.get("P6_10B_VALID_RESULT_ROOT")
+    source_value = os.environ.get("P6_10B_FRESH_TEST_RESULT_ROOT")
     if source_value is None:
-        pytest.skip("set P6_10B_VALID_RESULT_ROOT for the full saved-result tamper fixture")
-    source_root = Path(source_value).resolve()
+        pytest.skip("set P6_10B_FRESH_TEST_RESULT_ROOT to a generated fresh tmp fixture")
+    source_root = _require_fresh_test_result(Path(source_value))
     target_root = (
         tmp_path
         / p6_10b.P6_10B_ARTIFACT_DIRECTORY
@@ -641,51 +827,6 @@ def test_independent_verifier_rejects_rehashed_valid_result_tamper(tmp_path, mod
         )
 
 
-def _equilibrium_source_overlay(source_repo, overlay, result_root):
-    def link(relative_value):
-        source = source_repo / relative_value
-        target = overlay / relative_value
-        target.parent.mkdir(parents=True, exist_ok=True)
-        os.link(source, target)
-        return source
-
-    result = json.loads(result_root.read_bytes())
-    source_refs = result["source_snapshot"]
-    for name in (
-        "p6_10a_batch_manifest",
-        "p6_10a_run_manifest",
-        "p6_10a_result_root",
-        "comparator_ablation_report",
-        "gate_b_readiness_gap_packet",
-    ):
-        link(source_refs[name]["path"])
-
-    p610a_run = json.loads((source_repo / source_refs["p6_10a_run_manifest"]["path"]).read_bytes())
-    p69_ref = p610a_run["inputs"]["source_snapshot"]["p6_9_result_root"]
-    p69_root_source = link(p69_ref["path"])
-    p69_root = json.loads(p69_root_source.read_bytes())
-    required_p69 = {
-        "validation_batch_manifest",
-        "validation_exact_ev_cells",
-        "validation_calibration_cells",
-        "validation_aggregate_metrics",
-    }
-    for ref in p69_root["artifacts"]:
-        if ref["name"] in required_p69:
-            relative = Path(p69_ref["path"]).parent / ref["path"]
-            link(relative)
-
-    for source in (source_repo / "configs/opponents/validation").glob("*.opponent.json"):
-        link(source.relative_to(source_repo))
-    equilibrium_relative = Path(
-        "configs/opponents/equilibria/river-large-bet-equilibrium-v1.equilibrium.json"
-    )
-    equilibrium_target = overlay / equilibrium_relative
-    equilibrium_target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(source_repo / equilibrium_relative, equilibrium_target)
-    return equilibrium_target
-
-
 @pytest.mark.parametrize(
     ("mode", "expected_failure"),
     [
@@ -693,29 +834,79 @@ def _equilibrium_source_overlay(source_repo, overlay, result_root):
         ("unknown_field", "frozen equilibrium is not closed-world"),
     ],
 )
-def test_independent_verifier_rejects_fixed_equilibrium_tamper(mode, expected_failure):
-    source_value = os.environ.get("P6_10B_VALID_RESULT_ROOT")
-    if source_value is None:
-        pytest.skip("set P6_10B_VALID_RESULT_ROOT for the full saved-result tamper fixture")
-    result_root = Path(source_value).resolve()
-    original_result_bytes = result_root.read_bytes()
-    with tempfile.TemporaryDirectory(prefix="d6-", dir=Path.cwd() / "tmp") as overlay_value:
-        overlay = Path(overlay_value)
-        equilibrium_path = _equilibrium_source_overlay(Path.cwd(), overlay, result_root)
-        equilibrium = json.loads(equilibrium_path.read_bytes())
-        if mode == "solver_iterations":
-            equilibrium["solver"]["iterations"] += 1
-        else:
-            equilibrium["unexpected"] = False
-        equilibrium_path.write_bytes(canonical_json_bytes(equilibrium))
+def test_independent_verifier_rejects_fixed_equilibrium_tamper(tmp_path, mode, expected_failure):
+    tree = ast.parse(p6_10b._INDEPENDENT_VERIFIER_SOURCE)
+    function_names = {
+        "canonical_no_lf",
+        "digest",
+        "load_source",
+        "require_fields",
+        "load_fixed_equilibrium",
+    }
+    helpers = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in function_names
+    ]
+    namespace = {
+        "hashlib": hashlib,
+        "json": json,
+        "Path": Path,
+        "PurePosixPath": PurePosixPath,
+    }
+    exec(
+        compile(ast.Module(body=helpers, type_ignores=[]), "<equilibrium-fixture>", "exec"),
+        namespace,
+    )
 
-        with pytest.raises(ValueError, match=expected_failure):
-            run_p6_10b_independent_verifier(
-                result_root,
-                expected_sha256=sha256_bytes(original_result_bytes),
-                repo_root=overlay,
-            )
-    assert result_root.read_bytes() == original_result_bytes
+    content = {
+        "schema_version": "1.0.0",
+        "artifact_type": "frozen-equilibrium",
+        "equilibrium_version": "river-large-bet-equilibrium-v1",
+        "game": {
+            "builder": "poker_solver.river_tree.build_river_game",
+            "builder_version": "river-single-bet-v1",
+            "pot": "10",
+            "bet_fraction": "0.5",
+            "board": "fixture-board",
+            "oop_range": {"OOP": "1"},
+            "ip_range": {"IP": "1"},
+        },
+        "strategy": {"OOP:OOP:start": {"CHECK": "1", "BET": "0"}},
+        "solver": {
+            "algorithm": "fixture-solver",
+            "implementation": "fixture-implementation",
+            "iterations": 1,
+            "average_delay": 0,
+        },
+    }
+    declared = hashlib.sha256(
+        json.dumps(
+            content,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    equilibrium = {**content, "artifact_sha256": declared}
+    equilibrium_path = (
+        tmp_path
+        / "configs"
+        / "opponents"
+        / "equilibria"
+        / "river-large-bet-equilibrium-v1.equilibrium.json"
+    )
+    equilibrium_path.parent.mkdir(parents=True)
+    if mode == "solver_iterations":
+        equilibrium["solver"]["iterations"] += 1
+    else:
+        equilibrium["unexpected"] = False
+    equilibrium_path.write_bytes(canonical_json_bytes(equilibrium))
+    fixed_catalog = {"opponents": [{"equilibrium_artifact_sha256": declared}]}
+
+    with pytest.raises(ValueError, match=expected_failure):
+        namespace["load_fixed_equilibrium"](tmp_path, fixed_catalog)
 
 
 def test_result_root_rejects_nested_extra_child_before_replay(tmp_path, monkeypatch):
