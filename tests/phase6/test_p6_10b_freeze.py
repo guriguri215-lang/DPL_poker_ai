@@ -11,6 +11,18 @@ import phase6.p6_10b_freeze as p6_10b_freeze
 from phase6 import canonical_json_bytes, sha256_bytes
 
 
+def test_freeze_namespace_and_attempt_id_are_exact_precision_fix_values():
+    assert (
+        p6_10b_freeze.P6_10B_INPUT_ROOT_NAME
+        == "p6_10b_confidence_provider_precision_fix_inputs_20260720"
+    )
+    assert (
+        p6_10b_freeze.P6_10B_OUTPUT_ROOT_NAME
+        == "p6_10b_confidence_provider_precision_fix_run_20260720"
+    )
+    assert p6_10b_freeze.P6_10B_ATTEMPT_ID == "p6-10b-confidence-provider-precision-fix-attempt-001"
+
+
 def _freeze_fixture(tmp_path, monkeypatch):
     repo_root = tmp_path / "repo"
     experiments = repo_root / "experiments_output"
@@ -154,15 +166,25 @@ def test_freeze_sidecar_tamper_and_existing_namespace_fail_closed(tmp_path, monk
         )
 
 
-def test_freeze_rejects_alternate_namespace(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("input_name", "output_name"),
+    (
+        (
+            "p6_10b_confidence_provider_inputs_20260719",
+            "p6_10b_confidence_provider_run_20260719",
+        ),
+        ("p6_10b_other_inputs", "p6_10b_other_output"),
+    ),
+)
+def test_freeze_rejects_alternate_namespace(tmp_path, monkeypatch, input_name, output_name):
     fixture = _freeze_fixture(tmp_path, monkeypatch)
 
     with pytest.raises(ValueError, match="not canonical"):
         p6_10b_freeze.create_p6_10b_freeze(
             expected_commit=fixture["commit"],
             p6_10a_run_manifest=fixture["source"],
-            input_root=fixture["input_root"].with_name("p6_10b_other_inputs"),
-            output_root=fixture["output_root"].with_name("p6_10b_other_output"),
+            input_root=fixture["input_root"].with_name(input_name),
+            output_root=fixture["output_root"].with_name(output_name),
             repo_root=fixture["repo_root"],
             invocation_argv=[],
         )

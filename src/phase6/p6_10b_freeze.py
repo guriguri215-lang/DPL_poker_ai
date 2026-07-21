@@ -41,8 +41,8 @@ P6_10B_FREEZE_SIDECAR_SCHEMA_VERSION = "phase6-p6-10b-freeze-hash-sidecar-v1"
 P6_10B_FREEZE_MANIFEST = "phase6_p6_10b_freeze_manifest.json"
 P6_10B_FREEZE_HASH_SIDECAR = "phase6_p6_10b_freeze_manifest.sha256.json"
 P6_10B_DEPENDENCY_LOCK = "dependency-lock.json"
-P6_10B_INPUT_ROOT_NAME = "p6_10b_confidence_provider_inputs_20260719"
-P6_10B_OUTPUT_ROOT_NAME = "p6_10b_confidence_provider_run_20260719"
+P6_10B_INPUT_ROOT_NAME = "p6_10b_confidence_provider_precision_fix_inputs_20260720"
+P6_10B_OUTPUT_ROOT_NAME = "p6_10b_confidence_provider_precision_fix_run_20260720"
 
 _ATTEMPT_POLICY = {
     "planned_attempt_count": 1,

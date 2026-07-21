@@ -55,6 +55,10 @@ _PRECISION_50_ESTIMAND_CASES = (
 _FRESH_RESULT_MARKER = "p6_10b_fresh_test_result.json"
 
 
+def test_attempt_id_is_exact_precision_fix_namespace():
+    assert p6_10b.P6_10B_ATTEMPT_ID == "p6-10b-confidence-provider-precision-fix-attempt-001"
+
+
 def _fresh_result_marker_path(result_root):
     if (
         result_root.name != p6_10b.P6_10B_RESULT_ROOT

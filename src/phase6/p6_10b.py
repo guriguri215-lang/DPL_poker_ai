@@ -39,7 +39,7 @@ from .validation_runner import ValidationSessionKey
 
 P6_10B_CLI_VERSION = "phase6-p6-10b-cli-v1"
 P6_10B_ENTRYPOINT = "cli/phase6_p6_10b_v1.py"
-P6_10B_ATTEMPT_ID = "p6-10b-confidence-provider-ablation-attempt-001"
+P6_10B_ATTEMPT_ID = "p6-10b-confidence-provider-precision-fix-attempt-001"
 P6_10B_ATTEMPT_MARKER = "p6_10b_attempt_in_progress.json"
 P6_10B_FAILURE_RECORD = "p6_10b_failure_record.json"
 P6_10B_RUN_MANIFEST = "phase6_p6_10b_run_manifest.json"
