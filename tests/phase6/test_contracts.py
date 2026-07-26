@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,13 @@ from phase6 import (
     validate_full_selection_metric_contract_v2,
     validate_full_selection_preregistration_v2,
     validate_selection_metric_contract,
+)
+from phase6.contracts import (
+    CanonicalPhase6ContractArtifact,
+    ValidatedPhase6ContractBundleEvidence,
+    load_phase6_contract_bundle_evidence,
+    load_phase6_contract_bundle_evidence_from_canonical_artifacts,
+    validate_phase6_contract_bundle_evidence,
 )
 
 Mutator = Callable[[dict[str, Any]], None]
@@ -202,6 +210,16 @@ def _build_bundle(
     return {
         "root_path": root_path,
         "root_sha256": sha256_bytes(root_bytes),
+        "artifact_relative_paths": [
+            *(f"sources/{role}.json" for role in COMPONENT_ROLES),
+            *(f"fixtures/{fixture_id}.json" for fixture_id in fixture_payloads),
+            "contracts/coverage.json",
+            "contracts/selection.json",
+            "references/preregistration.json",
+            "references/series.json",
+            "references/validation-batch.json",
+            "references/selection-report.json",
+        ],
         "coverage": coverage,
         "coverage_path": root / "contracts/coverage.json",
         "selection": selection,
@@ -595,3 +613,249 @@ def test_v2_preregistration_rejects_v1_or_mismatched_contract_reference():
             preregistration,
             selection_contract=selection,
         )
+
+
+def _canonical_bundle_artifacts(
+    bundle: dict[str, Any],
+) -> tuple[CanonicalPhase6ContractArtifact, ...]:
+    root = bundle["root_path"].parent
+    return tuple(
+        CanonicalPhase6ContractArtifact(
+            relative_path=relative_path,
+            raw=(root / relative_path).read_bytes(),
+            expected_sha256=sha256_bytes((root / relative_path).read_bytes()),
+        )
+        for relative_path in bundle["artifact_relative_paths"]
+    )
+
+
+def test_path_and_bytes_bundle_evidence_are_equivalent_and_fresh(tmp_path: Path) -> None:
+    bundle = _build_bundle(tmp_path)
+    root_raw = bundle["root_path"].read_bytes()
+    artifacts = _canonical_bundle_artifacts(bundle)
+
+    path_evidence = load_phase6_contract_bundle_evidence(
+        bundle["root_path"], expected_sha256=bundle["root_sha256"]
+    )
+    bytes_evidence = load_phase6_contract_bundle_evidence_from_canonical_artifacts(
+        root_raw,
+        expected_sha256=bundle["root_sha256"],
+        artifacts=artifacts,
+    )
+
+    assert path_evidence.root_manifest_raw == bytes_evidence.root_manifest_raw
+    assert path_evidence.root_manifest_sha256 == bytes_evidence.root_manifest_sha256
+    assert path_evidence.artifacts == bytes_evidence.artifacts
+    assert path_evidence.provenance_sha256 == bytes_evidence.provenance_sha256
+    first = validate_phase6_contract_bundle_evidence(bytes_evidence)
+    second = validate_phase6_contract_bundle_evidence(bytes_evidence)
+    assert first == second
+    assert first is not second
+    assert first.root_manifest is not second.root_manifest
+    assert first.coverage_contract is not second.coverage_contract
+    first.coverage_contract["coverage_matrix"]["provider_semantics_status"] = "mutated"
+    object.__setattr__(first.coverage_evaluation, "end_to_end_coverage", False)
+    assert second.coverage_contract["coverage_matrix"]["provider_semantics_status"] == "match"
+    third = validate_phase6_contract_bundle_evidence(bytes_evidence)
+    assert third.coverage_evaluation.end_to_end_coverage is True
+    assert third.coverage_evaluation is not first.coverage_evaluation
+    assert (
+        load_phase6_contract_bundle(bundle["root_path"], expected_sha256=bundle["root_sha256"])
+        == second
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda artifacts: artifacts[:-1],
+        lambda artifacts: (
+            *artifacts,
+            CanonicalPhase6ContractArtifact(
+                relative_path="extra.json",
+                raw=canonical_json_bytes(
+                    {"artifact_type": "phase6_semantic_source", "schema_version": "x"}
+                ),
+                expected_sha256=sha256_bytes(
+                    canonical_json_bytes(
+                        {"artifact_type": "phase6_semantic_source", "schema_version": "x"}
+                    )
+                ),
+            ),
+        ),
+        lambda artifacts: (
+            artifacts[0],
+            CanonicalPhase6ContractArtifact(
+                artifacts[0].relative_path,
+                artifacts[0].raw,
+                artifacts[0].expected_sha256,
+            ),
+            *artifacts[1:],
+        ),
+        lambda artifacts: (
+            CanonicalPhase6ContractArtifact(
+                "../escape.json",
+                artifacts[0].raw,
+                artifacts[0].expected_sha256,
+            ),
+            *artifacts[1:],
+        ),
+        lambda artifacts: (
+            CanonicalPhase6ContractArtifact(
+                artifacts[0].relative_path,
+                artifacts[0].raw + b" ",
+                sha256_bytes(artifacts[0].raw + b" "),
+            ),
+            *artifacts[1:],
+        ),
+    ],
+)
+def test_bytes_bundle_evidence_rejects_nonclosed_or_noncanonical_maps(
+    tmp_path: Path,
+    mutation,
+) -> None:
+    bundle = _build_bundle(tmp_path)
+    artifacts = _canonical_bundle_artifacts(bundle)
+    with pytest.raises(ValueError):
+        load_phase6_contract_bundle_evidence_from_canonical_artifacts(
+            bundle["root_path"].read_bytes(),
+            expected_sha256=bundle["root_sha256"],
+            artifacts=mutation(artifacts),
+        )
+
+
+def test_bundle_evidence_rejects_forgery_and_retained_mutation(tmp_path: Path) -> None:
+    bundle = _build_bundle(tmp_path)
+    evidence = load_phase6_contract_bundle_evidence(
+        bundle["root_path"], expected_sha256=bundle["root_sha256"]
+    )
+    forged = object.__new__(ValidatedPhase6ContractBundleEvidence)
+    for field in (
+        "_root_manifest_raw",
+        "_root_manifest_sha256",
+        "_artifacts",
+        "_provenance_sha256",
+        "_loader_token",
+    ):
+        object.__setattr__(forged, field, getattr(evidence, field))
+    with pytest.raises(ValueError, match="provenance"):
+        validate_phase6_contract_bundle_evidence(forged)
+    with pytest.raises(TypeError):
+        ValidatedPhase6ContractBundleEvidence()
+    direct = validate_phase6_contract_bundle_evidence(evidence)
+    with pytest.raises(ValueError):
+        validate_phase6_contract_bundle_evidence(direct)  # type: ignore[arg-type]
+    object.__setattr__(evidence, "_provenance_sha256", "f" * 64)
+    with pytest.raises(ValueError, match="provenance"):
+        validate_phase6_contract_bundle_evidence(evidence)
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    [
+        ("artifact_type", "wrong"),
+        ("schema_version", "wrong"),
+        ("path", "sources/opponent_synthesis.json"),
+        ("sha256", "f" * 64),
+    ],
+)
+def test_bytes_bundle_evidence_rejects_every_nested_reference_join(
+    tmp_path: Path,
+    field: str,
+    invalid: str,
+) -> None:
+    def mutate(coverage: dict[str, Any]) -> None:
+        coverage["components"][0]["source_artifact"][field] = invalid
+
+    bundle = _build_bundle(tmp_path, coverage_mutator=mutate)
+    with pytest.raises(ValueError):
+        load_phase6_contract_bundle_evidence_from_canonical_artifacts(
+            bundle["root_path"].read_bytes(),
+            expected_sha256=bundle["root_sha256"],
+            artifacts=_canonical_bundle_artifacts(bundle),
+        )
+
+
+def test_bytes_bundle_evidence_rejects_duplicate_root_and_artifact_keys(
+    tmp_path: Path,
+) -> None:
+    bundle = _build_bundle(tmp_path)
+    root_raw = bundle["root_path"].read_bytes()
+    duplicate_root = root_raw.replace(
+        b'{"artifact_type":',
+        b'{"artifact_type":"phase6_evaluation_manifest","artifact_type":',
+        1,
+    )
+    with pytest.raises(ValueError):
+        load_phase6_contract_bundle_evidence_from_canonical_artifacts(
+            duplicate_root,
+            expected_sha256=sha256_bytes(duplicate_root),
+            artifacts=_canonical_bundle_artifacts(bundle),
+        )
+
+    artifacts = list(_canonical_bundle_artifacts(bundle))
+    target = next(
+        artifact for artifact in artifacts if artifact.relative_path == "contracts/selection.json"
+    )
+    selection_payload = json.loads(target.raw)
+    duplicate_artifact = target.raw.replace(
+        b'{"artifact_type":',
+        (
+            b'{"artifact_type":'
+            + json.dumps(selection_payload["artifact_type"]).encode("ascii")
+            + b',"artifact_type":'
+        ),
+        1,
+    )
+    artifacts[artifacts.index(target)] = CanonicalPhase6ContractArtifact(
+        relative_path=target.relative_path,
+        raw=duplicate_artifact,
+        expected_sha256=sha256_bytes(duplicate_artifact),
+    )
+    with pytest.raises(ValueError):
+        load_phase6_contract_bundle_evidence_from_canonical_artifacts(
+            root_raw,
+            expected_sha256=bundle["root_sha256"],
+            artifacts=artifacts,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "root_raw",
+        "root_hash",
+        "artifact_tuple",
+        "artifact_path",
+        "artifact_raw",
+        "artifact_hash",
+        "provenance_hash",
+    ],
+)
+def test_bundle_evidence_rejects_every_retained_value_mismatch(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    bundle = _build_bundle(tmp_path)
+    evidence = load_phase6_contract_bundle_evidence(
+        bundle["root_path"],
+        expected_sha256=bundle["root_sha256"],
+    )
+    if mutation == "root_raw":
+        object.__setattr__(evidence, "_root_manifest_raw", evidence.root_manifest_raw + b" ")
+    elif mutation == "root_hash":
+        object.__setattr__(evidence, "_root_manifest_sha256", "f" * 64)
+    elif mutation == "artifact_tuple":
+        object.__setattr__(evidence, "_artifacts", evidence.artifacts[:-1])
+    elif mutation == "provenance_hash":
+        object.__setattr__(evidence, "_provenance_sha256", "f" * 64)
+    else:
+        artifact = evidence.artifacts[0]
+        if mutation == "artifact_path":
+            object.__setattr__(artifact, "relative_path", "forged.json")
+        elif mutation == "artifact_raw":
+            object.__setattr__(artifact, "raw", artifact.raw + b" ")
+        else:
+            object.__setattr__(artifact, "expected_sha256", "f" * 64)
+    with pytest.raises(ValueError, match="provenance"):
+        validate_phase6_contract_bundle_evidence(evidence)

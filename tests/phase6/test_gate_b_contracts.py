@@ -17,6 +17,8 @@ from phase6.gate_b_contracts import (
     COMPONENT_NAMES,
     EXECUTION_CONFIG_INDEX_SCHEMA_VERSION,
     EXECUTION_CONTEXT_SCHEMA_VERSION,
+    HUMAN_APPROVAL_RECORD_SCHEMA_VERSION,
+    HUMAN_SIGNATURE_RECORD_SCHEMA_VERSION,
     LOADER_REQUEST_SCHEMA_VERSION,
     OPPONENT_PAYLOAD_INDEX_SCHEMA_VERSION,
     QUARANTINE_MANIFEST_SCHEMA_VERSION,
@@ -25,15 +27,20 @@ from phase6.gate_b_contracts import (
     RETRY_AUTHORIZATION_SCHEMA_VERSION,
     ROOT_ANCHOR_SCHEMA_VERSION,
     GateBContractError,
+    GateBHumanApprovalRecord,
+    GateBHumanSignatureRecord,
     _canonical_reason_detail_sha256,
     _required_posix_nofollow,
     _windows_open_contract_descriptor,
     load_gate_b_batch_manifest,
     load_gate_b_execution_context,
+    load_gate_b_human_approval_record_bytes,
+    load_gate_b_human_signature_record_bytes,
     load_gate_b_readiness_authorization,
     load_gate_b_release_authorization,
     load_gate_b_retry_authorization,
     load_gate_b_root_anchor,
+    validate_gate_b_readiness_human_trust_chain,
 )
 
 HASH_A = "a" * 64
@@ -251,7 +258,7 @@ def readiness_payload(test_batch_hash: str, context_hash: str, roots_hash: str) 
     }
 
 
-def test_all_twelve_schema_identities_are_distinct() -> None:
+def test_all_fourteen_schema_identities_are_distinct() -> None:
     schemas = {
         BATCH_MANIFEST_SCHEMA_VERSION,
         ATTEMPT_LEDGER_RECORD_SCHEMA_VERSION,
@@ -265,8 +272,10 @@ def test_all_twelve_schema_identities_are_distinct() -> None:
         EXECUTION_CONFIG_INDEX_SCHEMA_VERSION,
         EXECUTION_CONTEXT_SCHEMA_VERSION,
         ACCESS_LOG_ENTRY_SCHEMA_VERSION,
+        HUMAN_APPROVAL_RECORD_SCHEMA_VERSION,
+        HUMAN_SIGNATURE_RECORD_SCHEMA_VERSION,
     }
-    assert len(schemas) == 12
+    assert len(schemas) == 14
 
 
 def test_load_batch_manifest_and_complete_hash(tmp_path: Path) -> None:
@@ -825,3 +834,308 @@ def test_public_contract_loader_uses_platform_no_follow_dispatch(
     monkeypatch.setattr(contracts_module, "_open_contract_descriptor", observed)
     assert load_gate_b_batch_manifest(path, expected_sha256=digest).sha256 == digest
     assert opened == [path]
+
+
+def human_approval_payload() -> dict[str, object]:
+    return {
+        "schema_version": HUMAN_APPROVAL_RECORD_SCHEMA_VERSION,
+        "artifact_type": "gate_b_human_approval_record",
+        "approval_record_id": "fixture-approval-001",
+        "approved_at_utc": "2026-07-26T00:00:00Z",
+        "approver_actor_id": "fixture-human",
+        "approver_role": "human_gate_b_approver",
+        "approval_decision": "APPROVE_INITIAL_GATE_B_READINESS",
+        "approval_scope": "initial_attempt_only",
+        "test_batch_hash": HASH_A,
+        "approved_implementation_commit": COMMIT,
+        "approved_execution_context_sha256": HASH_B,
+        "approved_roots_sha256": HASH_C,
+        "authorized_runner_actor_id": "fixture-runner",
+        "authorized_runner_role": "test_runner",
+        "authorized_ledger_manager_actor_id": "fixture-ledger-manager",
+        "authorized_ledger_manager_role": "ledger_manager",
+        "designated_release_approver_id": "fixture-release-approver",
+        "designated_release_approver_role": "release_approver",
+        "designated_retry_approver_id": "fixture-retry-approver",
+        "designated_retry_approver_role": "retry_approver",
+        "expected_attempt_ordinal": 1,
+        "release_authorized": False,
+        "retry_authorized": False,
+    }
+
+
+def human_signature_payload(approval_hash: str) -> dict[str, object]:
+    return {
+        "schema_version": HUMAN_SIGNATURE_RECORD_SCHEMA_VERSION,
+        "artifact_type": "gate_b_human_signature_record",
+        "signature_record_id": "fixture-signature-001",
+        "signed_at_utc": "2026-07-26T00:00:01Z",
+        "signer_actor_id": "fixture-human",
+        "signer_role": "human_gate_b_attestor",
+        "signature_method": "human-governance-attestation-v1",
+        "attestation": "ATTEST_EXACT_GATE_B_APPROVAL_RECORD",
+        "approval_record_id": "fixture-approval-001",
+        "approval_record_sha256": approval_hash,
+        "test_batch_hash": HASH_A,
+        "approved_implementation_commit": COMMIT,
+        "approved_execution_context_sha256": HASH_B,
+        "approved_roots_sha256": HASH_C,
+    }
+
+
+def _strict_human_records() -> tuple[GateBHumanApprovalRecord, GateBHumanSignatureRecord]:
+    approval_raw = canonical_json_bytes(human_approval_payload())
+    approval = load_gate_b_human_approval_record_bytes(
+        approval_raw, expected_sha256=sha256_bytes(approval_raw)
+    )
+    signature_raw = canonical_json_bytes(human_signature_payload(approval.sha256))
+    signature = load_gate_b_human_signature_record_bytes(
+        signature_raw,
+        expected_sha256=sha256_bytes(signature_raw),
+        approval=approval,
+    )
+    return approval, signature
+
+
+def test_human_records_and_readiness_trust_chain_are_exact_and_side_effect_free(
+    tmp_path: Path,
+) -> None:
+    before = tuple(tmp_path.iterdir())
+    approval, signature = _strict_human_records()
+    readiness = readiness_payload(HASH_A, HASH_B, HASH_C)
+    readiness["approval_record_sha256"] = approval.sha256
+    readiness["signature_record_sha256"] = signature.sha256
+
+    assert approval.raw == canonical_json_bytes(human_approval_payload())
+    assert approval.payload["approval_record_id"] == approval.approval_record_id
+    assert signature.payload["signature_record_id"] == signature.signature_record_id
+    assert signature.approval_record_id == approval.approval_record_id
+    assert signature.approval_record_sha256 == approval.sha256
+    assert validate_gate_b_readiness_human_trust_chain(approval, signature, readiness) is None
+    assert tuple(tmp_path.iterdir()) == before
+    with pytest.raises(TypeError):
+        GateBHumanApprovalRecord()
+    with pytest.raises(TypeError):
+        GateBHumanSignatureRecord()
+    with pytest.raises(TypeError):
+        approval.payload["approval_record_id"] = "mutated"  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    [
+        ("schema_version", "wrong"),
+        ("artifact_type", "wrong"),
+        ("approval_record_id", "Unsafe ID"),
+        ("approved_at_utc", "2026-07-26T00:00:00.0Z"),
+        ("approver_actor_id", "fixture-runner"),
+        ("approver_role", "wrong"),
+        ("approval_decision", "wrong"),
+        ("approval_scope", "wrong"),
+        ("test_batch_hash", "A" * 64),
+        ("approved_implementation_commit", "f" * 39),
+        ("approved_execution_context_sha256", "A" * 64),
+        ("approved_roots_sha256", "A" * 64),
+        ("authorized_runner_actor_id", "fixture-ledger-manager"),
+        ("authorized_runner_role", "wrong"),
+        ("authorized_ledger_manager_actor_id", "fixture-runner"),
+        ("authorized_ledger_manager_role", "wrong"),
+        ("designated_release_approver_id", "fixture-runner"),
+        ("designated_release_approver_role", "wrong"),
+        ("designated_retry_approver_id", "fixture-runner"),
+        ("designated_retry_approver_role", "wrong"),
+        ("expected_attempt_ordinal", 2),
+        ("release_authorized", True),
+        ("retry_authorized", True),
+    ],
+)
+def test_human_approval_rejects_every_policy_field_mutation(field, invalid) -> None:
+    payload = human_approval_payload()
+    payload[field] = invalid
+    raw = canonical_json_bytes(payload)
+    with pytest.raises(GateBContractError):
+        load_gate_b_human_approval_record_bytes(raw, expected_sha256=sha256_bytes(raw))
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    [
+        ("schema_version", "wrong"),
+        ("artifact_type", "wrong"),
+        ("signature_record_id", "fixture-approval-001"),
+        ("signed_at_utc", "wrong"),
+        ("signer_actor_id", "fixture-runner"),
+        ("signer_role", "wrong"),
+        ("signature_method", "wrong"),
+        ("attestation", "wrong"),
+        ("approval_record_id", "fixture-other"),
+        ("approval_record_sha256", "f" * 64),
+        ("test_batch_hash", HASH_B),
+        ("approved_implementation_commit", "b" * 40),
+        ("approved_execution_context_sha256", HASH_C),
+        ("approved_roots_sha256", HASH_B),
+    ],
+)
+def test_human_signature_rejects_every_policy_or_join_mutation(field, invalid) -> None:
+    approval_raw = canonical_json_bytes(human_approval_payload())
+    approval = load_gate_b_human_approval_record_bytes(
+        approval_raw, expected_sha256=sha256_bytes(approval_raw)
+    )
+    payload = human_signature_payload(approval.sha256)
+    payload[field] = invalid
+    raw = canonical_json_bytes(payload)
+    with pytest.raises(GateBContractError):
+        load_gate_b_human_signature_record_bytes(
+            raw,
+            expected_sha256=sha256_bytes(raw),
+            approval=approval,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    [
+        ("approval_record_id", "fixture-other"),
+        ("approval_record_sha256", "f" * 64),
+        ("signature_record_sha256", "f" * 64),
+        ("test_batch_hash", HASH_B),
+        ("approved_implementation_commit", "b" * 40),
+        ("approved_execution_context_sha256", HASH_C),
+        ("approved_roots_sha256", HASH_B),
+        ("authorized_runner_actor_id", "fixture-other"),
+        ("authorized_runner_role", "wrong"),
+        ("authorized_ledger_manager_actor_id", "fixture-other"),
+        ("authorized_ledger_manager_role", "wrong"),
+        ("designated_release_approver_id", "fixture-other"),
+        ("designated_release_approver_role", "wrong"),
+        ("designated_retry_approver_id", "fixture-other"),
+        ("designated_retry_approver_role", "wrong"),
+    ],
+)
+def test_readiness_human_trust_chain_rejects_every_join_mutation(field, invalid) -> None:
+    approval, signature = _strict_human_records()
+    readiness = readiness_payload(HASH_A, HASH_B, HASH_C)
+    readiness["approval_record_sha256"] = approval.sha256
+    readiness["signature_record_sha256"] = signature.sha256
+    readiness[field] = invalid
+    with pytest.raises(GateBContractError):
+        validate_gate_b_readiness_human_trust_chain(approval, signature, readiness)
+
+
+def test_human_record_bytes_reject_duplicates_noncanonical_and_forgery() -> None:
+    approval_payload = human_approval_payload()
+    approval_raw = canonical_json_bytes(approval_payload)
+    duplicate_approval = approval_raw.replace(
+        b'{"approval_decision":',
+        b'{"approval_decision":"APPROVE_INITIAL_GATE_B_READINESS","approval_decision":',
+        1,
+    )
+    with pytest.raises(GateBContractError):
+        load_gate_b_human_approval_record_bytes(
+            duplicate_approval,
+            expected_sha256=sha256_bytes(duplicate_approval),
+        )
+    with pytest.raises(GateBContractError):
+        load_gate_b_human_approval_record_bytes(
+            approval_raw + b" ",
+            expected_sha256=sha256_bytes(approval_raw + b" "),
+        )
+    approval, signature = _strict_human_records()
+    signature_payload = human_signature_payload(approval.sha256)
+    signature_raw = canonical_json_bytes(signature_payload)
+    duplicate_signature = signature_raw.replace(
+        b'{"approval_record_id":',
+        (b'{"approval_record_id":"fixture-approval-001","approval_record_id":'),
+        1,
+    )
+    with pytest.raises(GateBContractError):
+        load_gate_b_human_signature_record_bytes(
+            duplicate_signature,
+            expected_sha256=sha256_bytes(duplicate_signature),
+            approval=approval,
+        )
+    with pytest.raises(GateBContractError):
+        load_gate_b_human_signature_record_bytes(
+            signature_raw + b" ",
+            expected_sha256=sha256_bytes(signature_raw + b" "),
+            approval=approval,
+        )
+
+    forged_approval = object.__new__(GateBHumanApprovalRecord)
+    for name in (
+        "_sha256",
+        "_raw",
+        "_payload",
+        "_approval_record_id",
+        "_loader_token",
+    ):
+        object.__setattr__(forged_approval, name, getattr(approval, name))
+    with pytest.raises(GateBContractError, match="provenance"):
+        validate_gate_b_readiness_human_trust_chain(
+            forged_approval,
+            signature,
+            readiness_payload(HASH_A, HASH_B, HASH_C),
+        )
+
+    forged_signature = object.__new__(GateBHumanSignatureRecord)
+    for name in (
+        "_sha256",
+        "_raw",
+        "_payload",
+        "_signature_record_id",
+        "_approval_record_id",
+        "_approval_record_sha256",
+        "_loader_token",
+    ):
+        object.__setattr__(forged_signature, name, getattr(signature, name))
+    with pytest.raises(GateBContractError, match="provenance"):
+        validate_gate_b_readiness_human_trust_chain(
+            approval,
+            forged_signature,
+            readiness_payload(HASH_A, HASH_B, HASH_C),
+        )
+
+
+@pytest.mark.parametrize(
+    ("record_kind", "field"),
+    [
+        ("approval", "_raw"),
+        ("approval", "_sha256"),
+        ("approval", "_payload"),
+        ("approval", "_approval_record_id"),
+        ("approval", "_loader_token"),
+        ("signature", "_raw"),
+        ("signature", "_sha256"),
+        ("signature", "_payload"),
+        ("signature", "_signature_record_id"),
+        ("signature", "_approval_record_id"),
+        ("signature", "_approval_record_sha256"),
+        ("signature", "_loader_token"),
+    ],
+)
+def test_human_trust_chain_rejects_every_retained_property_mutation(
+    record_kind: str,
+    field: str,
+) -> None:
+    approval, signature = _strict_human_records()
+    target = approval if record_kind == "approval" else signature
+    if field == "_raw":
+        invalid = target.raw + b" "
+    elif field == "_sha256":
+        invalid = "f" * 64
+    elif field == "_payload":
+        invalid = {"forged": True}
+    elif field == "_loader_token":
+        invalid = object()
+    else:
+        invalid = "fixture-forged"
+    object.__setattr__(target, field, invalid)
+    readiness = readiness_payload(HASH_A, HASH_B, HASH_C)
+    readiness["approval_record_sha256"] = APPROVAL_HASH
+    readiness["signature_record_sha256"] = SIGNATURE_HASH
+    with pytest.raises(GateBContractError, match="provenance"):
+        validate_gate_b_readiness_human_trust_chain(
+            approval,
+            signature,
+            readiness,
+        )

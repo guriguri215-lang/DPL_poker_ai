@@ -7,6 +7,7 @@ Actual Test roots and operational values are always explicit caller inputs.
 
 from __future__ import annotations
 
+import copy
 import ctypes
 import json
 import os
@@ -27,6 +28,8 @@ ATTEMPT_LEDGER_RECORD_SCHEMA_VERSION = "phase6-gate-b-attempt-ledger-record-v1"
 QUARANTINE_MANIFEST_SCHEMA_VERSION = "phase6-gate-b-quarantine-manifest-v1"
 LOADER_REQUEST_SCHEMA_VERSION = "phase6-gate-b-test-loader-request-v1"
 READINESS_AUTHORIZATION_SCHEMA_VERSION = "phase6-gate-b-readiness-authorization-v1"
+HUMAN_APPROVAL_RECORD_SCHEMA_VERSION = "phase6-gate-b-human-approval-record-v1"
+HUMAN_SIGNATURE_RECORD_SCHEMA_VERSION = "phase6-gate-b-human-signature-record-v1"
 RELEASE_AUTHORIZATION_SCHEMA_VERSION = "phase6-gate-b-release-authorization-v1"
 RETRY_AUTHORIZATION_SCHEMA_VERSION = "phase6-gate-b-retry-authorization-v1"
 ROOT_ANCHOR_SCHEMA_VERSION = "phase6-gate-b-root-anchor-v1"
@@ -90,6 +93,7 @@ _ATOM_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}\Z")
 _TIME_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z")
 _HEX_ID_RE = re.compile(r"(?:0|[1-9a-f][0-9a-f]*)\Z")
 _DECIMAL_RE = re.compile(r"-?(?:0|[1-9]\d*)(?:\.\d*[1-9])?\Z")
+_HUMAN_RECORD_LOADER_TOKEN = object()
 
 
 class GateBContractError(ValueError):
@@ -818,6 +822,161 @@ def _validate_readiness_authorization(value: dict[str, Any]) -> None:
         _fail("readiness namespace policy mismatch")
 
 
+_OPERATIONAL_ACTOR_FIELDS = (
+    ("authorized_runner_actor_id", "authorized_runner_role", "test_runner"),
+    (
+        "authorized_ledger_manager_actor_id",
+        "authorized_ledger_manager_role",
+        "ledger_manager",
+    ),
+    (
+        "designated_release_approver_id",
+        "designated_release_approver_role",
+        "release_approver",
+    ),
+    (
+        "designated_retry_approver_id",
+        "designated_retry_approver_role",
+        "retry_approver",
+    ),
+)
+
+
+def _validate_human_approval_record(value: dict[str, Any]) -> None:
+    _closed(
+        value,
+        {
+            "schema_version",
+            "artifact_type",
+            "approval_record_id",
+            "approved_at_utc",
+            "approver_actor_id",
+            "approver_role",
+            "approval_decision",
+            "approval_scope",
+            "test_batch_hash",
+            "approved_implementation_commit",
+            "approved_execution_context_sha256",
+            "approved_roots_sha256",
+            "authorized_runner_actor_id",
+            "authorized_runner_role",
+            "authorized_ledger_manager_actor_id",
+            "authorized_ledger_manager_role",
+            "designated_release_approver_id",
+            "designated_release_approver_role",
+            "designated_retry_approver_id",
+            "designated_retry_approver_role",
+            "expected_attempt_ordinal",
+            "release_authorized",
+            "retry_authorized",
+        },
+        "human approval record",
+    )
+    if (
+        value["schema_version"] != HUMAN_APPROVAL_RECORD_SCHEMA_VERSION
+        or value["artifact_type"] != "gate_b_human_approval_record"
+    ):
+        _fail("human approval record schema identity mismatch")
+    _atom(value["approval_record_id"], "approval record ID")
+    _timestamp(value["approved_at_utc"], "approval timestamp")
+    approver = _atom(value["approver_actor_id"], "approver actor ID")
+    if (
+        value["approver_role"] != "human_gate_b_approver"
+        or value["approval_decision"] != "APPROVE_INITIAL_GATE_B_READINESS"
+        or value["approval_scope"] != "initial_attempt_only"
+    ):
+        _fail("human approval policy mismatch")
+    _sha(value["test_batch_hash"], "approved batch hash")
+    _oid(value["approved_implementation_commit"], "approved implementation commit")
+    _sha(value["approved_execution_context_sha256"], "approved context hash")
+    _sha(value["approved_roots_sha256"], "approved roots hash")
+    operational: list[str] = []
+    for actor_field, role_field, expected_role in _OPERATIONAL_ACTOR_FIELDS:
+        operational.append(_atom(value[actor_field], actor_field))
+        if value[role_field] != expected_role:
+            _fail("human approval operational role mismatch")
+    if len(set(operational)) != len(operational):
+        _fail("human approval operational actors must be pairwise distinct")
+    if approver in operational:
+        _fail("human approver must differ from every operational actor")
+    if (
+        _integer(
+            value["expected_attempt_ordinal"],
+            "human approval expected attempt ordinal",
+            minimum=1,
+            maximum=2,
+        )
+        != 1
+        or value["release_authorized"] is not False
+        or value["retry_authorized"] is not False
+    ):
+        _fail("human approval initial-attempt policy mismatch")
+
+
+def _validate_human_signature_record(
+    value: dict[str, Any],
+    approval: Mapping[str, Any],
+    approval_sha256: str,
+) -> None:
+    _closed(
+        value,
+        {
+            "schema_version",
+            "artifact_type",
+            "signature_record_id",
+            "signed_at_utc",
+            "signer_actor_id",
+            "signer_role",
+            "signature_method",
+            "attestation",
+            "approval_record_id",
+            "approval_record_sha256",
+            "test_batch_hash",
+            "approved_implementation_commit",
+            "approved_execution_context_sha256",
+            "approved_roots_sha256",
+        },
+        "human signature record",
+    )
+    if (
+        value["schema_version"] != HUMAN_SIGNATURE_RECORD_SCHEMA_VERSION
+        or value["artifact_type"] != "gate_b_human_signature_record"
+    ):
+        _fail("human signature record schema identity mismatch")
+    signature_id = _atom(value["signature_record_id"], "signature record ID")
+    _timestamp(value["signed_at_utc"], "signature timestamp")
+    signer = _atom(value["signer_actor_id"], "signature actor ID")
+    if (
+        value["signer_role"] != "human_gate_b_attestor"
+        or value["signature_method"] != "human-governance-attestation-v1"
+        or value["attestation"] != "ATTEST_EXACT_GATE_B_APPROVAL_RECORD"
+    ):
+        _fail("human signature policy mismatch")
+    _atom(value["approval_record_id"], "signature approval record ID")
+    _sha(value["approval_record_sha256"], "signature approval record hash")
+    if (
+        value["approval_record_id"] != approval["approval_record_id"]
+        or value["approval_record_sha256"] != approval_sha256
+    ):
+        _fail("human signature approval binding mismatch")
+    if signature_id == approval["approval_record_id"]:
+        _fail("approval and signature record IDs must differ")
+    for field_name in (
+        "test_batch_hash",
+        "approved_execution_context_sha256",
+        "approved_roots_sha256",
+    ):
+        _sha(value[field_name], f"signature {field_name}")
+        if value[field_name] != approval[field_name]:
+            _fail("human signature approval scope mismatch")
+    _oid(value["approved_implementation_commit"], "signature implementation commit")
+    if value["approved_implementation_commit"] != approval["approved_implementation_commit"]:
+        _fail("human signature implementation binding mismatch")
+    operational = {approval[actor_field] for actor_field, _, _ in _OPERATIONAL_ACTOR_FIELDS}
+    if signer in operational:
+        _fail("human attestor must differ from every operational actor")
+
+
 def _validate_release_authorization(value: dict[str, Any]) -> None:
     fields = {
         "schema_version",
@@ -1080,6 +1239,98 @@ class GateBReadinessAuthorization:
         return self._path
 
 
+@dataclass(frozen=True, slots=True, init=False)
+class GateBHumanApprovalRecord:
+    """Strict immutable bytes for one human Gate B approval attestation."""
+
+    _sha256: str
+    _raw: bytes = field(repr=False)
+    _payload: Mapping[str, Any] = field(repr=False)
+    _approval_record_id: str
+    _loader_token: object = field(repr=False, compare=False)
+
+    def __new__(cls, *, _token: object | None = None) -> GateBHumanApprovalRecord:
+        if _token is not _HUMAN_RECORD_LOADER_TOKEN:
+            raise TypeError("human approval construction is private")
+        return object.__new__(cls)
+
+    @property
+    def sha256(self) -> str:
+        return self._sha256
+
+    @property
+    def raw(self) -> bytes:
+        return self._raw
+
+    @property
+    def payload(self) -> Mapping[str, Any]:
+        return self._payload
+
+    @property
+    def approval_record_id(self) -> str:
+        return self._approval_record_id
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class GateBHumanSignatureRecord:
+    """Strict immutable bytes for one human Gate B signature attestation."""
+
+    _sha256: str
+    _raw: bytes = field(repr=False)
+    _payload: Mapping[str, Any] = field(repr=False)
+    _signature_record_id: str
+    _approval_record_id: str
+    _approval_record_sha256: str
+    _loader_token: object = field(repr=False, compare=False)
+
+    def __new__(cls, *, _token: object | None = None) -> GateBHumanSignatureRecord:
+        if _token is not _HUMAN_RECORD_LOADER_TOKEN:
+            raise TypeError("human signature construction is private")
+        return object.__new__(cls)
+
+    @property
+    def sha256(self) -> str:
+        return self._sha256
+
+    @property
+    def raw(self) -> bytes:
+        return self._raw
+
+    @property
+    def payload(self) -> Mapping[str, Any]:
+        return self._payload
+
+    @property
+    def signature_record_id(self) -> str:
+        return self._signature_record_id
+
+    @property
+    def approval_record_id(self) -> str:
+        return self._approval_record_id
+
+    @property
+    def approval_record_sha256(self) -> str:
+        return self._approval_record_sha256
+
+
+_HUMAN_APPROVAL_REGISTRY: dict[
+    int,
+    tuple[GateBHumanApprovalRecord, bytes, str, dict[str, Any], str],
+] = {}
+_HUMAN_SIGNATURE_REGISTRY: dict[
+    int,
+    tuple[
+        GateBHumanSignatureRecord,
+        bytes,
+        str,
+        dict[str, Any],
+        str,
+        str,
+        str,
+    ],
+] = {}
+
+
 @dataclass(frozen=True, slots=True)
 class GateBReleaseAuthorization:
     sha256: str
@@ -1229,6 +1480,208 @@ def load_gate_b_readiness_authorization(
     ):
         _fail("readiness authorization trust-anchor mismatch")
     return GateBReadinessAuthorization(expected_sha256, _frozen(value), raw, canonical_path)
+
+
+def _revalidate_human_approval_record(
+    approval: GateBHumanApprovalRecord,
+) -> dict[str, Any]:
+    if type(approval) is not GateBHumanApprovalRecord:
+        _fail("human approval record must be strict-loaded")
+    registered = _HUMAN_APPROVAL_REGISTRY.get(id(approval))
+    try:
+        current_payload = _plain(approval.payload)
+    except Exception:
+        _fail("human approval record provenance mismatch")
+    if (
+        registered is None
+        or registered[0] is not approval
+        or approval._loader_token is not _HUMAN_RECORD_LOADER_TOKEN
+        or approval.raw != registered[1]
+        or approval.sha256 != registered[2]
+        or not _exact_json_equal(current_payload, registered[3])
+        or approval.approval_record_id != registered[4]
+        or sha256_bytes(approval.raw) != approval.sha256
+    ):
+        _fail("human approval record provenance mismatch")
+    reparsed = _strict_canonical_object(approval.raw, "human approval record")
+    _validate_human_approval_record(reparsed)
+    if (
+        not _exact_json_equal(reparsed, current_payload)
+        or reparsed["approval_record_id"] != approval.approval_record_id
+    ):
+        _fail("human approval record retained value mismatch")
+    return reparsed
+
+
+def _revalidate_human_signature_record(
+    signature: GateBHumanSignatureRecord,
+    approval_payload: Mapping[str, Any],
+    approval_sha256: str,
+) -> dict[str, Any]:
+    if type(signature) is not GateBHumanSignatureRecord:
+        _fail("human signature record must be strict-loaded")
+    registered = _HUMAN_SIGNATURE_REGISTRY.get(id(signature))
+    try:
+        current_payload = _plain(signature.payload)
+    except Exception:
+        _fail("human signature record provenance mismatch")
+    if (
+        registered is None
+        or registered[0] is not signature
+        or signature._loader_token is not _HUMAN_RECORD_LOADER_TOKEN
+        or signature.raw != registered[1]
+        or signature.sha256 != registered[2]
+        or not _exact_json_equal(current_payload, registered[3])
+        or signature.signature_record_id != registered[4]
+        or signature.approval_record_id != registered[5]
+        or signature.approval_record_sha256 != registered[6]
+        or sha256_bytes(signature.raw) != signature.sha256
+    ):
+        _fail("human signature record provenance mismatch")
+    reparsed = _strict_canonical_object(signature.raw, "human signature record")
+    _validate_human_signature_record(reparsed, approval_payload, approval_sha256)
+    if (
+        not _exact_json_equal(reparsed, current_payload)
+        or reparsed["signature_record_id"] != signature.signature_record_id
+        or reparsed["approval_record_id"] != signature.approval_record_id
+        or reparsed["approval_record_sha256"] != signature.approval_record_sha256
+    ):
+        _fail("human signature record retained value mismatch")
+    return reparsed
+
+
+@_sanitized_api
+def load_gate_b_human_approval_record_bytes(
+    raw: bytes,
+    *,
+    expected_sha256: str,
+) -> GateBHumanApprovalRecord:
+    """Strict-load canonical human approval bytes without creating authority."""
+    if type(raw) is not bytes:
+        _fail("human approval record input must be bytes")
+    expected = _sha(expected_sha256, "human approval expected hash")
+    if sha256_bytes(raw) != expected:
+        _fail("human approval stored-byte hash mismatch")
+    value = _strict_canonical_object(raw, "human approval record")
+    _validate_human_approval_record(value)
+    record = object.__new__(GateBHumanApprovalRecord)
+    object.__setattr__(record, "_sha256", expected)
+    object.__setattr__(record, "_raw", bytes(raw))
+    object.__setattr__(record, "_payload", _frozen(value))
+    object.__setattr__(record, "_approval_record_id", value["approval_record_id"])
+    object.__setattr__(record, "_loader_token", _HUMAN_RECORD_LOADER_TOKEN)
+    _HUMAN_APPROVAL_REGISTRY[id(record)] = (
+        record,
+        record.raw,
+        record.sha256,
+        copy.deepcopy(value),
+        record.approval_record_id,
+    )
+    return record
+
+
+@_sanitized_api
+def load_gate_b_human_signature_record_bytes(
+    raw: bytes,
+    *,
+    expected_sha256: str,
+    approval: GateBHumanApprovalRecord,
+) -> GateBHumanSignatureRecord:
+    """Strict-load canonical signature bytes bound to one approval record."""
+    approval_payload = _revalidate_human_approval_record(approval)
+    if type(raw) is not bytes:
+        _fail("human signature record input must be bytes")
+    expected = _sha(expected_sha256, "human signature expected hash")
+    if sha256_bytes(raw) != expected:
+        _fail("human signature stored-byte hash mismatch")
+    value = _strict_canonical_object(raw, "human signature record")
+    _validate_human_signature_record(value, approval_payload, approval.sha256)
+    record = object.__new__(GateBHumanSignatureRecord)
+    object.__setattr__(record, "_sha256", expected)
+    object.__setattr__(record, "_raw", bytes(raw))
+    object.__setattr__(record, "_payload", _frozen(value))
+    object.__setattr__(record, "_signature_record_id", value["signature_record_id"])
+    object.__setattr__(record, "_approval_record_id", value["approval_record_id"])
+    object.__setattr__(record, "_approval_record_sha256", value["approval_record_sha256"])
+    object.__setattr__(record, "_loader_token", _HUMAN_RECORD_LOADER_TOKEN)
+    _HUMAN_SIGNATURE_REGISTRY[id(record)] = (
+        record,
+        record.raw,
+        record.sha256,
+        copy.deepcopy(value),
+        record.signature_record_id,
+        record.approval_record_id,
+        record.approval_record_sha256,
+    )
+    return record
+
+
+@_sanitized_api
+def validate_gate_b_readiness_human_trust_chain(
+    approval: GateBHumanApprovalRecord,
+    signature: GateBHumanSignatureRecord,
+    readiness_payload: Mapping[str, Any],
+) -> None:
+    """Revalidate and join strict human records to one readiness payload."""
+    approval_value = _revalidate_human_approval_record(approval)
+    signature_value = _revalidate_human_signature_record(signature, approval_value, approval.sha256)
+    if not isinstance(readiness_payload, Mapping):
+        _fail("readiness payload must be a mapping")
+    try:
+        readiness = _plain(readiness_payload)
+    except Exception:
+        _fail("readiness payload is invalid")
+    if not isinstance(readiness, dict):
+        _fail("readiness payload must be a mapping")
+    _validate_readiness_authorization(readiness)
+    if (
+        readiness["approval_record_id"] != approval.approval_record_id
+        or readiness["approval_record_sha256"] != approval.sha256
+        or readiness["signature_record_sha256"] != signature.sha256
+    ):
+        _fail("readiness human record binding mismatch")
+    for field_name in (
+        "test_batch_hash",
+        "approved_implementation_commit",
+        "approved_execution_context_sha256",
+        "approved_roots_sha256",
+    ):
+        if (
+            approval_value[field_name] != signature_value[field_name]
+            or approval_value[field_name] != readiness[field_name]
+        ):
+            _fail("readiness human trust scope mismatch")
+    operational: list[str] = []
+    for actor_field, role_field, expected_role in _OPERATIONAL_ACTOR_FIELDS:
+        if (
+            approval_value[actor_field] != readiness[actor_field]
+            or approval_value[role_field] != readiness[role_field]
+            or approval_value[role_field] != expected_role
+        ):
+            _fail("readiness human operational actor binding mismatch")
+        operational.append(approval_value[actor_field])
+    if len(set(operational)) != len(operational):
+        _fail("readiness operational actors must be pairwise distinct")
+    if (
+        approval_value["approver_actor_id"] in operational
+        or signature_value["signer_actor_id"] in operational
+    ):
+        _fail("human governance actors must differ from operational actors")
+    if approval.approval_record_id == signature.signature_record_id:
+        _fail("approval and signature record IDs must differ")
+    if (
+        _integer(
+            approval_value["expected_attempt_ordinal"],
+            "human approval expected attempt ordinal",
+            minimum=1,
+            maximum=2,
+        )
+        != 1
+        or approval_value["release_authorized"] is not False
+        or approval_value["retry_authorized"] is not False
+    ):
+        _fail("readiness human initial-attempt policy mismatch")
+    return None
 
 
 @_sanitized_api

@@ -12,8 +12,8 @@ import copy
 import hashlib
 import json
 import re
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -63,6 +63,8 @@ _SEMANTIC_KEY_FIELDS = {
     "target_transform_id",
 }
 _SOURCE_REF_FIELDS = {"artifact_type", "schema_version", "path", "sha256"}
+_BUNDLE_EVIDENCE_SCHEMA_VERSION = "phase6-contract-bundle-evidence-v1"
+_BUNDLE_EVIDENCE_LOADER_TOKEN = object()
 
 R008_SEMANTIC_KEY: dict[str, str] = {
     "semantic_id": R008_SEMANTIC_ID,
@@ -263,6 +265,59 @@ class ValidatedPhase6ContractBundle:
     validation_batch_reference: dict[str, Any]
     selection_report_reference: dict[str, Any]
     coverage_evaluation: CoverageEvaluation
+
+
+@dataclass(frozen=True, slots=True)
+class CanonicalPhase6ContractArtifact:
+    """One independently anchored canonical artifact retained as exact bytes."""
+
+    relative_path: str
+    raw: bytes
+    expected_sha256: str
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class ValidatedPhase6ContractBundleEvidence:
+    """Loader-provenance-bearing canonical evidence for a Phase 6 bundle."""
+
+    _root_manifest_raw: bytes
+    _root_manifest_sha256: str
+    _artifacts: tuple[CanonicalPhase6ContractArtifact, ...]
+    _provenance_sha256: str
+    _loader_token: object = field(repr=False, compare=False)
+
+    def __new__(cls, *, _token: object | None = None) -> ValidatedPhase6ContractBundleEvidence:
+        if _token is not _BUNDLE_EVIDENCE_LOADER_TOKEN:
+            raise TypeError("bundle evidence construction is private")
+        return object.__new__(cls)
+
+    @property
+    def root_manifest_raw(self) -> bytes:
+        return self._root_manifest_raw
+
+    @property
+    def root_manifest_sha256(self) -> str:
+        return self._root_manifest_sha256
+
+    @property
+    def artifacts(self) -> tuple[CanonicalPhase6ContractArtifact, ...]:
+        return self._artifacts
+
+    @property
+    def provenance_sha256(self) -> str:
+        return self._provenance_sha256
+
+
+_BUNDLE_EVIDENCE_REGISTRY: dict[
+    int,
+    tuple[
+        ValidatedPhase6ContractBundleEvidence,
+        bytes,
+        str,
+        tuple[tuple[str, bytes, str], ...],
+        str,
+    ],
+] = {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -808,16 +863,7 @@ def evaluate_coverage_semantics(
     return CoverageEvaluation(tuple(results), matrix_matches, end_to_end)
 
 
-def load_phase6_contract_bundle(
-    root_manifest_path: Path | str,
-    *,
-    expected_sha256: str,
-) -> ValidatedPhase6ContractBundle:
-    """Load a canonical fixture bundle and enforce every version/hash join."""
-    if not isinstance(expected_sha256, str) or not _SHA256.fullmatch(expected_sha256):
-        raise ValueError("expected root manifest SHA-256 must be lowercase hexadecimal")
-    root_path = Path(root_manifest_path)
-    root = _load_canonical_path(root_path, expected_sha256, "root manifest")
+def _validate_phase6_root_manifest(root: object) -> dict[str, Any]:
     _require_fields(
         root,
         {
@@ -837,8 +883,11 @@ def load_phase6_contract_bundle(
         raise ValueError("unsupported phase6 root manifest schema_version")
     if root["artifact_type"] != "phase6_evaluation_manifest":
         raise ValueError("unsupported phase6 root manifest artifact_type")
+    return root
 
-    expected_refs = {
+
+def _phase6_root_reference_contracts() -> dict[str, tuple[str, str]]:
+    return {
         "preregistration": (
             "phase6_evaluation_preregistration",
             PREREGISTRATION_SCHEMA_VERSION,
@@ -864,16 +913,295 @@ def load_phase6_contract_bundle(
             SELECTION_REPORT_REFERENCE_SCHEMA_VERSION,
         ),
     }
+
+
+def _canonical_bundle_relative_path(relative_path: object) -> str:
+    if not isinstance(relative_path, str) or not relative_path:
+        raise ValueError("bundle path must be a non-empty relative POSIX path")
+    if "\\" in relative_path or ":" in relative_path or "://" in relative_path:
+        raise ValueError("bundle path must use a relative POSIX spelling")
+    pure = PurePosixPath(relative_path)
+    if (
+        pure.is_absolute()
+        or pure.as_posix() != relative_path
+        or any(part in ("", ".", "..") for part in pure.parts)
+    ):
+        raise ValueError("bundle path escapes or is not normalized")
+    return relative_path
+
+
+def _strict_canonical_json_object(raw: bytes, label: str) -> dict[str, Any]:
+    if type(raw) is not bytes:
+        raise ValueError(f"{label} must be exact bytes")
+
+    def reject_duplicate(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("duplicate JSON field")
+            value[key] = item
+        return value
+
+    try:
+        payload = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=reject_duplicate,
+            parse_constant=_reject_nonfinite_json_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError(f"{label} is not valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"{label} must contain a JSON object")
+    try:
+        canonical = canonical_json_bytes(payload)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} is not canonical JSON") from exc
+    if canonical != raw:
+        raise ValueError(f"{label} is not canonical JSON")
+    return payload
+
+
+def _artifact_references(payload: object) -> tuple[dict[str, Any], ...]:
+    references: list[dict[str, Any]] = []
+
+    def visit(value: object) -> None:
+        if isinstance(value, dict):
+            if set(value) == _SOURCE_REF_FIELDS:
+                references.append(value)
+                return
+            for item in value.values():
+                visit(item)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+
+    visit(payload)
+    return tuple(references)
+
+
+def _phase6_bundle_artifact_map(
+    root: dict[str, Any],
+    artifacts: Sequence[CanonicalPhase6ContractArtifact],
+) -> tuple[
+    dict[str, tuple[bytes, dict[str, Any], str]],
+    tuple[CanonicalPhase6ContractArtifact, ...],
+]:
+    artifact_map: dict[str, tuple[bytes, dict[str, Any], str]] = {}
+    retained: list[CanonicalPhase6ContractArtifact] = []
+    for index, artifact in enumerate(artifacts):
+        if type(artifact) is not CanonicalPhase6ContractArtifact:
+            raise ValueError("bundle artifacts must use CanonicalPhase6ContractArtifact")
+        relative_path = _canonical_bundle_relative_path(artifact.relative_path)
+        if relative_path in artifact_map:
+            raise ValueError("bundle artifact paths must be unique")
+        if not isinstance(artifact.expected_sha256, str) or not _SHA256.fullmatch(
+            artifact.expected_sha256
+        ):
+            raise ValueError("artifact expected SHA-256 must be lowercase hexadecimal")
+        if type(artifact.raw) is not bytes:
+            raise ValueError("artifact raw content must be exact bytes")
+        if sha256_bytes(artifact.raw) != artifact.expected_sha256:
+            raise ValueError(f"bundle artifact {index} hash mismatch")
+        payload = _strict_canonical_json_object(artifact.raw, f"bundle artifact {relative_path}")
+        copied = CanonicalPhase6ContractArtifact(
+            relative_path=relative_path,
+            raw=bytes(artifact.raw),
+            expected_sha256=artifact.expected_sha256,
+        )
+        retained.append(copied)
+        artifact_map[relative_path] = (copied.raw, payload, copied.expected_sha256)
+
+    pending = list(_artifact_references(root))
+    visited: set[str] = set()
+    while pending:
+        reference = pending.pop(0)
+        artifact_type = reference.get("artifact_type")
+        schema_version = reference.get("schema_version")
+        if not isinstance(artifact_type, str) or not isinstance(schema_version, str):
+            raise ValueError("artifact reference identity must be strings")
+        _validate_artifact_ref(reference, artifact_type, schema_version)
+        relative_path = _canonical_bundle_relative_path(reference["path"])
+        if relative_path not in artifact_map:
+            raise ValueError("bundle artifact map is missing a referenced artifact")
+        raw, payload, actual_sha = artifact_map[relative_path]
+        del raw
+        if actual_sha != reference["sha256"]:
+            raise ValueError("bundle artifact reference hash mismatch")
+        if relative_path in visited:
+            continue
+        visited.add(relative_path)
+        if (
+            payload.get("artifact_type") != artifact_type
+            or payload.get("schema_version") != schema_version
+        ):
+            raise ValueError("bundle artifact reference type/version mismatch")
+        pending.extend(_artifact_references(payload))
+
+    if visited != set(artifact_map):
+        raise ValueError("bundle artifact map contains an unreferenced artifact")
+    return artifact_map, tuple(sorted(retained, key=lambda item: item.relative_path))
+
+
+def _coverage_evaluation_from_artifact_map(
+    payload: object,
+    artifact_map: Mapping[str, tuple[bytes, dict[str, Any], str]],
+) -> CoverageEvaluation:
+    contract = _validate_coverage_shape(payload)
+    reason_row = contract["reason_rows"][0]
+    action_registry_matches = contract["action_family_registry"] == _ACTION_FAMILY_REGISTRY
+    crosswalk_rows = contract["crosswalk_registry"]["rows"]
+    matrix = contract["coverage_matrix"]
+    results: list[ComponentCoverageResult] = []
+
+    for component in contract["components"]:
+        role = component["component_role"]
+        mismatches: list[str] = []
+        reference = component["source_artifact"]
+        relative_path = _canonical_bundle_relative_path(reference["path"])
+        source_entry = artifact_map.get(relative_path)
+        source_payload: dict[str, Any] | None = None
+        actual_sha = ""
+        if source_entry is None:
+            mismatches.append("source_artifact")
+        else:
+            _, source_payload, actual_sha = source_entry
+            if actual_sha != reference["sha256"]:
+                mismatches.append("source_sha256")
+        if component["component_version"] != _COMPONENT_VERSIONS[role]:
+            mismatches.append("component_version")
+        if component["source_locator"] != "/records/0":
+            mismatches.append("source_locator")
+        crosswalk_matches = [
+            row
+            for row in crosswalk_rows
+            if row["crosswalk_id"] == component["normalization_crosswalk_id"]
+        ]
+        crosswalk = crosswalk_matches[0] if len(crosswalk_matches) == 1 else None
+        if crosswalk is None:
+            mismatches.append("normalization_crosswalk_id")
+
+        raw: object | None = None
+        adapter_semantic_id: object | None = None
+        if source_payload is not None:
+            try:
+                raw, adapter_semantic_id = _extract_source_record(source_payload, role)
+            except ValueError:
+                mismatches.append("source_artifact_contract")
+
+        reconstructed_key: object | None = None
+        if crosswalk is not None:
+            if (
+                crosswalk["component_role"] != role
+                or crosswalk["reason_id"] != "LEAK_R008"
+                or crosswalk["crosswalk_id"] != f"{role}-r008-v1"
+            ):
+                mismatches.append("normalization_crosswalk")
+            if crosswalk["semantic_key"] != R008_SEMANTIC_KEY:
+                mismatches.append("normalization_crosswalk.semantic_key")
+            expected_raw_sha = sha256_bytes(canonical_json_bytes(_EXPECTED_R008_RAW[role]))
+            if crosswalk["raw_sha256"] != expected_raw_sha:
+                mismatches.append("normalization_crosswalk.raw_sha256")
+            if raw is not None and crosswalk["raw_sha256"] != sha256_bytes(
+                canonical_json_bytes(raw)
+            ):
+                mismatches.append("raw")
+            reconstructed_key = crosswalk["semantic_key"]
+
+        if raw is not None and raw != _EXPECTED_R008_RAW[role] and "raw" not in mismatches:
+            mismatches.append("raw")
+        if reconstructed_key is not None:
+            if adapter_semantic_id != reconstructed_key["semantic_id"]:
+                mismatches.append("adapter_semantic_id")
+            if component["stored_semantic_key"] != reconstructed_key:
+                mismatches.append("stored_semantic_key")
+            if reason_row != reconstructed_key:
+                mismatches.append("reason_row")
+        if not action_registry_matches:
+            mismatches.append("action_family_registry")
+        results.append(
+            ComponentCoverageResult(
+                component_role=role,
+                source_sha256=actual_sha,
+                matched=not mismatches,
+                mismatch_fields=tuple(dict.fromkeys(mismatches)),
+            )
+        )
+
+    computed_matrix_results = [
+        {
+            "component_role": result.component_role,
+            "source_sha256": result.source_sha256,
+            "matched": result.matched,
+            "mismatch_fields": list(result.mismatch_fields),
+        }
+        for result in results
+    ]
+    matrix_matches = matrix["component_results"] == computed_matrix_results
+    fixture_counts = {"positive": 0, "negative": 0}
+    fixtures_valid = True
+    for evidence, spec in zip(matrix["fixture_evidence"], _R008_FIXTURE_SPECS, strict=True):
+        reference = evidence["fixture_artifact"]
+        relative_path = _canonical_bundle_relative_path(reference["path"])
+        fixture_entry = artifact_map.get(relative_path)
+        if fixture_entry is None or fixture_entry[2] != reference["sha256"]:
+            fixtures_valid = False
+            continue
+        try:
+            _validate_fixture_payload(fixture_entry[1], evidence, spec)
+        except ValueError:
+            fixtures_valid = False
+            continue
+        fixture_counts[evidence["fixture_kind"]] += 1
+    counts_valid = (
+        fixtures_valid
+        and fixture_counts["positive"] > 0
+        and fixture_counts["negative"] > 0
+        and matrix["positive_fixture_count"] == fixture_counts["positive"]
+        and matrix["negative_fixture_count"] == fixture_counts["negative"]
+    )
+    reconstructed_coverage = (
+        all(result.matched for result in results)
+        and matrix_matches
+        and counts_valid
+        and matrix["provider_actionable"] is True
+        and matrix["provider_semantics_status"] == "match"
+    )
+    end_to_end = reconstructed_coverage and matrix["end_to_end_coverage"] is True
+    return CoverageEvaluation(tuple(results), matrix_matches, end_to_end)
+
+
+def _validated_phase6_bundle_from_canonical_artifacts(
+    root_manifest_raw: bytes,
+    *,
+    expected_sha256: str,
+    artifacts: Sequence[CanonicalPhase6ContractArtifact],
+) -> tuple[
+    ValidatedPhase6ContractBundle,
+    tuple[CanonicalPhase6ContractArtifact, ...],
+]:
+    if not isinstance(expected_sha256, str) or not _SHA256.fullmatch(expected_sha256):
+        raise ValueError("expected root manifest SHA-256 must be lowercase hexadecimal")
+    if type(root_manifest_raw) is not bytes:
+        raise ValueError("root manifest must be exact bytes")
+    if sha256_bytes(root_manifest_raw) != expected_sha256:
+        raise ValueError("root manifest hash mismatch")
+    root = _validate_phase6_root_manifest(
+        _strict_canonical_json_object(root_manifest_raw, "root manifest")
+    )
+    expected_refs = _phase6_root_reference_contracts()
     for name, (artifact_type, schema_version) in expected_refs.items():
         _validate_artifact_ref(root[name], artifact_type, schema_version)
 
-    bundle_root = root_path.parent
-    loaded = {name: _load_ref_payload(bundle_root, root[name], name) for name in expected_refs}
+    artifact_map, retained = _phase6_bundle_artifact_map(root, artifacts)
+    loaded = {
+        name: artifact_map[_canonical_bundle_relative_path(root[name]["path"])][1]
+        for name in expected_refs
+    }
     preregistration = loaded["preregistration"]
     _validate_preregistration(preregistration, root)
     coverage_contract = loaded["coverage_semantics_contract"]
     selection_contract = validate_selection_metric_contract(loaded["selection_metric_contract"])
-    coverage_evaluation = evaluate_coverage_semantics(coverage_contract, bundle_root)
+    coverage_evaluation = _coverage_evaluation_from_artifact_map(coverage_contract, artifact_map)
     if not coverage_evaluation.end_to_end_coverage:
         raise ValueError("coverage semantics hard gate failed")
 
@@ -899,16 +1227,188 @@ def load_phase6_contract_bundle(
         root=root,
         report=True,
     )
-    return ValidatedPhase6ContractBundle(
-        root_manifest=copy.deepcopy(root),
-        preregistration=copy.deepcopy(preregistration),
-        coverage_contract=copy.deepcopy(coverage_contract),
-        selection_contract=selection_contract,
-        series_reference=copy.deepcopy(series_reference),
-        validation_batch_reference=copy.deepcopy(validation_batch_reference),
-        selection_report_reference=copy.deepcopy(selection_report_reference),
-        coverage_evaluation=coverage_evaluation,
+    return (
+        ValidatedPhase6ContractBundle(
+            root_manifest=copy.deepcopy(root),
+            preregistration=copy.deepcopy(preregistration),
+            coverage_contract=copy.deepcopy(coverage_contract),
+            selection_contract=copy.deepcopy(selection_contract),
+            series_reference=copy.deepcopy(series_reference),
+            validation_batch_reference=copy.deepcopy(validation_batch_reference),
+            selection_report_reference=copy.deepcopy(selection_report_reference),
+            coverage_evaluation=copy.deepcopy(coverage_evaluation),
+        ),
+        retained,
     )
+
+
+def _bundle_evidence_provenance(
+    root_manifest_sha256: str,
+    artifacts: Sequence[CanonicalPhase6ContractArtifact],
+) -> str:
+    payload = {
+        "schema_version": _BUNDLE_EVIDENCE_SCHEMA_VERSION,
+        "root_manifest_sha256": root_manifest_sha256,
+        "artifacts": [
+            {
+                "relative_path": artifact.relative_path,
+                "sha256": artifact.expected_sha256,
+                "size_bytes": len(artifact.raw),
+            }
+            for artifact in sorted(artifacts, key=lambda item: item.relative_path)
+        ],
+    }
+    return sha256_bytes(canonical_json_bytes(payload))
+
+
+def _new_bundle_evidence(
+    root_manifest_raw: bytes,
+    root_manifest_sha256: str,
+    artifacts: tuple[CanonicalPhase6ContractArtifact, ...],
+) -> ValidatedPhase6ContractBundleEvidence:
+    evidence = object.__new__(ValidatedPhase6ContractBundleEvidence)
+    provenance = _bundle_evidence_provenance(root_manifest_sha256, artifacts)
+    object.__setattr__(evidence, "_root_manifest_raw", bytes(root_manifest_raw))
+    object.__setattr__(evidence, "_root_manifest_sha256", root_manifest_sha256)
+    object.__setattr__(evidence, "_artifacts", artifacts)
+    object.__setattr__(evidence, "_provenance_sha256", provenance)
+    object.__setattr__(evidence, "_loader_token", _BUNDLE_EVIDENCE_LOADER_TOKEN)
+    snapshot = tuple(
+        (artifact.relative_path, artifact.raw, artifact.expected_sha256) for artifact in artifacts
+    )
+    _BUNDLE_EVIDENCE_REGISTRY[id(evidence)] = (
+        evidence,
+        evidence.root_manifest_raw,
+        evidence.root_manifest_sha256,
+        snapshot,
+        evidence.provenance_sha256,
+    )
+    return evidence
+
+
+def load_phase6_contract_bundle_evidence_from_canonical_artifacts(
+    root_manifest_raw: bytes,
+    *,
+    expected_sha256: str,
+    artifacts: Sequence[CanonicalPhase6ContractArtifact],
+) -> ValidatedPhase6ContractBundleEvidence:
+    """Validate and retain a closed canonical in-memory Phase 6 artifact map."""
+    _, retained = _validated_phase6_bundle_from_canonical_artifacts(
+        root_manifest_raw,
+        expected_sha256=expected_sha256,
+        artifacts=artifacts,
+    )
+    return _new_bundle_evidence(root_manifest_raw, expected_sha256, retained)
+
+
+def load_phase6_contract_bundle_evidence(
+    path: Path | str,
+    *,
+    expected_sha256: str,
+) -> ValidatedPhase6ContractBundleEvidence:
+    """Load an explicit canonical artifact graph without directory discovery."""
+    if not isinstance(expected_sha256, str) or not _SHA256.fullmatch(expected_sha256):
+        raise ValueError("expected root manifest SHA-256 must be lowercase hexadecimal")
+    root_path = Path(path)
+    try:
+        root_manifest_raw = root_path.read_bytes()
+    except OSError as exc:
+        raise ValueError("required root manifest is unreadable") from exc
+    if sha256_bytes(root_manifest_raw) != expected_sha256:
+        raise ValueError("root manifest hash mismatch")
+    root = _validate_phase6_root_manifest(
+        _strict_canonical_json_object(root_manifest_raw, "root manifest")
+    )
+    pending = list(_artifact_references(root))
+    loaded: dict[str, CanonicalPhase6ContractArtifact] = {}
+    root_labels = {
+        _canonical_bundle_relative_path(root[name]["path"]): name
+        for name in _phase6_root_reference_contracts()
+    }
+    while pending:
+        reference = pending.pop(0)
+        artifact_type = reference.get("artifact_type")
+        schema_version = reference.get("schema_version")
+        if not isinstance(artifact_type, str) or not isinstance(schema_version, str):
+            raise ValueError("artifact reference identity must be strings")
+        _validate_artifact_ref(reference, artifact_type, schema_version)
+        relative_path = _canonical_bundle_relative_path(reference["path"])
+        existing = loaded.get(relative_path)
+        if existing is not None:
+            if existing.expected_sha256 != reference["sha256"]:
+                raise ValueError("artifact version/hash reference mismatch")
+            continue
+        target = _resolve_bundle_path(root_path.parent, relative_path)
+        try:
+            raw = target.read_bytes()
+        except OSError as exc:
+            raise ValueError("required bundle artifact is unreadable") from exc
+        artifact = CanonicalPhase6ContractArtifact(
+            relative_path=relative_path,
+            raw=raw,
+            expected_sha256=reference["sha256"],
+        )
+        if sha256_bytes(raw) != artifact.expected_sha256:
+            if relative_path in root_labels:
+                raise ValueError(f"{root_labels[relative_path]} hash mismatch")
+            raise ValueError("coverage semantics hard gate failed")
+        payload = _strict_canonical_json_object(raw, f"bundle artifact {relative_path}")
+        if (
+            payload.get("artifact_type") != artifact_type
+            or payload.get("schema_version") != schema_version
+        ):
+            raise ValueError("bundle artifact reference type/version mismatch")
+        loaded[relative_path] = artifact
+        pending.extend(_artifact_references(payload))
+    return load_phase6_contract_bundle_evidence_from_canonical_artifacts(
+        root_manifest_raw,
+        expected_sha256=expected_sha256,
+        artifacts=tuple(loaded.values()),
+    )
+
+
+def validate_phase6_contract_bundle_evidence(
+    evidence: ValidatedPhase6ContractBundleEvidence,
+) -> ValidatedPhase6ContractBundle:
+    """Revalidate retained bytes and return one fresh deep-independent bundle."""
+    if type(evidence) is not ValidatedPhase6ContractBundleEvidence:
+        raise ValueError("bundle evidence must be strict-loaded")
+    registered = _BUNDLE_EVIDENCE_REGISTRY.get(id(evidence))
+    current_artifacts = tuple(
+        (artifact.relative_path, artifact.raw, artifact.expected_sha256)
+        for artifact in evidence.artifacts
+    )
+    if (
+        registered is None
+        or registered[0] is not evidence
+        or evidence._loader_token is not _BUNDLE_EVIDENCE_LOADER_TOKEN
+        or evidence.root_manifest_raw != registered[1]
+        or evidence.root_manifest_sha256 != registered[2]
+        or current_artifacts != registered[3]
+        or evidence.provenance_sha256 != registered[4]
+        or _bundle_evidence_provenance(evidence.root_manifest_sha256, evidence.artifacts)
+        != evidence.provenance_sha256
+    ):
+        raise ValueError("bundle evidence loader provenance mismatch")
+    bundle, _ = _validated_phase6_bundle_from_canonical_artifacts(
+        evidence.root_manifest_raw,
+        expected_sha256=evidence.root_manifest_sha256,
+        artifacts=evidence.artifacts,
+    )
+    return bundle
+
+
+def load_phase6_contract_bundle(
+    root_manifest_path: Path | str,
+    *,
+    expected_sha256: str,
+) -> ValidatedPhase6ContractBundle:
+    """Load a canonical fixture bundle and enforce every version/hash join."""
+    evidence = load_phase6_contract_bundle_evidence(
+        root_manifest_path,
+        expected_sha256=expected_sha256,
+    )
+    return validate_phase6_contract_bundle_evidence(evidence)
 
 
 def _validate_coverage_shape(payload: object) -> dict[str, Any]:
@@ -1148,9 +1648,9 @@ def _validate_fixture_payload(
         raise ValueError("unsupported semantic fixture schema_version")
     if payload["artifact_type"] != "phase6_semantic_fixture":
         raise ValueError("unsupported semantic fixture artifact_type")
-    for field in ("fixture_id", "fixture_kind", "component_role"):
-        if type(payload[field]) is not str or payload[field] != spec[field]:
-            raise ValueError(f"semantic fixture {field} mismatch")
+    for field_name in ("fixture_id", "fixture_kind", "component_role"):
+        if type(payload[field_name]) is not str or payload[field_name] != spec[field_name]:
+            raise ValueError(f"semantic fixture {field_name} mismatch")
     if (
         payload["fixture_id"] != evidence["fixture_id"]
         or payload["fixture_kind"] != evidence["fixture_kind"]

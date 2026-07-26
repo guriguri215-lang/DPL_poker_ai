@@ -4,7 +4,7 @@ import json
 import multiprocessing
 import os
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 
 import pytest
@@ -21,12 +21,15 @@ from phase6.gate_b_contracts import (
 from phase6.gate_b_ledger import (
     GateBLedgerError,
     GateBLedgerStore,
+    GateBPinnedArtifact,
+    GateBPinnedDirectory,
     GateBQuarantine,
     _append_started,
     _capability_result,
     _durable_descriptor_write,
     _load_quarantine,
     _new_record,
+    _pinned_child_name,
     _platform_contract,
     _posix_flock_adapter,
     _posix_openat_adapter,
@@ -34,7 +37,9 @@ from phase6.gate_b_ledger import (
     _validate_access_log_bytes,
     _validate_record_payload,
     _windows_create_file_descriptor,
+    _windows_final_path_from_descriptor,
     _windows_lock_adapter,
+    _windows_reject_network_volume,
     _windows_stream_names,
     _windows_unlock_adapter,
     _write_exclusive,
@@ -1914,3 +1919,818 @@ def test_fake_platform_negative_paths_fail_closed_and_sanitize(
     assert caught.value.__cause__ is None
     assert caught.value.__context__ is None
     assert "fixture-secret-platform-path" not in str(caught.value)
+
+
+def _directory_identity(path: Path) -> tuple[str, str]:
+    metadata = path.stat()
+    return format(metadata.st_dev, "x"), format(metadata.st_ino, "x")
+
+
+def test_host_pinned_directory_create_read_list_and_close(tmp_path: Path) -> None:
+    parent = tmp_path / "pinned-host-integration"
+    parent.mkdir()
+    volume_id, file_id = _directory_identity(parent)
+    raw = b'{"fixture":"pinned"}\n'
+
+    pinned = GateBPinnedDirectory.open(
+        parent,
+        expected_volume_id_hex=volume_id,
+        expected_file_id_hex=file_id,
+    )
+    with pinned:
+        created = pinned.create_regular("approval.json", raw)
+        assert created.raw == raw
+        assert created.sha256 == sha256_bytes(raw)
+        assert created.size_bytes == len(raw)
+        assert created.physical_identity == (
+            created.volume_id_hex,
+            created.file_id_hex,
+        )
+        loaded = pinned.read_regular(
+            "approval.json",
+            expected_sha256=sha256_bytes(raw),
+            expected_size_bytes=len(raw),
+        )
+        assert loaded == created
+        assert pinned.direct_child_names() == ("approval.json",)
+        pinned.verify_identity()
+        with pytest.raises(GateBLedgerError):
+            pinned.create_regular("approval.json", raw)
+    pinned.close()
+    for operation in (
+        lambda: pinned.verify_identity(),
+        lambda: pinned.direct_child_names(),
+        lambda: pinned.read_regular(
+            "approval.json",
+            expected_sha256=sha256_bytes(raw),
+            expected_size_bytes=len(raw),
+        ),
+        lambda: pinned.create_regular("other.json", raw),
+    ):
+        with pytest.raises(GateBLedgerError, match="closed"):
+            operation()
+    with pytest.raises(TypeError):
+        GateBPinnedArtifact()
+    forged = object.__new__(GateBPinnedArtifact)
+    for name in (
+        "_raw",
+        "_sha256",
+        "_size_bytes",
+        "_volume_id_hex",
+        "_file_id_hex",
+        "_loader_token",
+    ):
+        object.__setattr__(forged, name, getattr(created, name))
+    with pytest.raises(GateBLedgerError, match="provenance"):
+        _ = forged.raw
+    with pytest.raises(GateBLedgerError, match="provenance"):
+        _ = forged == created
+    object.__setattr__(created, "_raw", b"retained-mutation")
+    with pytest.raises(GateBLedgerError, match="provenance"):
+        _ = created.sha256
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "",
+        ".",
+        "..",
+        "a/b",
+        "a\\b",
+        "a:b",
+        "a*",
+        "a?",
+        "a<",
+        "a>",
+        'a"',
+        "a|",
+        "a.",
+        "a ",
+        "CON",
+        "con.json",
+        "PRN.txt",
+        "AUX",
+        "NUL.bin",
+        "COM1",
+        "com9.txt",
+        "LPT1",
+        "lpt9.txt",
+        "\x1f",
+        "\x7f",
+        "non-ascii-\u00e9",
+        "a" * 256,
+    ],
+)
+def test_pinned_child_name_rejects_aliases_and_devices(name: str) -> None:
+    with pytest.raises(GateBLedgerError):
+        _pinned_child_name(name)
+
+
+def test_pinned_directory_rejects_wrong_target_identity(tmp_path: Path) -> None:
+    parent = tmp_path / "wrong-identity"
+    parent.mkdir()
+    volume_id, file_id = _directory_identity(parent)
+    wrong_volume = "1" if volume_id != "1" else "2"
+    wrong_file = "1" if file_id != "1" else "2"
+    with pytest.raises(GateBLedgerError, match="identity"):
+        GateBPinnedDirectory.open(
+            parent,
+            expected_volume_id_hex=wrong_volume,
+            expected_file_id_hex=file_id,
+        )
+    with pytest.raises(GateBLedgerError, match="identity"):
+        GateBPinnedDirectory.open(
+            parent,
+            expected_volume_id_hex=volume_id,
+            expected_file_id_hex=wrong_file,
+        )
+    with pytest.raises(GateBLedgerError):
+        GateBPinnedDirectory.open(parent)  # type: ignore[call-arg]
+
+
+def test_pinned_directory_parent_swap_is_blocked_or_stays_on_pinned_parent(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "pinned-parent"
+    moved = tmp_path / "moved-parent"
+    replacement = tmp_path / "replacement-parent"
+    parent.mkdir()
+    replacement.mkdir()
+    volume_id, file_id = _directory_identity(parent)
+    pinned = GateBPinnedDirectory.open(
+        parent,
+        expected_volume_id_hex=volume_id,
+        expected_file_id_hex=file_id,
+    )
+    try:
+        renamed = False
+        try:
+            os.rename(parent, moved)
+            renamed = True
+        except OSError:
+            pass
+        if renamed:
+            os.rename(replacement, parent)
+            with pytest.raises(GateBLedgerError):
+                pinned.create_regular("pinned.json", b"pinned\n")
+            assert not (moved / "pinned.json").exists()
+            assert not (parent / "pinned.json").exists()
+        else:
+            artifact = pinned.create_regular("pinned.json", b"pinned\n")
+            assert artifact.raw == b"pinned\n"
+            assert (parent / "pinned.json").read_bytes() == b"pinned\n"
+    finally:
+        pinned.close()
+
+
+def test_pinned_directory_rejects_hardlink_or_alternate_stream(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "pinned-alias"
+    parent.mkdir()
+    target = parent / "record.json"
+    raw = b"fixture\n"
+    target.write_bytes(raw)
+    if os.name == "nt":
+        (parent / "record.json:fixture-stream").write_bytes(b"alias")
+    else:
+        os.link(target, parent / "record-alias.json")
+    volume_id, file_id = _directory_identity(parent)
+    with (
+        GateBPinnedDirectory.open(
+            parent,
+            expected_volume_id_hex=volume_id,
+            expected_file_id_hex=file_id,
+        ) as pinned,
+        pytest.raises(GateBLedgerError),
+    ):
+        pinned.read_regular(
+            "record.json",
+            expected_sha256=sha256_bytes(raw),
+            expected_size_bytes=len(raw),
+        )
+
+
+def test_pinned_directory_rejects_injected_reparse_or_replacement_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    reparse_metadata = SimpleNamespace(
+        st_mode=0o100600,
+        st_nlink=1,
+        st_file_attributes=0x400,
+    )
+    with pytest.raises(GateBLedgerError, match="physical regular file"):
+        ledger_module._regular_pinned_metadata(reparse_metadata, "fixture reparse")
+
+    parent = tmp_path / "replacement-metadata"
+    parent.mkdir()
+    raw = b"fixture\n"
+    (parent / "record.json").write_bytes(raw)
+    volume_id, file_id = _directory_identity(parent)
+    with GateBPinnedDirectory.open(
+        parent,
+        expected_volume_id_hex=volume_id,
+        expected_file_id_hex=file_id,
+    ) as pinned:
+        original = ledger_module._regular_pinned_metadata
+        calls = 0
+
+        def replacement_on_reopen(metadata, label):
+            nonlocal calls
+            validated = original(metadata, label)
+            calls += 1
+            if calls == 3:
+                values = list(validated)
+                values[1] = validated.st_ino + 1
+                return os.stat_result(values)
+            return validated
+
+        monkeypatch.setattr(
+            ledger_module,
+            "_regular_pinned_metadata",
+            replacement_on_reopen,
+        )
+        with pytest.raises(GateBLedgerError, match="changed during reopen"):
+            pinned.read_regular(
+                "record.json",
+                expected_sha256=sha256_bytes(raw),
+                expected_size_bytes=len(raw),
+            )
+
+
+def test_pinned_directory_partial_write_failure_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "pinned-partial"
+    parent.mkdir()
+    volume_id, file_id = _directory_identity(parent)
+    with GateBPinnedDirectory.open(
+        parent,
+        expected_volume_id_hex=volume_id,
+        expected_file_id_hex=file_id,
+    ) as pinned:
+        monkeypatch.setattr(
+            ledger_module,
+            "_write_all",
+            lambda *_args: (_ for _ in ()).throw(OSError("fixture-partial")),
+        )
+        with pytest.raises(GateBLedgerError):
+            pinned.create_regular("partial.json", b"fixture\n")
+
+
+def test_windows_volume_guid_helpers_are_injectable_and_reject_network() -> None:
+    final_path = "\\\\?\\Volume{11111111-1111-1111-1111-111111111111}\\fixture"
+
+    class FakeFunction:
+        def __init__(self, callback):
+            self.callback = callback
+
+        def __call__(self, *args):
+            return self.callback(*args)
+
+    def get_final(_handle, buffer, _size, flags):
+        assert flags == 1
+        if buffer is None:
+            return len(final_path)
+        buffer.value = final_path
+        return len(final_path)
+
+    kernel = SimpleNamespace(GetFinalPathNameByHandleW=FakeFunction(get_final))
+    assert (
+        _windows_final_path_from_descriptor(
+            17,
+            _kernel32=kernel,
+            _get_osfhandle=lambda descriptor: descriptor + 1,
+        )
+        == final_path
+    )
+    network_kernel = SimpleNamespace(GetDriveTypeW=FakeFunction(lambda _root: 4))
+    with pytest.raises(GateBLedgerError, match="network"):
+        _windows_reject_network_volume(
+            "\\\\?\\Volume{11111111-1111-1111-1111-111111111111}\\",
+            _kernel32=network_kernel,
+        )
+
+
+@pytest.mark.parametrize(
+    "invalid_path",
+    [
+        PureWindowsPath(r"\\server\share\fixture"),
+        PureWindowsPath(r"\\.\C:\fixture"),
+        PureWindowsPath(r"\\?\C:\fixture"),
+    ],
+)
+def test_windows_chain_rejects_unc_and_device_namespaces(
+    invalid_path: PureWindowsPath,
+) -> None:
+    with pytest.raises(GateBLedgerError, match="canonical local DOS-drive"):
+        ledger_module._open_windows_pinned_chain(invalid_path, (1, 1))
+
+
+@pytest.mark.parametrize(
+    "final_path",
+    [
+        r"\\?\C:\fixture",
+        r"\\?\UNC\server\share\fixture",
+        r"\\.\C:\fixture",
+        r"\\?\GLOBALROOT\Device\fixture",
+    ],
+)
+def test_windows_final_path_rejects_unavailable_guid_or_device_namespace(
+    final_path: str,
+) -> None:
+    class FakeFunction:
+        def __init__(self, callback):
+            self.callback = callback
+
+        def __call__(self, *args):
+            return self.callback(*args)
+
+    def get_final(_handle, buffer, _size, _flags):
+        if buffer is None:
+            return len(final_path)
+        buffer.value = final_path
+        return len(final_path)
+
+    kernel = SimpleNamespace(GetFinalPathNameByHandleW=FakeFunction(get_final))
+    with pytest.raises(GateBLedgerError, match="Volume-GUID"):
+        _windows_final_path_from_descriptor(
+            17,
+            _kernel32=kernel,
+            _get_osfhandle=lambda descriptor: descriptor,
+        )
+
+
+def test_windows_cumulative_chain_uses_no_delete_share_and_guid_reopen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    volume_root = "\\\\?\\Volume{11111111-1111-1111-1111-111111111111}\\"
+    initial_paths: list[tuple[str, int, bool]] = []
+    initial_descriptors = iter((101, 102, 103))
+    identities = {101: (9, 1), 102: (9, 2), 103: (9, 3)}
+    final_paths = {
+        101: volume_root,
+        102: volume_root + "fixture",
+        103: volume_root + "fixture\\target",
+    }
+    closed: list[int] = []
+
+    def initial_open(path, *, share, directory=False, **_kwargs):
+        descriptor = next(initial_descriptors)
+        initial_paths.append((str(path), share, directory))
+        return descriptor
+
+    monkeypatch.setattr(ledger_module, "_windows_create_file_descriptor", initial_open)
+    monkeypatch.setattr(
+        ledger_module.os,
+        "fstat",
+        lambda descriptor: SimpleNamespace(
+            st_mode=0o040700,
+            st_dev=identities[descriptor][0],
+            st_ino=identities[descriptor][1],
+            st_file_attributes=0,
+        ),
+    )
+    monkeypatch.setattr(
+        ledger_module,
+        "_windows_final_path_from_descriptor",
+        lambda descriptor: final_paths[descriptor],
+    )
+    monkeypatch.setattr(ledger_module, "_windows_reject_network_volume", lambda _root: None)
+    monkeypatch.setattr(ledger_module.os, "close", closed.append)
+
+    chain = ledger_module._open_windows_pinned_chain(
+        PureWindowsPath("C:/fixture/target"),
+        (9, 3),
+    )
+    assert [share for _path, share, _directory in initial_paths] == [3, 3, 3]
+    assert all(directory for _path, _share, directory in initial_paths)
+
+    reopened_paths: list[str] = []
+    reopen_descriptors = iter((201, 202, 203))
+    reopen_identities = {201: (9, 1), 202: (9, 2), 203: (9, 3)}
+    reopen_final_paths = {
+        201: volume_root,
+        202: volume_root + "fixture",
+        203: volume_root + "fixture\\target",
+    }
+
+    def reopen(path, **_kwargs):
+        reopened_paths.append(str(path))
+        return next(reopen_descriptors)
+
+    monkeypatch.setattr(ledger_module, "_windows_create_file_descriptor", reopen)
+    monkeypatch.setattr(
+        ledger_module.os,
+        "fstat",
+        lambda descriptor: SimpleNamespace(
+            st_mode=0o040700,
+            st_dev=(identities | reopen_identities)[descriptor][0],
+            st_ino=(identities | reopen_identities)[descriptor][1],
+            st_file_attributes=0,
+        ),
+    )
+    monkeypatch.setattr(
+        ledger_module,
+        "_windows_final_path_from_descriptor",
+        lambda descriptor: (final_paths | reopen_final_paths)[descriptor],
+    )
+    ledger_module._verify_windows_pinned_chain(chain)
+    assert all(path.startswith(volume_root) for path in reopened_paths)
+    assert not any(path.startswith("C:") for path in reopened_paths)
+    assert closed == [201, 202, 203]
+
+
+@pytest.mark.parametrize(
+    ("stage", "bad_descriptor"),
+    [
+        ("volume-root", 101),
+        ("intermediate", 102),
+        ("target", 103),
+    ],
+)
+def test_windows_chain_rejects_each_ancestor_substitution_during_open(
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+    bad_descriptor: int,
+) -> None:
+    volume_root = "\\\\?\\Volume{11111111-1111-1111-1111-111111111111}\\"
+    descriptors = iter((101, 102, 103))
+    opened_stages: list[str] = []
+    identities = {101: (9, 1), 102: (9, 2), 103: (9, 3)}
+    paths = {
+        101: volume_root,
+        102: volume_root + "fixture",
+        103: volume_root + "fixture\\target",
+    }
+    paths[bad_descriptor] = "\\\\?\\Volume{22222222-2222-2222-2222-222222222222}\\substituted"
+    child_opened = False
+
+    def open_component(_path, **_kwargs):
+        nonlocal child_opened
+        child_opened = True
+        descriptor = next(descriptors)
+        opened_stages.append({101: "volume-root", 102: "intermediate", 103: "target"}[descriptor])
+        return descriptor
+
+    monkeypatch.setattr(ledger_module, "_windows_create_file_descriptor", open_component)
+    monkeypatch.setattr(
+        ledger_module.os,
+        "fstat",
+        lambda descriptor: SimpleNamespace(
+            st_mode=0o040700,
+            st_dev=identities[descriptor][0],
+            st_ino=identities[descriptor][1],
+            st_file_attributes=0,
+        ),
+    )
+    monkeypatch.setattr(
+        ledger_module,
+        "_windows_final_path_from_descriptor",
+        lambda descriptor: paths[descriptor],
+    )
+    monkeypatch.setattr(ledger_module, "_windows_reject_network_volume", lambda _root: None)
+    monkeypatch.setattr(ledger_module.os, "close", lambda _descriptor: None)
+    with pytest.raises(GateBLedgerError):
+        ledger_module._open_windows_pinned_chain(
+            PureWindowsPath("C:/fixture/target"),
+            (9, 3),
+        )
+    assert child_opened is True
+    assert stage in opened_stages
+
+
+@pytest.mark.parametrize(
+    ("stage", "substitution_index"),
+    [("volume-root", 0), ("intermediate", 1), ("target", 2)],
+)
+def test_windows_chain_swap_before_each_component_open_closes_retained_ancestors(
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+    substitution_index: int,
+) -> None:
+    volume_root = "\\\\?\\Volume{11111111-1111-1111-1111-111111111111}\\"
+    alternate_root = "\\\\?\\Volume{22222222-2222-2222-2222-222222222222}\\"
+    opened: list[int] = []
+    closed: list[int] = []
+    identities = {401: (9, 1), 402: (9, 2), 403: (9, 3)}
+    final_paths = {
+        401: volume_root,
+        402: volume_root + "fixture",
+        403: volume_root + "fixture\\target",
+    }
+
+    def injected_open(_path, **_kwargs):
+        descriptor = 401 + len(opened)
+        if len(opened) == substitution_index:
+            final_paths[descriptor] = alternate_root + stage
+            identities[descriptor] = (10, descriptor)
+        opened.append(descriptor)
+        return descriptor
+
+    monkeypatch.setattr(
+        ledger_module,
+        "_windows_create_file_descriptor",
+        injected_open,
+    )
+    monkeypatch.setattr(
+        ledger_module.os,
+        "fstat",
+        lambda descriptor: SimpleNamespace(
+            st_mode=0o040700,
+            st_dev=identities[descriptor][0],
+            st_ino=identities[descriptor][1],
+            st_file_attributes=0,
+        ),
+    )
+    monkeypatch.setattr(
+        ledger_module,
+        "_windows_final_path_from_descriptor",
+        lambda descriptor: final_paths[descriptor],
+    )
+    monkeypatch.setattr(ledger_module, "_windows_reject_network_volume", lambda _root: None)
+    monkeypatch.setattr(ledger_module.os, "close", closed.append)
+    with pytest.raises(GateBLedgerError):
+        GateBPinnedDirectory.open(
+            Path("C:/fixture/target"),
+            expected_volume_id_hex="9",
+            expected_file_id_hex="3",
+        )
+    assert closed == list(reversed(opened))
+
+
+def test_windows_dos_alias_remap_before_target_open_is_rejected_by_pinned_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    alternate_root = "\\\\?\\Volume{22222222-2222-2222-2222-222222222222}\\"
+    descriptors = iter((501, 502, 503))
+    identities = {501: (10, 1), 502: (10, 2), 503: (10, 99)}
+    final_paths = {
+        501: alternate_root,
+        502: alternate_root + "fixture",
+        503: alternate_root + "fixture\\target",
+    }
+
+    def open_remapped(_path, **_kwargs):
+        return next(descriptors)
+
+    monkeypatch.setattr(ledger_module, "_windows_create_file_descriptor", open_remapped)
+    monkeypatch.setattr(
+        ledger_module.os,
+        "fstat",
+        lambda descriptor: SimpleNamespace(
+            st_mode=0o040700,
+            st_dev=identities[descriptor][0],
+            st_ino=identities[descriptor][1],
+            st_file_attributes=0,
+        ),
+    )
+    monkeypatch.setattr(
+        ledger_module,
+        "_windows_final_path_from_descriptor",
+        lambda descriptor: final_paths[descriptor],
+    )
+    monkeypatch.setattr(ledger_module, "_windows_reject_network_volume", lambda _root: None)
+    monkeypatch.setattr(ledger_module.os, "close", lambda _descriptor: None)
+    with pytest.raises(GateBLedgerError, match="identity"):
+        GateBPinnedDirectory.open(
+            Path("C:/fixture/target"),
+            expected_volume_id_hex="9",
+            expected_file_id_hex="3",
+        )
+
+
+def test_pinned_open_closes_every_retained_handle_when_final_verify_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    final_path = "\\\\?\\Volume{11111111-1111-1111-1111-111111111111}\\fixture"
+    chain = (
+        ledger_module._PinnedWindowsDirectoryHandle(301, (9, 1), final_path.rsplit("\\", 1)[0]),
+        ledger_module._PinnedWindowsDirectoryHandle(302, (9, 2), final_path),
+    )
+    closed: list[int] = []
+    monkeypatch.setattr(
+        ledger_module,
+        "_open_windows_pinned_chain",
+        lambda _path, _identity: chain,
+    )
+    monkeypatch.setattr(
+        GateBPinnedDirectory,
+        "verify_identity",
+        lambda _self: (_ for _ in ()).throw(GateBLedgerError("fixture-verify")),
+    )
+    monkeypatch.setattr(ledger_module.os, "close", closed.append)
+    with pytest.raises(GateBLedgerError):
+        GateBPinnedDirectory.open(
+            Path("C:/fixture"),
+            expected_volume_id_hex="9",
+            expected_file_id_hex="2",
+        )
+    assert closed == [302, 301]
+
+
+@pytest.mark.parametrize("ancestor_index", [0, 1, 2])
+@pytest.mark.parametrize("timing", ["before-child-create", "after-child-open"])
+def test_each_synthetic_ancestor_swap_around_child_create_is_blocked_or_stays_pinned(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    ancestor_index: int,
+    timing: str,
+) -> None:
+    base = tmp_path / f"ancestor-race-{ancestor_index}-{timing}"
+    ancestor_a = base / "ancestor-a"
+    ancestor_b = ancestor_a / "ancestor-b"
+    target = ancestor_b / "target"
+    target.mkdir(parents=True)
+    ancestors = (ancestor_a, ancestor_b, target)
+    selected = ancestors[ancestor_index]
+    moved = base / f"moved-{ancestor_index}"
+    relative_target = target.relative_to(selected)
+    original_pinned_target = moved / relative_target
+    replacement_target = selected / relative_target
+    replacement_installed = False
+
+    def inject_swap() -> None:
+        nonlocal replacement_installed
+        try:
+            os.rename(selected, moved)
+        except OSError:
+            return
+        replacement_target.mkdir(parents=True)
+        replacement_installed = True
+
+    volume_id, file_id = _directory_identity(target)
+    with GateBPinnedDirectory.open(
+        target,
+        expected_volume_id_hex=volume_id,
+        expected_file_id_hex=file_id,
+    ) as pinned:
+        if timing == "before-child-create":
+            inject_swap()
+        else:
+            original_open = GateBPinnedDirectory._open_new_child
+
+            def open_then_swap(instance, name):
+                descriptor = original_open(instance, name)
+                inject_swap()
+                return descriptor
+
+            monkeypatch.setattr(
+                GateBPinnedDirectory,
+                "_open_new_child",
+                open_then_swap,
+            )
+        try:
+            artifact = pinned.create_regular("pinned-only.json", b"pinned\n")
+        except GateBLedgerError:
+            artifact = None
+
+    if replacement_installed:
+        assert not (replacement_target / "pinned-only.json").exists()
+        if artifact is not None:
+            assert (original_pinned_target / "pinned-only.json").read_bytes() == b"pinned\n"
+    else:
+        assert artifact is not None
+        assert (target / "pinned-only.json").read_bytes() == b"pinned\n"
+
+
+def test_windows_dos_alias_remap_after_initial_open_uses_only_retained_guid_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "dos-remap-after-open"
+    target.mkdir()
+    volume_id, file_id = _directory_identity(target)
+    opened_paths: list[str] = []
+    original_open = ledger_module._windows_create_file_descriptor
+    with GateBPinnedDirectory.open(
+        target,
+        expected_volume_id_hex=volume_id,
+        expected_file_id_hex=file_id,
+    ) as pinned:
+        object.__setattr__(pinned, "_path", Path("Z:/synthetic-remapped-target"))
+
+        def observed_open(path, **kwargs):
+            opened_paths.append(str(path))
+            return original_open(path, **kwargs)
+
+        monkeypatch.setattr(
+            ledger_module,
+            "_windows_create_file_descriptor",
+            observed_open,
+        )
+        artifact = pinned.create_regular("guid-only.json", b"fixture\n")
+
+    assert artifact.raw == b"fixture\n"
+    assert opened_paths
+    assert all(path.startswith("\\\\?\\Volume{") for path in opened_paths)
+    assert (target / "guid-only.json").read_bytes() == b"fixture\n"
+
+
+@pytest.mark.parametrize(
+    ("operation", "failure_call"),
+    [
+        ("read", 1),
+        ("read", 2),
+        ("create", 1),
+        ("create", 2),
+        ("list", 1),
+        ("list", 2),
+    ],
+)
+def test_pinned_directory_identity_change_before_or_after_every_operation_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    operation: str,
+    failure_call: int,
+) -> None:
+    parent = tmp_path / f"identity-{operation}-{failure_call}"
+    parent.mkdir()
+    existing = parent / "existing.json"
+    existing.write_bytes(b"fixture\n")
+    volume_id, file_id = _directory_identity(parent)
+    with GateBPinnedDirectory.open(
+        parent,
+        expected_volume_id_hex=volume_id,
+        expected_file_id_hex=file_id,
+    ) as pinned:
+        original = GateBPinnedDirectory._verify_identity_unwrapped
+        calls = 0
+
+        def injected(instance):
+            nonlocal calls
+            calls += 1
+            if calls == failure_call:
+                raise GateBLedgerError("fixture identity substitution")
+            return original(instance)
+
+        monkeypatch.setattr(GateBPinnedDirectory, "_verify_identity_unwrapped", injected)
+        with pytest.raises(GateBLedgerError, match="identity"):
+            if operation == "read":
+                pinned.read_regular(
+                    "existing.json",
+                    expected_sha256=sha256_bytes(b"fixture\n"),
+                    expected_size_bytes=len(b"fixture\n"),
+                )
+            elif operation == "create":
+                pinned.create_regular("created.json", b"created\n")
+            else:
+                pinned.direct_child_names()
+
+
+@pytest.mark.parametrize("failure", ["flush", "reopen"])
+def test_pinned_create_flush_or_reopen_failure_returns_no_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    parent = tmp_path / f"durability-{failure}"
+    parent.mkdir()
+    volume_id, file_id = _directory_identity(parent)
+    with GateBPinnedDirectory.open(
+        parent,
+        expected_volume_id_hex=volume_id,
+        expected_file_id_hex=file_id,
+    ) as pinned:
+        if failure == "flush":
+            monkeypatch.setattr(
+                ledger_module.os,
+                "fsync",
+                lambda _descriptor: (_ for _ in ()).throw(OSError("fixture flush")),
+            )
+        else:
+            monkeypatch.setattr(
+                GateBPinnedDirectory,
+                "_open_existing_child",
+                lambda _self, _name: (_ for _ in ()).throw(OSError("fixture reopen")),
+            )
+        with pytest.raises(GateBLedgerError):
+            pinned.create_regular("artifact.json", b"fixture\n")
+
+
+def test_pinned_human_record_files_reject_physical_alias(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "human-record-alias"
+    parent.mkdir()
+    approval_path = parent / "approval.json"
+    signature_path = parent / "signature.json"
+    raw = b"fixture\n"
+    approval_path.write_bytes(raw)
+    os.link(approval_path, signature_path)
+    volume_id, file_id = _directory_identity(parent)
+    with GateBPinnedDirectory.open(
+        parent,
+        expected_volume_id_hex=volume_id,
+        expected_file_id_hex=file_id,
+    ) as pinned:
+        for name in ("approval.json", "signature.json"):
+            with pytest.raises(GateBLedgerError, match="single-link"):
+                pinned.read_regular(
+                    name,
+                    expected_sha256=sha256_bytes(raw),
+                    expected_size_bytes=len(raw),
+                )

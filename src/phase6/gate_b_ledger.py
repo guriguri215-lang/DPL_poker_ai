@@ -12,7 +12,7 @@ import os
 import re
 import stat
 from collections.abc import Mapping
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import wraps
@@ -39,6 +39,8 @@ _ATOM_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}\Z")
 _HEX_RE = re.compile(r"(?:0|[1-9a-f][0-9a-f]*)\Z")
 _TIME_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z")
 _RECORD_RE = re.compile(r"record-(\d{6})\.json\Z")
+_WINDOWS_VOLUME_GUID_RE = re.compile(r"\\\\\?\\Volume\{[0-9A-Fa-f-]+\}\\")
+_PINNED_ARTIFACT_LOADER_TOKEN = object()
 _OUTPUT_PATHS = MappingProxyType(
     {
         "stdout": "stdout.txt",
@@ -408,7 +410,7 @@ def _windows_create_file_descriptor(
     if handle in (None, invalid):
         raise OSError(ctypes.get_last_error(), "CreateFileW failed")
     flags = getattr(os, "O_BINARY", 0)
-    flags |= os.O_RDONLY if access == 0x80000000 else os.O_RDWR
+    flags |= os.O_RDONLY if access in {0, 0x80000000} else os.O_RDWR
     try:
         return open_osfhandle(handle, flags)
     except BaseException:
@@ -902,6 +904,624 @@ def _write_all(descriptor: int, raw: bytes) -> None:
         if written <= 0:
             _fail("durable write did not make progress")
         view = view[written:]
+
+
+def _pinned_child_name(name: object) -> str:
+    if (
+        not isinstance(name, str)
+        or not 1 <= len(name) <= 255
+        or not name.isascii()
+        or any(not 0x20 <= ord(character) <= 0x7E for character in name)
+        or any(character in '/\\:*?<>|"' for character in name)
+        or name in {".", ".."}
+        or name.endswith((".", " "))
+    ):
+        _fail("pinned artifact name is not a canonical direct-child name")
+    stem = name.split(".", 1)[0].upper()
+    reserved = {"CON", "PRN", "AUX", "NUL"}
+    reserved.update(f"COM{index}" for index in range(1, 10))
+    reserved.update(f"LPT{index}" for index in range(1, 10))
+    if stem in reserved:
+        _fail("pinned artifact name uses a reserved device stem")
+    return name
+
+
+def _pinned_hex_identity(value: object, label: str) -> str:
+    if not isinstance(value, str) or _HEX_RE.fullmatch(value) is None:
+        _fail(f"{label} must be lowercase unprefixed hexadecimal")
+    return value
+
+
+def _pinned_size(value: object, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value < (1 << 63):
+        _fail(f"{label} must be a nonnegative integer")
+    return value
+
+
+def _regular_pinned_metadata(metadata: os.stat_result, label: str) -> os.stat_result:
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or _reparse(metadata)
+        or metadata.st_nlink != 1
+    ):
+        _fail(f"{label} must be a single-link physical regular file")
+    return metadata
+
+
+def _directory_pinned_metadata(metadata: os.stat_result, label: str) -> os.stat_result:
+    if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode) or _reparse(metadata):
+        _fail(f"{label} must be a physical non-reparse directory")
+    return metadata
+
+
+def _read_all_descriptor(descriptor: int) -> bytes:
+    chunks: list[bytes] = []
+    while True:
+        chunk = os.read(descriptor, 1024 * 1024)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+
+
+def _windows_final_path_from_descriptor(
+    descriptor: int,
+    *,
+    _kernel32=None,
+    _get_osfhandle=None,
+) -> str:
+    if os.name != "nt" and (_kernel32 is None or _get_osfhandle is None):
+        _fail("Windows final-path primitive is unavailable")
+    if _kernel32 is None or _get_osfhandle is None:
+        import msvcrt
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        get_osfhandle = msvcrt.get_osfhandle
+    else:
+        kernel32 = _kernel32
+        get_osfhandle = _get_osfhandle
+    function = kernel32.GetFinalPathNameByHandleW
+    function.argtypes = (
+        ctypes.c_void_p,
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+    )
+    function.restype = ctypes.c_uint32
+    handle = get_osfhandle(descriptor)
+    flags = 0x00000001
+    required = function(ctypes.c_void_p(handle), None, 0, flags)
+    if required == 0:
+        raise OSError(ctypes.get_last_error(), "GetFinalPathNameByHandleW failed")
+    buffer = ctypes.create_unicode_buffer(required + 1)
+    written = function(ctypes.c_void_p(handle), buffer, len(buffer), flags)
+    if written == 0 or written >= len(buffer):
+        raise OSError(ctypes.get_last_error(), "GetFinalPathNameByHandleW failed")
+    final_path = buffer.value
+    if (
+        _WINDOWS_VOLUME_GUID_RE.match(final_path) is None
+        or final_path.startswith("\\\\?\\UNC\\")
+        or final_path.startswith("\\\\.\\")
+        or "GLOBALROOT" in final_path.upper()
+    ):
+        _fail("stable Windows Volume-GUID namespace is unavailable")
+    return final_path
+
+
+def _windows_volume_guid_root(final_path: str) -> str:
+    match = _WINDOWS_VOLUME_GUID_RE.match(final_path)
+    if match is None:
+        _fail("stable Windows Volume-GUID namespace is unavailable")
+    return match.group(0)
+
+
+def _windows_reject_network_volume(volume_root: str, *, _kernel32=None) -> None:
+    if os.name != "nt" and _kernel32 is None:
+        _fail("Windows volume classification primitive is unavailable")
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True) if _kernel32 is None else _kernel32
+    function = kernel32.GetDriveTypeW
+    function.argtypes = (ctypes.c_wchar_p,)
+    function.restype = ctypes.c_uint32
+    drive_type = function(volume_root)
+    if drive_type in {0, 1, 4, 5}:
+        _fail("network or unsupported Windows volume is not permitted")
+
+
+@dataclass(frozen=True, slots=True)
+class _PinnedWindowsDirectoryHandle:
+    descriptor: int
+    physical_identity: tuple[int, int]
+    final_path: str
+
+
+def _open_windows_pinned_chain(
+    path: Path,
+    expected_identity: tuple[int, int],
+) -> tuple[_PinnedWindowsDirectoryHandle, ...]:
+    text = str(path)
+    if (
+        not path.is_absolute()
+        or path.drive == ""
+        or path.drive.startswith("\\")
+        or text.startswith(("\\\\", "\\\\?\\", "\\\\.\\"))
+    ):
+        _fail("Windows pinned directory requires a canonical local DOS-drive path")
+    parts = path.parts
+    if not parts:
+        _fail("Windows pinned directory path is invalid")
+    cumulative = Path(parts[0])
+    opened: list[_PinnedWindowsDirectoryHandle] = []
+    try:
+        for part in (None, *parts[1:]):
+            if part is not None:
+                cumulative = cumulative / part
+            descriptor = _windows_create_file_descriptor(
+                cumulative,
+                access=0,
+                creation=3,
+                share=3,
+                directory=True,
+            )
+            try:
+                metadata = _directory_pinned_metadata(
+                    os.fstat(descriptor), "Windows pinned directory component"
+                )
+                final_path = _windows_final_path_from_descriptor(descriptor)
+                identity = (metadata.st_dev, metadata.st_ino)
+                if opened:
+                    parent_prefix = opened[-1].final_path.rstrip("\\") + "\\"
+                    if not final_path.casefold().startswith(parent_prefix.casefold()):
+                        _fail("Windows pinned ancestor chain is inconsistent")
+                opened.append(
+                    _PinnedWindowsDirectoryHandle(
+                        descriptor=descriptor,
+                        physical_identity=identity,
+                        final_path=final_path,
+                    )
+                )
+            except BaseException:
+                os.close(descriptor)
+                raise
+        target = opened[-1]
+        if target.physical_identity != expected_identity:
+            _fail("Windows pinned target identity mismatch")
+        _windows_reject_network_volume(_windows_volume_guid_root(target.final_path))
+        return tuple(opened)
+    except BaseException:
+        for item in reversed(opened):
+            with suppress(OSError):
+                os.close(item.descriptor)
+        raise
+
+
+def _verify_windows_pinned_chain(
+    chain: tuple[_PinnedWindowsDirectoryHandle, ...],
+) -> None:
+    if not chain:
+        _fail("Windows pinned ancestor chain is unavailable")
+    for index, retained in enumerate(chain):
+        metadata = _directory_pinned_metadata(
+            os.fstat(retained.descriptor), "Windows retained directory"
+        )
+        if (metadata.st_dev, metadata.st_ino) != retained.physical_identity:
+            _fail("Windows retained directory identity changed")
+        if (
+            _windows_final_path_from_descriptor(retained.descriptor).casefold()
+            != retained.final_path.casefold()
+        ):
+            _fail("Windows retained directory final path changed")
+        descriptor = _windows_create_file_descriptor(
+            Path(retained.final_path),
+            access=0,
+            creation=3,
+            share=3,
+            directory=True,
+        )
+        try:
+            reopened = _directory_pinned_metadata(
+                os.fstat(descriptor), "Windows named retained directory"
+            )
+            if (reopened.st_dev, reopened.st_ino) != retained.physical_identity:
+                _fail("Windows named retained directory identity changed")
+            reopened_final = _windows_final_path_from_descriptor(descriptor)
+            if reopened_final.casefold() != retained.final_path.casefold():
+                _fail("Windows named retained directory final path changed")
+        finally:
+            os.close(descriptor)
+        if index:
+            parent_prefix = chain[index - 1].final_path.rstrip("\\") + "\\"
+            if not retained.final_path.casefold().startswith(parent_prefix.casefold()):
+                _fail("Windows retained ancestor topology changed")
+
+
+@dataclass(frozen=True, slots=True, init=False, eq=False)
+class GateBPinnedArtifact:
+    """Immutable bytes and physical identity from a pinned child operation."""
+
+    _raw: bytes = field(repr=False)
+    _sha256: str
+    _size_bytes: int
+    _volume_id_hex: str
+    _file_id_hex: str
+    _loader_token: object = field(repr=False, compare=False)
+
+    def __new__(cls, *, _token: object | None = None) -> GateBPinnedArtifact:
+        if _token is not _PINNED_ARTIFACT_LOADER_TOKEN:
+            raise TypeError("pinned artifact construction is private")
+        return object.__new__(cls)
+
+    @property
+    def raw(self) -> bytes:
+        return _validated_pinned_artifact_snapshot(self)[0]
+
+    @property
+    def sha256(self) -> str:
+        return _validated_pinned_artifact_snapshot(self)[1]
+
+    @property
+    def size_bytes(self) -> int:
+        return _validated_pinned_artifact_snapshot(self)[2]
+
+    @property
+    def volume_id_hex(self) -> str:
+        return _validated_pinned_artifact_snapshot(self)[3]
+
+    @property
+    def file_id_hex(self) -> str:
+        return _validated_pinned_artifact_snapshot(self)[4]
+
+    @property
+    def physical_identity(self) -> tuple[str, str]:
+        snapshot = _validated_pinned_artifact_snapshot(self)
+        return snapshot[3], snapshot[4]
+
+    def __eq__(self, other: object) -> bool:
+        if type(other) is not GateBPinnedArtifact:
+            return NotImplemented
+        return _validated_pinned_artifact_snapshot(self) == _validated_pinned_artifact_snapshot(
+            other
+        )
+
+
+_PINNED_ARTIFACT_REGISTRY: dict[
+    int,
+    tuple[GateBPinnedArtifact, bytes, str, int, str, str],
+] = {}
+
+
+def _validated_pinned_artifact_snapshot(
+    artifact: GateBPinnedArtifact,
+) -> tuple[bytes, str, int, str, str]:
+    registered = _PINNED_ARTIFACT_REGISTRY.get(id(artifact))
+    try:
+        current = (
+            object.__getattribute__(artifact, "_raw"),
+            object.__getattribute__(artifact, "_sha256"),
+            object.__getattribute__(artifact, "_size_bytes"),
+            object.__getattribute__(artifact, "_volume_id_hex"),
+            object.__getattribute__(artifact, "_file_id_hex"),
+        )
+        loader_token = object.__getattribute__(artifact, "_loader_token")
+    except (AttributeError, TypeError):
+        _fail("pinned artifact loader provenance mismatch")
+    if (
+        registered is None
+        or registered[0] is not artifact
+        or loader_token is not _PINNED_ARTIFACT_LOADER_TOKEN
+        or current != registered[1:]
+        or type(current[0]) is not bytes
+        or sha256_bytes(current[0]) != current[1]
+        or len(current[0]) != current[2]
+        or _HEX_RE.fullmatch(current[3]) is None
+        or _HEX_RE.fullmatch(current[4]) is None
+    ):
+        _fail("pinned artifact loader provenance mismatch")
+    return current
+
+
+def _new_pinned_artifact(raw: bytes, metadata: os.stat_result) -> GateBPinnedArtifact:
+    artifact = object.__new__(GateBPinnedArtifact)
+    digest = sha256_bytes(raw)
+    volume_id = format(metadata.st_dev, "x")
+    file_id = format(metadata.st_ino, "x")
+    object.__setattr__(artifact, "_raw", bytes(raw))
+    object.__setattr__(artifact, "_sha256", digest)
+    object.__setattr__(artifact, "_size_bytes", len(raw))
+    object.__setattr__(artifact, "_volume_id_hex", volume_id)
+    object.__setattr__(artifact, "_file_id_hex", file_id)
+    object.__setattr__(artifact, "_loader_token", _PINNED_ARTIFACT_LOADER_TOKEN)
+    _PINNED_ARTIFACT_REGISTRY[id(artifact)] = (
+        artifact,
+        bytes(raw),
+        digest,
+        len(raw),
+        volume_id,
+        file_id,
+    )
+    return artifact
+
+
+class GateBPinnedDirectory:
+    """Retained-parent direct-child I/O with fail-closed physical identity."""
+
+    __slots__ = (
+        "_path",
+        "_stable_path",
+        "_descriptor",
+        "_expected_identity",
+        "_windows_chain",
+        "_closed",
+    )
+
+    def __init__(
+        self,
+        path: Path,
+        stable_path: Path,
+        descriptor: int,
+        expected_identity: tuple[int, int],
+        windows_chain: tuple[_PinnedWindowsDirectoryHandle, ...],
+        *,
+        _token: object,
+    ) -> None:
+        if _token is not _PINNED_ARTIFACT_LOADER_TOKEN:
+            _fail("pinned directory construction is private")
+        self._path = path
+        self._stable_path = stable_path
+        self._descriptor = descriptor
+        self._expected_identity = expected_identity
+        self._windows_chain = windows_chain
+        self._closed = False
+
+    @classmethod
+    @_sanitized_api
+    def open(
+        cls,
+        absolute_path: Path | str,
+        *,
+        expected_volume_id_hex: str,
+        expected_file_id_hex: str,
+    ) -> GateBPinnedDirectory:
+        volume_id = _pinned_hex_identity(expected_volume_id_hex, "pinned target volume ID")
+        file_id = _pinned_hex_identity(expected_file_id_hex, "pinned target file ID")
+        expected_identity = (int(volume_id, 16), int(file_id, 16))
+        path = Path(absolute_path)
+        if not path.is_absolute():
+            _fail("pinned directory path must be absolute")
+        if os.name == "nt":
+            chain = _open_windows_pinned_chain(path, expected_identity)
+            target = chain[-1]
+            instance = cls(
+                path,
+                Path(target.final_path),
+                target.descriptor,
+                expected_identity,
+                chain,
+                _token=_PINNED_ARTIFACT_LOADER_TOKEN,
+            )
+        elif os.name == "posix":
+            descriptor = _posix_open_directory(path)
+            try:
+                metadata = _directory_pinned_metadata(
+                    os.fstat(descriptor), "POSIX pinned directory"
+                )
+                if (metadata.st_dev, metadata.st_ino) != expected_identity:
+                    _fail("POSIX pinned target identity mismatch")
+                instance = cls(
+                    path,
+                    path,
+                    descriptor,
+                    expected_identity,
+                    (),
+                    _token=_PINNED_ARTIFACT_LOADER_TOKEN,
+                )
+            except BaseException:
+                os.close(descriptor)
+                raise
+        else:
+            _fail("unsupported pinned-directory platform")
+        try:
+            instance.verify_identity()
+        except BaseException:
+            with suppress(GateBLedgerError):
+                instance.close()
+            raise
+        return instance
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            _fail("pinned directory is closed")
+
+    def _verify_identity_unwrapped(self) -> None:
+        self._ensure_open()
+        if os.name == "nt":
+            _verify_windows_pinned_chain(self._windows_chain)
+            if self._windows_chain[-1].physical_identity != self._expected_identity:
+                _fail("Windows pinned target identity changed")
+        else:
+            metadata = _directory_pinned_metadata(
+                os.fstat(self._descriptor), "POSIX pinned directory"
+            )
+            if (metadata.st_dev, metadata.st_ino) != self._expected_identity:
+                _fail("POSIX pinned target identity changed")
+
+    def _open_existing_child(self, name: str) -> int:
+        if os.name == "nt":
+            return _windows_create_file_descriptor(
+                self._stable_path / name,
+                access=0x80000000,
+                creation=3,
+                share=1,
+            )
+        nofollow = _required_posix_nofollow(getattr(os, "O_NOFOLLOW", None))
+        if os.open not in getattr(os, "supports_dir_fd", set()):
+            _fail("required POSIX pinned-child primitive is unavailable")
+        return os.open(
+            name,
+            os.O_RDONLY | nofollow,
+            dir_fd=self._descriptor,
+        )
+
+    def _open_new_child(self, name: str) -> int:
+        if os.name == "nt":
+            return _windows_create_file_descriptor(
+                self._stable_path / name,
+                access=0xC0000000,
+                creation=1,
+                share=0,
+            )
+        nofollow = _required_posix_nofollow(getattr(os, "O_NOFOLLOW", None))
+        if os.open not in getattr(os, "supports_dir_fd", set()):
+            _fail("required POSIX exclusive openat primitive is unavailable")
+        return os.open(
+            name,
+            os.O_RDWR | os.O_CREAT | os.O_EXCL | nofollow,
+            0o600,
+            dir_fd=self._descriptor,
+        )
+
+    def _verify_child_streams(self, name: str) -> None:
+        if os.name == "nt" and _windows_stream_names(self._stable_path / name) != ("::$DATA",):
+            _fail("pinned artifact has an alternate data stream")
+
+    @_sanitized_api
+    def read_regular(
+        self,
+        direct_child_name: str,
+        *,
+        expected_sha256: str,
+        expected_size_bytes: int,
+    ) -> GateBPinnedArtifact:
+        self._ensure_open()
+        name = _pinned_child_name(direct_child_name)
+        expected_hash = _sha(expected_sha256, "pinned artifact expected hash")
+        expected_size = _pinned_size(expected_size_bytes, "pinned artifact expected size")
+        self._verify_identity_unwrapped()
+        descriptor = self._open_existing_child(name)
+        second: int | None = None
+        try:
+            before = _regular_pinned_metadata(os.fstat(descriptor), "pinned artifact")
+            self._verify_child_streams(name)
+            raw = _read_all_descriptor(descriptor)
+            after = _regular_pinned_metadata(os.fstat(descriptor), "pinned artifact")
+            if (
+                (after.st_dev, after.st_ino, after.st_size)
+                != (before.st_dev, before.st_ino, before.st_size)
+                or len(raw) != expected_size
+                or before.st_size != expected_size
+                or sha256_bytes(raw) != expected_hash
+            ):
+                _fail("pinned artifact size, hash, or identity mismatch")
+            self._verify_identity_unwrapped()
+            second = self._open_existing_child(name)
+            reopened = _regular_pinned_metadata(os.fstat(second), "reopened pinned artifact")
+            reread = _read_all_descriptor(second)
+            if (
+                (reopened.st_dev, reopened.st_ino) != (before.st_dev, before.st_ino)
+                or reread != raw
+                or sha256_bytes(reread) != expected_hash
+            ):
+                _fail("pinned artifact changed during reopen and rehash")
+            self._verify_child_streams(name)
+            self._verify_identity_unwrapped()
+            return _new_pinned_artifact(raw, before)
+        finally:
+            if second is not None:
+                os.close(second)
+            os.close(descriptor)
+
+    @_sanitized_api
+    def create_regular(
+        self,
+        direct_child_name: str,
+        raw: bytes,
+    ) -> GateBPinnedArtifact:
+        self._ensure_open()
+        name = _pinned_child_name(direct_child_name)
+        if type(raw) is not bytes:
+            _fail("pinned artifact content must be bytes")
+        self._verify_identity_unwrapped()
+        descriptor = self._open_new_child(name)
+        try:
+            _write_all(descriptor, raw)
+            os.fsync(descriptor)
+            created = _regular_pinned_metadata(os.fstat(descriptor), "created pinned artifact")
+            if created.st_size != len(raw):
+                _fail("created pinned artifact size mismatch")
+            self._verify_child_streams(name)
+            self._verify_identity_unwrapped()
+        finally:
+            os.close(descriptor)
+        if os.name == "posix":
+            try:
+                os.fsync(self._descriptor)
+            except OSError as exc:
+                raise GateBLedgerError("required POSIX parent-directory fsync failed") from exc
+        else:
+            self._verify_identity_unwrapped()
+        reopened = self._open_existing_child(name)
+        try:
+            metadata = _regular_pinned_metadata(
+                os.fstat(reopened), "reopened created pinned artifact"
+            )
+            reread = _read_all_descriptor(reopened)
+            if (
+                (metadata.st_dev, metadata.st_ino) != (created.st_dev, created.st_ino)
+                or reread != raw
+                or sha256_bytes(reread) != sha256_bytes(raw)
+            ):
+                _fail("created pinned artifact changed during durable reopen")
+            self._verify_child_streams(name)
+            self._verify_identity_unwrapped()
+            return _new_pinned_artifact(raw, created)
+        finally:
+            os.close(reopened)
+
+    @_sanitized_api
+    def direct_child_names(self) -> tuple[str, ...]:
+        self._ensure_open()
+        self._verify_identity_unwrapped()
+        try:
+            if os.name == "nt":
+                with os.scandir(self._stable_path) as entries:
+                    names = [entry.name for entry in entries]
+            else:
+                names = list(os.listdir(self._descriptor))
+        except OSError as exc:
+            raise GateBLedgerError("pinned directory enumeration failed") from exc
+        validated = tuple(sorted(_pinned_child_name(name) for name in names))
+        self._verify_identity_unwrapped()
+        return validated
+
+    @_sanitized_api
+    def verify_identity(self) -> None:
+        self._verify_identity_unwrapped()
+
+    @_sanitized_api
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        errors: list[OSError] = []
+        descriptors = (
+            [item.descriptor for item in reversed(self._windows_chain)]
+            if self._windows_chain
+            else [self._descriptor]
+        )
+        for descriptor in descriptors:
+            try:
+                os.close(descriptor)
+            except OSError as exc:
+                errors.append(exc)
+        if errors:
+            raise GateBLedgerError("pinned directory close failed") from errors[0]
+
+    def __enter__(self) -> GateBPinnedDirectory:
+        self._ensure_open()
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback) -> bool:
+        self.close()
+        return False
 
 
 def _write_exclusive(path: Path, raw: bytes) -> None:
