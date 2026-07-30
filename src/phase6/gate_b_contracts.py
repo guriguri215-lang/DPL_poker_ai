@@ -13,6 +13,7 @@ import json
 import os
 import re
 import stat
+import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -27,12 +28,16 @@ BATCH_MANIFEST_SCHEMA_VERSION = "phase6-gate-b-test-batch-manifest-v1"
 ATTEMPT_LEDGER_RECORD_SCHEMA_VERSION = "phase6-gate-b-attempt-ledger-record-v1"
 QUARANTINE_MANIFEST_SCHEMA_VERSION = "phase6-gate-b-quarantine-manifest-v1"
 LOADER_REQUEST_SCHEMA_VERSION = "phase6-gate-b-test-loader-request-v1"
-READINESS_AUTHORIZATION_SCHEMA_VERSION = "phase6-gate-b-readiness-authorization-v1"
-HUMAN_APPROVAL_RECORD_SCHEMA_VERSION = "phase6-gate-b-human-approval-record-v1"
-HUMAN_SIGNATURE_RECORD_SCHEMA_VERSION = "phase6-gate-b-human-signature-record-v1"
+READINESS_AUTHORIZATION_SCHEMA_VERSION = "phase6-gate-b-readiness-authorization-v2"
+HUMAN_APPROVAL_RECORD_SCHEMA_VERSION = "phase6-gate-b-human-approval-record-v2"
+HUMAN_SIGNATURE_RECORD_SCHEMA_VERSION = "phase6-gate-b-human-signature-record-v2"
 RELEASE_AUTHORIZATION_SCHEMA_VERSION = "phase6-gate-b-release-authorization-v1"
 RETRY_AUTHORIZATION_SCHEMA_VERSION = "phase6-gate-b-retry-authorization-v1"
 ROOT_ANCHOR_SCHEMA_VERSION = "phase6-gate-b-root-anchor-v1"
+PREAPPROVAL_ROOT_IDENTITY_PROJECTION_SCHEMA_VERSION = (
+    "phase6-gate-b-preapproval-root-identity-projection-v1"
+)
+ROOT_ANCHOR_POLICY_VERSION = "phase6-gate-b-root-anchor-policy-v1"
 OPPONENT_PAYLOAD_INDEX_SCHEMA_VERSION = "phase6-gate-b-opponent-payload-index-v1"
 EXECUTION_CONFIG_INDEX_SCHEMA_VERSION = "phase6-gate-b-execution-config-index-v1"
 EXECUTION_CONTEXT_SCHEMA_VERSION = "phase6-gate-b-execution-context-v1"
@@ -73,6 +78,7 @@ QUARANTINE_OUTPUT_NAMES = (
     "result",
     "access_log",
 )
+PREAPPROVAL_ROOT_ROLE_ORDER = ("ledger_base", "quarantine_base", "test_root")
 FAILURE_CLASS_STATES = (
     ("execution_environment_failure", "RESERVED"),
     ("test_input_prestart_failure", "RESERVED"),
@@ -94,6 +100,7 @@ _TIME_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z")
 _HEX_ID_RE = re.compile(r"(?:0|[1-9a-f][0-9a-f]*)\Z")
 _DECIMAL_RE = re.compile(r"-?(?:0|[1-9]\d*)(?:\.\d*[1-9])?\Z")
 _HUMAN_RECORD_LOADER_TOKEN = object()
+_PREAPPROVAL_PROJECTION_TOKEN = object()
 
 
 class GateBContractError(ValueError):
@@ -273,12 +280,24 @@ def _absolute_path(value: object, label: str) -> Path:
         _fail(f"{label} must be a nonempty path without control characters")
     text = value
     candidate = Path(text)
-    if not candidate.is_absolute():
+    if not candidate.is_absolute() or ".." in candidate.parts or str(candidate) != text:
         _fail(f"{label} must be absolute")
-    canonical = candidate.resolve(strict=False)
-    if str(canonical) != text:
-        _fail(f"{label} must use canonical absolute spelling")
-    return canonical
+    return candidate
+
+
+def _retained_reference_path(value: object, label: str) -> Path:
+    """Validate retained join metadata without touching the filesystem."""
+    if type(value) is not type(Path()):
+        _fail(f"{label} must use the current concrete path type")
+    text = str(value)
+    if (
+        not text
+        or not value.is_absolute()
+        or ".." in value.parts
+        or any(unicodedata.category(character) in {"Cc", "Cf"} for character in text)
+    ):
+        _fail(f"{label} must be an absolute control-free retained reference")
+    return value
 
 
 def _native_io_path(path: Path) -> str | Path:
@@ -1173,6 +1192,118 @@ def _validate_execution_context(value: dict[str, Any]) -> None:
     _integer(lock["size_bytes"], "context dependency lock size", minimum=1)
 
 
+@dataclass(frozen=True, slots=True, init=False)
+class GateBPreApprovalRootIdentityProjection:
+    """Immutable canonical root identity approved before writable anchors exist."""
+
+    payload: Mapping[str, Any]
+    canonical_bytes: bytes
+    sha256: str
+
+    def __new__(
+        cls,
+        *,
+        _token: object | None = None,
+    ) -> GateBPreApprovalRootIdentityProjection:
+        if _token is not _PREAPPROVAL_PROJECTION_TOKEN:
+            raise TypeError("preapproval projection construction is private")
+        return object.__new__(cls)
+
+
+@_sanitized_api
+def build_gate_b_preapproval_root_identity_projection(
+    roots: object,
+) -> GateBPreApprovalRootIdentityProjection:
+    """Build the sole canonical v1 approval projection for full root references."""
+    expected_roles = set(PREAPPROVAL_ROOT_ROLE_ORDER)
+    expected_fields = {
+        "absolute_path",
+        "anchor_relative_path",
+        "anchor_sha256",
+        "file_id_hex",
+        "identity_scheme",
+        "root_role",
+        "volume_id_hex",
+    }
+    if (
+        type(roots) is not dict
+        or set(roots) != expected_roles
+        or any(type(key) is not str for key in roots)
+    ):
+        _fail("preapproval roots fields are not closed-world")
+    expected_scheme = "windows-volume-file-id-v1" if os.name == "nt" else "posix-device-inode-v1"
+    projected_roots: list[dict[str, Any]] = []
+    for role in PREAPPROVAL_ROOT_ROLE_ORDER:
+        raw = roots[role]
+        if (
+            type(raw) is not dict
+            or set(raw) != expected_fields
+            or any(type(key) is not str for key in raw)
+        ):
+            _fail(f"{role} preapproval root fields are not closed-world")
+        root_role = raw["root_role"]
+        if type(root_role) is not str or root_role != role:
+            _fail("preapproval root role mismatch")
+        absolute_path = raw["absolute_path"]
+        if type(absolute_path) is not str or not absolute_path:
+            _fail(f"{role} preapproval root path must be a string")
+        if any(unicodedata.category(character) in {"Cc", "Cf"} for character in absolute_path):
+            _fail(f"{role} preapproval root path contains a control character")
+        path = Path(absolute_path)
+        if (
+            type(path) is not type(Path())
+            or not path.is_absolute()
+            or ".." in path.parts
+            or str(path) != absolute_path
+        ):
+            _fail(f"{role} preapproval root path must be canonical and absolute")
+        identity_scheme = raw["identity_scheme"]
+        if type(identity_scheme) is not str or identity_scheme != expected_scheme:
+            _fail(f"{role} preapproval root identity scheme mismatch")
+        identities: dict[str, str] = {}
+        for field_name in ("volume_id_hex", "file_id_hex"):
+            field_value = raw[field_name]
+            if type(field_value) is not str or _HEX_ID_RE.fullmatch(field_value) is None:
+                _fail(f"{role} preapproval root physical identity mismatch")
+            identities[field_name] = field_value
+        anchor_relative_path = raw["anchor_relative_path"]
+        anchor_sha256 = raw["anchor_sha256"]
+        if role == "test_root":
+            if anchor_relative_path is not None or anchor_sha256 is not None:
+                _fail("Test root preapproval anchor fields must be null")
+        else:
+            if (
+                type(anchor_relative_path) is not str
+                or anchor_relative_path != ".gate-b-root-anchor.json"
+            ):
+                _fail("writable root preapproval anchor path mismatch")
+            if anchor_sha256 is not None and (
+                type(anchor_sha256) is not str or _SHA_RE.fullmatch(anchor_sha256) is None
+            ):
+                _fail("writable root preapproval anchor hash mismatch")
+        projected_roots.append(
+            {
+                "root_role": root_role,
+                "absolute_path": absolute_path,
+                "identity_scheme": identity_scheme,
+                "volume_id_hex": identities["volume_id_hex"],
+                "file_id_hex": identities["file_id_hex"],
+                "anchor_relative_path": anchor_relative_path,
+            }
+        )
+    plain_payload = {
+        "schema_version": PREAPPROVAL_ROOT_IDENTITY_PROJECTION_SCHEMA_VERSION,
+        "anchor_policy_version": ROOT_ANCHOR_POLICY_VERSION,
+        "roots": projected_roots,
+    }
+    canonical_bytes = canonical_json_bytes(plain_payload)
+    projection = object.__new__(GateBPreApprovalRootIdentityProjection)
+    object.__setattr__(projection, "payload", _frozen(plain_payload))
+    object.__setattr__(projection, "canonical_bytes", canonical_bytes)
+    object.__setattr__(projection, "sha256", sha256_bytes(canonical_bytes))
+    return projection
+
+
 @dataclass(frozen=True, slots=True)
 class GateBBatchManifest:
     """Strict immutable batch bytes and their complete stored-byte hash."""
@@ -1383,14 +1514,11 @@ class GateBExecutionContext:
         return self._path
 
 
-def _read_canonical_artifact(
+def _acquire_canonical_artifact(
     path: Path | str,
     *,
-    expected_sha256: str,
     label: str,
-    validator: Callable[[dict[str, Any]], None],
-) -> tuple[Path, bytes, dict[str, Any]]:
-    expected = _sha(expected_sha256, f"{label} expected hash")
+) -> tuple[Path, bytes]:
     candidate = Path(path)
     try:
         metadata = os.lstat(_native_io_path(candidate))
@@ -1427,10 +1555,6 @@ def _read_canonical_artifact(
             os.close(descriptor)
     except OSError as exc:
         raise GateBContractError(f"{label} cannot be read") from exc
-    if sha256_bytes(raw) != expected:
-        _fail(f"{label} stored-byte hash mismatch")
-    value = _strict_canonical_object(raw, label)
-    validator(value)
     after = os.lstat(_native_io_path(candidate))
     if not _single_link_regular(after):
         _fail(f"{label} topology changed while loading")
@@ -1442,19 +1566,135 @@ def _read_canonical_artifact(
         after.st_size,
     ):
         _fail(f"{label} identity changed while loading")
-    return candidate.resolve(), raw, value
+    return candidate.resolve(), bytes(raw)
+
+
+def _validate_canonical_artifact_bytes(
+    raw: bytes,
+    *,
+    expected_sha256: str,
+    reference_path: Path,
+    label: str,
+    validator: Callable[[dict[str, Any]], None],
+) -> tuple[Path, bytes, dict[str, Any]]:
+    if type(raw) is not bytes:
+        _fail(f"{label} input must be bytes")
+    retained_path = _retained_reference_path(reference_path, f"{label} reference path")
+    owned_raw = bytes(raw)
+    expected = _sha(expected_sha256, f"{label} expected hash")
+    if sha256_bytes(owned_raw) != expected:
+        _fail(f"{label} stored-byte hash mismatch")
+    value = _strict_canonical_object(owned_raw, label)
+    validator(value)
+    return retained_path, owned_raw, value
+
+
+def _read_canonical_artifact(
+    path: Path | str,
+    *,
+    expected_sha256: str,
+    label: str,
+    validator: Callable[[dict[str, Any]], None],
+) -> tuple[Path, bytes, dict[str, Any]]:
+    canonical_path, raw = _acquire_canonical_artifact(path, label=label)
+    return _validate_canonical_artifact_bytes(
+        raw,
+        expected_sha256=expected_sha256,
+        reference_path=canonical_path,
+        label=label,
+        validator=validator,
+    )
+
+
+def _load_gate_b_batch_manifest_bytes(
+    raw: bytes,
+    *,
+    expected_sha256: str,
+    reference_path: Path,
+) -> GateBBatchManifest:
+    canonical_path, owned_raw, value = _validate_canonical_artifact_bytes(
+        raw,
+        expected_sha256=expected_sha256,
+        reference_path=reference_path,
+        label="Gate B batch manifest",
+        validator=_validate_batch_manifest,
+    )
+    return GateBBatchManifest(expected_sha256, _frozen(value), owned_raw, canonical_path)
+
+
+@_sanitized_api
+def load_gate_b_batch_manifest_bytes(
+    raw: bytes,
+    *,
+    expected_sha256: str,
+    reference_path: Path,
+) -> GateBBatchManifest:
+    """Strict-load retained batch bytes without filesystem access."""
+    return _load_gate_b_batch_manifest_bytes(
+        raw,
+        expected_sha256=expected_sha256,
+        reference_path=reference_path,
+    )
 
 
 @_sanitized_api
 def load_gate_b_batch_manifest(path: Path | str, *, expected_sha256: str) -> GateBBatchManifest:
     """Strict-load a complete canonical Gate B batch manifest."""
-    canonical_path, raw, value = _read_canonical_artifact(
-        path,
+    canonical_path, raw = _acquire_canonical_artifact(path, label="Gate B batch manifest")
+    return _load_gate_b_batch_manifest_bytes(
+        raw,
         expected_sha256=expected_sha256,
-        label="Gate B batch manifest",
-        validator=_validate_batch_manifest,
+        reference_path=canonical_path,
     )
-    return GateBBatchManifest(expected_sha256, _frozen(value), raw, canonical_path)
+
+
+def _load_gate_b_readiness_authorization_bytes(
+    raw: bytes,
+    *,
+    expected_sha256: str,
+    expected_approval_record_sha256: str,
+    expected_signature_record_sha256: str,
+    reference_path: Path,
+) -> GateBReadinessAuthorization:
+    approval_hash = _sha(expected_approval_record_sha256, "expected approval record hash")
+    signature_hash = _sha(expected_signature_record_sha256, "expected signature record hash")
+    canonical_path, owned_raw, value = _validate_canonical_artifact_bytes(
+        raw,
+        expected_sha256=expected_sha256,
+        reference_path=reference_path,
+        label="Gate B readiness authorization",
+        validator=_validate_readiness_authorization,
+    )
+    if (
+        value["approval_record_sha256"] != approval_hash
+        or value["signature_record_sha256"] != signature_hash
+    ):
+        _fail("readiness authorization trust-anchor mismatch")
+    return GateBReadinessAuthorization(
+        expected_sha256,
+        _frozen(value),
+        owned_raw,
+        canonical_path,
+    )
+
+
+@_sanitized_api
+def load_gate_b_readiness_authorization_bytes(
+    raw: bytes,
+    *,
+    expected_sha256: str,
+    expected_approval_record_sha256: str,
+    expected_signature_record_sha256: str,
+    reference_path: Path,
+) -> GateBReadinessAuthorization:
+    """Strict-load retained readiness bytes without filesystem access."""
+    return _load_gate_b_readiness_authorization_bytes(
+        raw,
+        expected_sha256=expected_sha256,
+        expected_approval_record_sha256=expected_approval_record_sha256,
+        expected_signature_record_sha256=expected_signature_record_sha256,
+        reference_path=reference_path,
+    )
 
 
 @_sanitized_api
@@ -1466,20 +1706,14 @@ def load_gate_b_readiness_authorization(
     expected_signature_record_sha256: str,
 ) -> GateBReadinessAuthorization:
     """Load a readiness authorization using three independent trust anchors."""
-    approval_hash = _sha(expected_approval_record_sha256, "expected approval record hash")
-    signature_hash = _sha(expected_signature_record_sha256, "expected signature record hash")
-    canonical_path, raw, value = _read_canonical_artifact(
-        path,
+    canonical_path, raw = _acquire_canonical_artifact(path, label="Gate B readiness authorization")
+    return _load_gate_b_readiness_authorization_bytes(
+        raw,
         expected_sha256=expected_sha256,
-        label="Gate B readiness authorization",
-        validator=_validate_readiness_authorization,
+        expected_approval_record_sha256=expected_approval_record_sha256,
+        expected_signature_record_sha256=expected_signature_record_sha256,
+        reference_path=canonical_path,
     )
-    if (
-        value["approval_record_sha256"] != approval_hash
-        or value["signature_record_sha256"] != signature_hash
-    ):
-        _fail("readiness authorization trust-anchor mismatch")
-    return GateBReadinessAuthorization(expected_sha256, _frozen(value), raw, canonical_path)
 
 
 def _revalidate_human_approval_record(
@@ -1743,16 +1977,54 @@ def load_gate_b_root_anchor(
     expected_approval_record_sha256: str,
 ) -> GateBRootAnchor:
     """Strict-load one synthetic or later-authorized writable-base anchor."""
-    approval_hash = _sha(expected_approval_record_sha256, "expected approval record hash")
-    canonical_path, raw, value = _read_canonical_artifact(
-        path,
+    canonical_path, raw = _acquire_canonical_artifact(path, label="Gate B root anchor")
+    return _load_gate_b_root_anchor_bytes(
+        raw,
         expected_sha256=expected_sha256,
+        expected_root_role=expected_root_role,
+        expected_approval_record_sha256=expected_approval_record_sha256,
+        reference_path=canonical_path,
+    )
+
+
+def _load_gate_b_root_anchor_bytes(
+    raw: bytes,
+    *,
+    expected_sha256: str,
+    expected_root_role: str,
+    expected_approval_record_sha256: str,
+    reference_path: Path,
+) -> GateBRootAnchor:
+    approval_hash = _sha(expected_approval_record_sha256, "expected approval record hash")
+    canonical_path, owned_raw, value = _validate_canonical_artifact_bytes(
+        raw,
+        expected_sha256=expected_sha256,
+        reference_path=reference_path,
         label="Gate B root anchor",
         validator=lambda payload: _validate_root_anchor(payload, expected_root_role),
     )
     if value["approval_record_sha256"] != approval_hash:
         _fail("root anchor approval hash mismatch")
-    return GateBRootAnchor(expected_sha256, _frozen(value), raw, canonical_path)
+    return GateBRootAnchor(expected_sha256, _frozen(value), owned_raw, canonical_path)
+
+
+@_sanitized_api
+def load_gate_b_root_anchor_bytes(
+    raw: bytes,
+    *,
+    expected_sha256: str,
+    expected_root_role: str,
+    expected_approval_record_sha256: str,
+    reference_path: Path,
+) -> GateBRootAnchor:
+    """Strict-load retained root-anchor bytes without filesystem access."""
+    return _load_gate_b_root_anchor_bytes(
+        raw,
+        expected_sha256=expected_sha256,
+        expected_root_role=expected_root_role,
+        expected_approval_record_sha256=expected_approval_record_sha256,
+        reference_path=reference_path,
+    )
 
 
 @_sanitized_api
@@ -1760,13 +2032,43 @@ def load_gate_b_execution_context(
     path: Path | str, *, expected_sha256: str
 ) -> GateBExecutionContext:
     """Strict-load an explicit Gate B execution context."""
-    canonical_path, raw, value = _read_canonical_artifact(
-        path,
+    canonical_path, raw = _acquire_canonical_artifact(path, label="Gate B execution context")
+    return _load_gate_b_execution_context_bytes(
+        raw,
         expected_sha256=expected_sha256,
+        reference_path=canonical_path,
+    )
+
+
+def _load_gate_b_execution_context_bytes(
+    raw: bytes,
+    *,
+    expected_sha256: str,
+    reference_path: Path,
+) -> GateBExecutionContext:
+    canonical_path, owned_raw, value = _validate_canonical_artifact_bytes(
+        raw,
+        expected_sha256=expected_sha256,
+        reference_path=reference_path,
         label="Gate B execution context",
         validator=_validate_execution_context,
     )
-    return GateBExecutionContext(expected_sha256, _frozen(value), raw, canonical_path)
+    return GateBExecutionContext(expected_sha256, _frozen(value), owned_raw, canonical_path)
+
+
+@_sanitized_api
+def load_gate_b_execution_context_bytes(
+    raw: bytes,
+    *,
+    expected_sha256: str,
+    reference_path: Path,
+) -> GateBExecutionContext:
+    """Strict-load retained execution-context bytes without filesystem access."""
+    return _load_gate_b_execution_context_bytes(
+        raw,
+        expected_sha256=expected_sha256,
+        reference_path=reference_path,
+    )
 
 
 def _canonical_reason_detail_sha256(reason_id: str) -> str:

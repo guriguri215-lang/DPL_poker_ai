@@ -6,6 +6,7 @@ import json
 import multiprocessing
 import os
 import struct
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -30,6 +31,7 @@ from phase6.gate_b_contracts import (
     SELECTED_CONFIG_LOCK_SCHEMA_VERSION,
     TOPOLOGY_POLICY_VERSION,
     _root_identity_payload,
+    build_gate_b_preapproval_root_identity_projection,
 )
 from phase6.gate_b_ledger import GateBAttemptReservation, GateBLedgerError, GateBLedgerStore
 from phase6.gate_b_loader import (
@@ -41,10 +43,17 @@ from phase6.gate_b_loader import (
     GateBExecutorFailure,
     GateBLoaderError,
     GateBLoaderRequest,
+    GateBRetainedArtifactSnapshot,
+    GateBRetainedDirectorySnapshot,
     GateBTestInputFailure,
+    build_gate_b_retained_loader_bundle,
+    create_gate_b_retained_artifact,
     load_gate_b_loader_request,
+    load_gate_b_loader_request_from_retained,
+    open_gate_b_retained_directory,
     open_gate_b_test_input,
     prepare_gate_b_test_open,
+    read_gate_b_retained_artifact,
     reserve_gate_b_attempt,
 )
 
@@ -231,7 +240,8 @@ class _Fixture:
 
 
 def _build_fixture(tmp_path: Path) -> _Fixture:
-    base = tmp_path / "gate-b-fixture"
+    short_case_id = sha256_bytes(tmp_path.name.encode("utf-8"))[:12]
+    base = tmp_path.parent / f"f-{short_case_id}"
     repository_root = base / "repository-root"
     test_root = base / "test-root"
     ledger_root = base / "ledger-root"
@@ -473,7 +483,7 @@ def _build_fixture(tmp_path: Path) -> _Fixture:
         ),
         "test_root": _root_ref(test_root, "test_root", anchor_hash=None),
     }
-    roots_hash = sha256_bytes(canonical_json_bytes(roots))
+    roots_hash = build_gate_b_preapproval_root_identity_projection(roots).sha256
     readiness_path = base / "a.json"
     readiness_hash, _readiness_size = _store(
         readiness_path,
@@ -740,6 +750,210 @@ def test_loader_request_joins_all_explicit_roots_and_has_sanitized_repr(
         expected_readiness_signature_record_sha256=SIGNATURE_HASH,
     )
     assert reloaded.request_sha256 == fixture.request_hash
+
+
+def test_loader_preapproval_projection_accepts_v2_and_rejects_obsolete_full_roots_hash(
+    tmp_path: Path,
+) -> None:
+    fixture = _build_fixture(tmp_path)
+    request_payload = json.loads(fixture.request_path.read_bytes())
+    readiness_path = Path(request_payload["readiness_authorization"]["absolute_path"])
+    readiness_payload = json.loads(readiness_path.read_bytes())
+    projection = build_gate_b_preapproval_root_identity_projection(request_payload["roots"])
+    assert readiness_payload["schema_version"] == READINESS_AUTHORIZATION_SCHEMA_VERSION
+    assert readiness_payload["approved_roots_sha256"] == projection.sha256
+
+    obsolete_hash = sha256_bytes(canonical_json_bytes(request_payload["roots"]))
+    assert obsolete_hash != projection.sha256
+    readiness_payload["approved_roots_sha256"] = obsolete_hash
+    readiness_hash, _size = _store(readiness_path, readiness_payload)
+    request_payload["readiness_authorization"]["sha256"] = readiness_hash
+    request_hash, _size = _store(fixture.request_path, request_payload)
+
+    with pytest.raises(
+        GateBLoaderError,
+        match="preapproval root-identity projection hash mismatch",
+    ) as caught:
+        load_gate_b_loader_request(
+            fixture.request_path,
+            expected_sha256=request_hash,
+            expected_readiness_authorization_sha256=readiness_hash,
+            expected_readiness_approval_record_sha256=APPROVAL_HASH,
+            expected_readiness_signature_record_sha256=SIGNATURE_HASH,
+        )
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+
+
+def test_loader_preapproval_projection_excludes_anchor_hash_but_full_reference_rejects_it(
+    tmp_path: Path,
+) -> None:
+    fixture = _build_fixture(tmp_path)
+    request_payload = json.loads(fixture.request_path.read_bytes())
+    baseline = build_gate_b_preapproval_root_identity_projection(request_payload["roots"])
+    request_payload["roots"]["ledger_base"]["anchor_sha256"] = "f" * 64
+    changed = build_gate_b_preapproval_root_identity_projection(request_payload["roots"])
+    assert changed.canonical_bytes == baseline.canonical_bytes
+    assert changed.sha256 == baseline.sha256
+    request_hash, _size = _store(fixture.request_path, request_payload)
+
+    with pytest.raises(GateBLoaderError) as caught:
+        load_gate_b_loader_request(
+            fixture.request_path,
+            expected_sha256=request_hash,
+            expected_readiness_authorization_sha256=request_payload["readiness_authorization"][
+                "sha256"
+            ],
+            expected_readiness_approval_record_sha256=APPROVAL_HASH,
+            expected_readiness_signature_record_sha256=SIGNATURE_HASH,
+        )
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+
+
+def test_loader_preapproval_projection_keeps_actual_approval_bound_in_anchor(
+    tmp_path: Path,
+) -> None:
+    fixture = _build_fixture(tmp_path)
+    request_payload = json.loads(fixture.request_path.read_bytes())
+    ledger_ref = request_payload["roots"]["ledger_base"]
+    anchor_path = Path(ledger_ref["absolute_path"]) / str(ledger_ref["anchor_relative_path"])
+    wrong_anchor = {
+        "schema_version": ROOT_ANCHOR_SCHEMA_VERSION,
+        "artifact_type": "gate_b_root_anchor",
+        "root_role": "ledger_base",
+        "anchor_id": "fixture-ledger-base-anchor",
+        "created_at_utc": "2026-07-24T00:00:00Z",
+        "approval_record_sha256": "f" * 64,
+    }
+    wrong_hash, _size = _store(anchor_path, wrong_anchor)
+    baseline = build_gate_b_preapproval_root_identity_projection(request_payload["roots"])
+    ledger_ref["anchor_sha256"] = wrong_hash
+    changed = build_gate_b_preapproval_root_identity_projection(request_payload["roots"])
+    assert changed.canonical_bytes == baseline.canonical_bytes
+    assert changed.sha256 == baseline.sha256
+    request_hash, _size = _store(fixture.request_path, request_payload)
+
+    with pytest.raises(GateBLoaderError) as caught:
+        load_gate_b_loader_request(
+            fixture.request_path,
+            expected_sha256=request_hash,
+            expected_readiness_authorization_sha256=request_payload["readiness_authorization"][
+                "sha256"
+            ],
+            expected_readiness_approval_record_sha256=APPROVAL_HASH,
+            expected_readiness_signature_record_sha256=SIGNATURE_HASH,
+        )
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda root: root.update({"extra": None}),
+        lambda root: root.pop("file_id_hex"),
+        lambda root: root.__setitem__("root_role", "quarantine_base"),
+        lambda root: root.__setitem__("identity_scheme", "wrong"),
+        lambda root: root.__setitem__("volume_id_hex", "f"),
+        lambda root: root.__setitem__("file_id_hex", "f"),
+        lambda root: root.__setitem__("anchor_relative_path", "other.json"),
+        lambda root: root.__setitem__("absolute_path", 1),
+    ],
+)
+def test_loader_preapproval_projection_preserves_full_root_reference_rejection(
+    tmp_path: Path,
+    mutate,
+) -> None:
+    fixture = _build_fixture(tmp_path)
+    request_payload = json.loads(fixture.request_path.read_bytes())
+    mutate(request_payload["roots"]["ledger_base"])
+    request_hash, _size = _store(fixture.request_path, request_payload)
+    with pytest.raises(GateBLoaderError) as caught:
+        load_gate_b_loader_request(
+            fixture.request_path,
+            expected_sha256=request_hash,
+            expected_readiness_authorization_sha256=request_payload["readiness_authorization"][
+                "sha256"
+            ],
+            expected_readiness_approval_record_sha256=APPROVAL_HASH,
+            expected_readiness_signature_record_sha256=SIGNATURE_HASH,
+        )
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+
+
+@pytest.mark.parametrize(
+    ("attack", "message"),
+    [
+        ("duplicate_logical_path", "loader roots must be distinct"),
+        (
+            "duplicate_physical_identity",
+            "loader roots must have distinct physical identities",
+        ),
+        ("nested_root", "loader roots must be non-nested"),
+    ],
+)
+def test_loader_join_directly_rejects_every_cross_role_root_topology_branch(
+    tmp_path: Path,
+    attack: str,
+    message: str,
+) -> None:
+    fixture = _build_fixture(tmp_path)
+    payload = json.loads(fixture.request_path.read_bytes())
+    with ExitStack() as stack:
+        bundle, _artifacts, _roots = _retained_fixture_bundle(fixture, stack)
+        quarantine = bundle.quarantine_base
+        original = (
+            quarantine.reference_path,
+            quarantine.volume_id_hex,
+            quarantine.file_id_hex,
+            quarantine.physical_identity,
+        )
+        ledger_ref = payload["roots"]["ledger_base"]
+        quarantine_ref = payload["roots"]["quarantine_base"]
+        if attack == "duplicate_logical_path":
+            quarantine_ref["absolute_path"] = ledger_ref["absolute_path"]
+            quarantine_ref["volume_id_hex"] = ledger_ref["volume_id_hex"]
+            quarantine_ref["file_id_hex"] = ledger_ref["file_id_hex"]
+            object.__setattr__(quarantine, "reference_path", bundle.ledger_base.reference_path)
+            object.__setattr__(quarantine, "volume_id_hex", bundle.ledger_base.volume_id_hex)
+            object.__setattr__(quarantine, "file_id_hex", bundle.ledger_base.file_id_hex)
+            object.__setattr__(
+                quarantine,
+                "physical_identity",
+                bundle.ledger_base.physical_identity,
+            )
+        elif attack == "duplicate_physical_identity":
+            quarantine_ref["volume_id_hex"] = ledger_ref["volume_id_hex"]
+            quarantine_ref["file_id_hex"] = ledger_ref["file_id_hex"]
+            object.__setattr__(quarantine, "volume_id_hex", bundle.ledger_base.volume_id_hex)
+            object.__setattr__(quarantine, "file_id_hex", bundle.ledger_base.file_id_hex)
+            object.__setattr__(
+                quarantine,
+                "physical_identity",
+                bundle.ledger_base.physical_identity,
+            )
+        else:
+            nested = bundle.ledger_base.reference_path / "nested-quarantine-root"
+            quarantine_ref["absolute_path"] = str(nested)
+            object.__setattr__(quarantine, "reference_path", nested)
+        try:
+            with pytest.raises(GateBLoaderError, match=message):
+                loader_module._join_gate_b_loader_request(
+                    payload,
+                    request_sha256=fixture.request_hash,
+                    request_path=fixture.request_path,
+                    batch=fixture.request.batch,
+                    readiness=fixture.request.readiness,
+                    context=fixture.request.execution_context,
+                    bundle=bundle,
+                )
+        finally:
+            object.__setattr__(quarantine, "reference_path", original[0])
+            object.__setattr__(quarantine, "volume_id_hex", original[1])
+            object.__setattr__(quarantine, "file_id_hex", original[2])
+            object.__setattr__(quarantine, "physical_identity", original[3])
 
 
 @pytest.mark.parametrize(
@@ -2485,3 +2699,421 @@ def test_request_rejects_root_hash_drift_without_default_discovery(
             expected_readiness_approval_record_sha256=APPROVAL_HASH,
             expected_readiness_signature_record_sha256=SIGNATURE_HASH,
         )
+
+
+def _open_retained_artifact_for_fixture(
+    path: Path,
+    *,
+    logical_role: str,
+    stack: ExitStack,
+):
+    parent_identity = _root_identity_payload(path.parent)
+    parent = stack.enter_context(
+        open_gate_b_retained_directory(
+            logical_role=f"{logical_role}.parent",
+            absolute_path=Path(parent_identity["absolute_path"]),
+            expected_volume_id_hex=parent_identity["volume_id_hex"],
+            expected_file_id_hex=parent_identity["file_id_hex"],
+        )
+    )
+    raw = path.read_bytes()
+    return read_gate_b_retained_artifact(
+        parent,
+        logical_role=logical_role,
+        direct_child_name=path.name,
+        expected_sha256=sha256_bytes(raw),
+        expected_size_bytes=len(raw),
+    )
+
+
+def _retained_fixture_bundle(
+    fixture: _Fixture,
+    stack: ExitStack,
+):
+    payload = json.loads(fixture.request_path.read_bytes())
+    artifacts = {
+        "request": _open_retained_artifact_for_fixture(
+            fixture.request_path,
+            logical_role="one_shot.loader_request",
+            stack=stack,
+        ),
+        "batch_manifest": _open_retained_artifact_for_fixture(
+            Path(payload["batch_manifest"]["absolute_path"]),
+            logical_role="one_shot.batch_manifest",
+            stack=stack,
+        ),
+        "readiness_authorization": _open_retained_artifact_for_fixture(
+            Path(payload["readiness_authorization"]["absolute_path"]),
+            logical_role="one_shot.readiness_authorization",
+            stack=stack,
+        ),
+        "execution_context": _open_retained_artifact_for_fixture(
+            Path(payload["execution_context"]["absolute_path"]),
+            logical_role="one_shot.execution_context",
+            stack=stack,
+        ),
+    }
+    roots = {}
+    for name in ("test_root", "ledger_base", "quarantine_base"):
+        reference = payload["roots"][name]
+        roots[name] = stack.enter_context(
+            open_gate_b_retained_directory(
+                logical_role=f"one_shot.{name}",
+                absolute_path=Path(reference["absolute_path"]),
+                expected_volume_id_hex=reference["volume_id_hex"],
+                expected_file_id_hex=reference["file_id_hex"],
+            )
+        )
+    for name, root_name in (
+        ("ledger_root_anchor", "ledger_base"),
+        ("quarantine_root_anchor", "quarantine_base"),
+    ):
+        reference = payload["roots"][root_name]
+        anchor_name = reference["anchor_relative_path"]
+        anchor_path = Path(reference["absolute_path"]) / anchor_name
+        artifacts[name] = read_gate_b_retained_artifact(
+            roots[root_name],
+            logical_role=f"one_shot.{name}",
+            direct_child_name=anchor_name,
+            expected_sha256=reference["anchor_sha256"],
+            expected_size_bytes=len(anchor_path.read_bytes()),
+        )
+    bundle = build_gate_b_retained_loader_bundle(
+        request=artifacts["request"],
+        batch_manifest=artifacts["batch_manifest"],
+        readiness_authorization=artifacts["readiness_authorization"],
+        execution_context=artifacts["execution_context"],
+        ledger_root_anchor=artifacts["ledger_root_anchor"],
+        quarantine_root_anchor=artifacts["quarantine_root_anchor"],
+        test_root=roots["test_root"],
+        ledger_base=roots["ledger_base"],
+        quarantine_base=roots["quarantine_base"],
+    )
+    return bundle, artifacts, roots
+
+
+def test_retained_roles_derive_closed_bundle_slots_and_anchor_parents(
+    tmp_path: Path,
+) -> None:
+    fixture = _build_fixture(tmp_path)
+    with ExitStack() as stack:
+        bundle, artifacts, roots = _retained_fixture_bundle(fixture, stack)
+        assert (
+            bundle.request.bundle_slot_role,
+            bundle.batch_manifest.bundle_slot_role,
+            bundle.readiness_authorization.bundle_slot_role,
+            bundle.execution_context.bundle_slot_role,
+            bundle.ledger_root_anchor.bundle_slot_role,
+            bundle.quarantine_root_anchor.bundle_slot_role,
+        ) == (
+            "request",
+            "batch_manifest",
+            "readiness_authorization",
+            "execution_context",
+            "ledger_root_anchor",
+            "quarantine_root_anchor",
+        )
+        assert (
+            roots["test_root"].bundle_slot_role,
+            roots["ledger_base"].bundle_slot_role,
+            roots["quarantine_base"].bundle_slot_role,
+        ) == ("test_root", "ledger_base", "quarantine_base")
+        assert (
+            artifacts["ledger_root_anchor"].reference_path.parent
+            == roots["ledger_base"].reference_path
+        )
+        with pytest.raises(GateBLoaderError, match="role mismatch"):
+            read_gate_b_retained_artifact(
+                roots["quarantine_base"],
+                logical_role="request.ledger_root_anchor",
+                direct_child_name=".gate-b-root-anchor.json",
+                expected_sha256=artifacts["ledger_root_anchor"].sha256,
+                expected_size_bytes=artifacts["ledger_root_anchor"].size_bytes,
+            )
+
+        output_parent_path = fixture.request_path.parent / "readiness-output-parent"
+        output_parent_path.mkdir()
+        output_identity = _root_identity_payload(output_parent_path)
+        volume_id = output_identity["volume_id_hex"]
+        file_id = output_identity["file_id_hex"]
+        output_parent = stack.enter_context(
+            open_gate_b_retained_directory(
+                logical_role="readiness.output.parent",
+                absolute_path=output_parent_path.resolve(),
+                expected_volume_id_hex=volume_id,
+                expected_file_id_hex=file_id,
+            )
+        )
+        created = create_gate_b_retained_artifact(
+            output_parent,
+            logical_role="readiness.output",
+            direct_child_name="readiness.json",
+            raw=artifacts["readiness_authorization"].raw,
+        )
+        assert created.logical_role == "readiness.output"
+        assert created.bundle_slot_role == "readiness_authorization"
+        with pytest.raises(GateBLoaderError, match="role mismatch"):
+            create_gate_b_retained_artifact(
+                output_parent,
+                logical_role="readiness_authorization",
+                direct_child_name="forbidden.json",
+                raw=b"{}\n",
+            )
+        with pytest.raises(GateBLoaderError, match="argument mismatch"):
+            create_gate_b_retained_artifact(
+                output_parent,
+                logical_role="readiness.output",
+                direct_child_name="forbidden-slot.json",
+                raw=b"{}\n",
+                bundle_slot_role="readiness_authorization",
+            )
+        with pytest.raises(GateBLoaderError, match="role mismatch"):
+            open_gate_b_retained_directory(
+                logical_role="unknown.materializer.parent",
+                absolute_path=output_parent_path.resolve(),
+                expected_volume_id_hex=volume_id,
+                expected_file_id_hex=file_id,
+            )
+
+
+def test_retained_provenance_close_and_public_error_surface_are_closed(
+    tmp_path: Path,
+) -> None:
+    fixture = _build_fixture(tmp_path)
+    with pytest.raises(TypeError):
+        GateBRetainedArtifactSnapshot()
+    with pytest.raises(TypeError):
+        GateBRetainedDirectorySnapshot()
+    with ExitStack() as stack:
+        bundle, artifacts, roots = _retained_fixture_bundle(fixture, stack)
+        ledger_reference = json.loads(fixture.request_path.read_bytes())["roots"]["ledger_base"]
+        duplicate_ledger_root = stack.enter_context(
+            open_gate_b_retained_directory(
+                logical_role="one_shot.ledger_base",
+                absolute_path=Path(ledger_reference["absolute_path"]),
+                expected_volume_id_hex=ledger_reference["volume_id_hex"],
+                expected_file_id_hex=ledger_reference["file_id_hex"],
+            )
+        )
+        with pytest.raises(GateBLoaderError, match="bundle mismatch"):
+            build_gate_b_retained_loader_bundle(
+                request=bundle.request,
+                batch_manifest=bundle.batch_manifest,
+                readiness_authorization=bundle.readiness_authorization,
+                execution_context=bundle.execution_context,
+                ledger_root_anchor=artifacts["ledger_root_anchor"],
+                quarantine_root_anchor=bundle.quarantine_root_anchor,
+                test_root=bundle.test_root,
+                ledger_base=duplicate_ledger_root,
+                quarantine_base=bundle.quarantine_base,
+            )
+
+        compatibility_request = _open_retained_artifact_for_fixture(
+            fixture.request_path,
+            logical_role="compatibility.loader_request",
+            stack=stack,
+        )
+        with pytest.raises(GateBLoaderError, match="bundle mismatch"):
+            build_gate_b_retained_loader_bundle(
+                request=compatibility_request,
+                batch_manifest=bundle.batch_manifest,
+                readiness_authorization=bundle.readiness_authorization,
+                execution_context=bundle.execution_context,
+                ledger_root_anchor=bundle.ledger_root_anchor,
+                quarantine_root_anchor=bundle.quarantine_root_anchor,
+                test_root=bundle.test_root,
+                ledger_base=bundle.ledger_base,
+                quarantine_base=bundle.quarantine_base,
+            )
+        with pytest.raises(GateBLoaderError) as duplicate:
+            build_gate_b_retained_loader_bundle(
+                request=bundle.request,
+                batch_manifest=bundle.request,
+                readiness_authorization=bundle.readiness_authorization,
+                execution_context=bundle.execution_context,
+                ledger_root_anchor=bundle.ledger_root_anchor,
+                quarantine_root_anchor=bundle.quarantine_root_anchor,
+                test_root=bundle.test_root,
+                ledger_base=bundle.ledger_base,
+                quarantine_base=bundle.quarantine_base,
+            )
+        assert type(duplicate.value) is GateBLoaderError
+        assert duplicate.value.__cause__ is None
+        assert duplicate.value.__context__ is None
+
+        object.__setattr__(bundle.request, "raw", b"tampered\n")
+        with pytest.raises(GateBLoaderError) as tampered:
+            load_gate_b_loader_request_from_retained(
+                bundle,
+                expected_sha256=fixture.request_hash,
+                expected_readiness_authorization_sha256=fixture.request.readiness.sha256,
+                expected_readiness_approval_record_sha256=APPROVAL_HASH,
+                expected_readiness_signature_record_sha256=SIGNATURE_HASH,
+            )
+        assert type(tampered.value) is GateBLoaderError
+        assert str(fixture.request_path) not in str(tampered.value)
+        assert tampered.value.__cause__ is None
+        assert tampered.value.__context__ is None
+
+        roots["test_root"].close()
+        roots["test_root"].close()
+        for operation in (
+            roots["test_root"].verify_identity,
+            roots["test_root"].direct_child_names,
+        ):
+            with pytest.raises(GateBLoaderError, match="retained directory is closed"):
+                operation()
+        with pytest.raises(GateBLoaderError, match="retained directory is closed"):
+            read_gate_b_retained_artifact(
+                roots["test_root"],
+                logical_role="request.spec",
+                direct_child_name="closed.json",
+                expected_sha256="a" * 64,
+                expected_size_bytes=1,
+            )
+
+    root_reference = json.loads(fixture.request_path.read_bytes())["roots"]["test_root"]
+    tampered_lifecycle = open_gate_b_retained_directory(
+        logical_role="one_shot.test_root",
+        absolute_path=Path(root_reference["absolute_path"]),
+        expected_volume_id_hex=root_reference["volume_id_hex"],
+        expected_file_id_hex=root_reference["file_id_hex"],
+    )
+    object.__setattr__(tampered_lifecycle, "_closed", True)
+    with pytest.raises(GateBLoaderError, match="provenance mismatch"):
+        tampered_lifecycle.close()
+    assert tampered_lifecycle._directory._closed is True
+
+
+def test_retained_loader_parses_once_verifies_roots_in_order_and_uses_zero_named_io(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _build_fixture(tmp_path)
+    with ExitStack() as stack:
+        bundle, _artifacts, _roots = _retained_fixture_bundle(fixture, stack)
+        parse_count = 0
+        verify_roles: list[str] = []
+        original_parse = loader_module._parse_gate_b_loader_request_envelope
+        original_verify = GateBRetainedDirectorySnapshot.verify_identity
+
+        def counted_parse(*args, **kwargs):
+            nonlocal parse_count
+            parse_count += 1
+            return original_parse(*args, **kwargs)
+
+        def counted_verify(self):
+            verify_roles.append(self.logical_role)
+            return original_verify(self)
+
+        monkeypatch.setattr(
+            loader_module,
+            "_parse_gate_b_loader_request_envelope",
+            counted_parse,
+        )
+        monkeypatch.setattr(
+            GateBRetainedDirectorySnapshot,
+            "verify_identity",
+            counted_verify,
+        )
+        for name in ("read_bytes", "stat", "lstat", "resolve"):
+            monkeypatch.setattr(
+                Path,
+                name,
+                lambda *_args, _name=name, **_kwargs: (_ for _ in ()).throw(
+                    AssertionError(f"named {_name} after retained acquisition")
+                ),
+            )
+        loaded = load_gate_b_loader_request_from_retained(
+            bundle,
+            expected_sha256=fixture.request_hash,
+            expected_readiness_authorization_sha256=fixture.request.readiness.sha256,
+            expected_readiness_approval_record_sha256=APPROVAL_HASH,
+            expected_readiness_signature_record_sha256=SIGNATURE_HASH,
+        )
+        assert parse_count == 1
+        assert verify_roles == [
+            "one_shot.test_root",
+            "one_shot.ledger_base",
+            "one_shot.quarantine_base",
+        ]
+        assert loaded.request_sha256 == fixture.request.request_sha256
+        assert loaded.batch == fixture.request.batch
+        assert loaded.readiness == fixture.request.readiness
+        assert loaded.execution_context == fixture.request.execution_context
+        assert loaded._path == bundle.request.reference_path
+
+
+def test_top_loader_preserves_four_path_forms_and_strict_embedded_boundaries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _build_fixture(tmp_path)
+    expected_path = fixture.request_path.resolve()
+    bad_payload = json.loads(fixture.request_path.read_bytes())
+    bad_payload["batch_manifest"]["absolute_path"] = "relative-batch.json"
+    bad_path = fixture.request_path.parent / "embedded-relative-request.json"
+    bad_hash, _bad_size = _store(bad_path, bad_payload)
+    original_open = loader_module.open_gate_b_retained_directory
+    original_read = loader_module.GateBPinnedDirectory.read_regular
+    opened_roles: list[str] = []
+    read_names: list[str] = []
+
+    def counted_open(**kwargs):
+        opened_roles.append(kwargs["logical_role"])
+        return original_open(**kwargs)
+
+    def counted_read(self, direct_child_name, **kwargs):
+        read_names.append(direct_child_name)
+        return original_read(self, direct_child_name, **kwargs)
+
+    monkeypatch.setattr(loader_module, "open_gate_b_retained_directory", counted_open)
+    monkeypatch.setattr(
+        loader_module.GateBPinnedDirectory,
+        "read_regular",
+        counted_read,
+    )
+    monkeypatch.chdir(fixture.request_path.parent)
+    arguments = {
+        "expected_sha256": fixture.request_hash,
+        "expected_readiness_authorization_sha256": fixture.request.readiness.sha256,
+        "expected_readiness_approval_record_sha256": APPROVAL_HASH,
+        "expected_readiness_signature_record_sha256": SIGNATURE_HASH,
+    }
+    loaded = (
+        load_gate_b_loader_request(fixture.request_path.name, **arguments),
+        load_gate_b_loader_request(Path(fixture.request_path.name), **arguments),
+        load_gate_b_loader_request(str(expected_path), **arguments),
+        load_gate_b_loader_request(expected_path, **arguments),
+    )
+    assert all(item._path == expected_path for item in loaded)
+    assert all(item == loaded[0] for item in loaded[1:])
+    assert all(item.request_sha256 == fixture.request_hash for item in loaded)
+    assert opened_roles.count("compatibility.ledger_base") == 4
+    assert opened_roles.count("compatibility.quarantine_base") == 4
+    assert "compatibility.ledger_root_anchor.parent" not in opened_roles
+    assert "compatibility.quarantine_root_anchor.parent" not in opened_roles
+    assert len(read_names) == 4 * 6
+
+    with pytest.raises(GateBLoaderError):
+        load_gate_b_loader_request(
+            bad_path,
+            expected_sha256=bad_hash,
+            expected_readiness_authorization_sha256=fixture.request.readiness.sha256,
+            expected_readiness_approval_record_sha256=APPROVAL_HASH,
+            expected_readiness_signature_record_sha256=SIGNATURE_HASH,
+        )
+    assert loader_module._absolute(str(expected_path), "fixture") == expected_path
+    for embedded in (
+        fixture.request_path.name,
+        Path(fixture.request_path.name),
+    ):
+        with pytest.raises(GateBLoaderError):
+            loader_module._absolute(embedded, "fixture")
+
+
+def test_retained_provenance_uses_no_module_global_object_registry() -> None:
+    names = vars(loader_module)
+    assert "_RETAINED_ARTIFACT_REGISTRY" not in names
+    assert "_RETAINED_DIRECTORY_REGISTRY" not in names
+    assert "_RETAINED_BUNDLE_REGISTRY" not in names
