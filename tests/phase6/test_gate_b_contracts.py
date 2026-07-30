@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import copy
+import itertools
 import os
-from pathlib import Path
-from types import SimpleNamespace
+from pathlib import Path, PurePath
+from types import MappingProxyType, SimpleNamespace
 
+import _pytest.tmpdir as pytest_tmpdir
 import pytest
 
 import phase6.gate_b_contracts as contracts_module
@@ -21,27 +23,45 @@ from phase6.gate_b_contracts import (
     HUMAN_SIGNATURE_RECORD_SCHEMA_VERSION,
     LOADER_REQUEST_SCHEMA_VERSION,
     OPPONENT_PAYLOAD_INDEX_SCHEMA_VERSION,
+    PREAPPROVAL_ROOT_IDENTITY_PROJECTION_SCHEMA_VERSION,
+    PREAPPROVAL_ROOT_ROLE_ORDER,
     QUARANTINE_MANIFEST_SCHEMA_VERSION,
     READINESS_AUTHORIZATION_SCHEMA_VERSION,
     RELEASE_AUTHORIZATION_SCHEMA_VERSION,
     RETRY_AUTHORIZATION_SCHEMA_VERSION,
+    ROOT_ANCHOR_POLICY_VERSION,
     ROOT_ANCHOR_SCHEMA_VERSION,
     GateBContractError,
     GateBHumanApprovalRecord,
     GateBHumanSignatureRecord,
+    GateBPreApprovalRootIdentityProjection,
     _canonical_reason_detail_sha256,
     _required_posix_nofollow,
     _windows_open_contract_descriptor,
+    build_gate_b_preapproval_root_identity_projection,
     load_gate_b_batch_manifest,
+    load_gate_b_batch_manifest_bytes,
     load_gate_b_execution_context,
+    load_gate_b_execution_context_bytes,
     load_gate_b_human_approval_record_bytes,
     load_gate_b_human_signature_record_bytes,
     load_gate_b_readiness_authorization,
+    load_gate_b_readiness_authorization_bytes,
     load_gate_b_release_authorization,
     load_gate_b_retry_authorization,
     load_gate_b_root_anchor,
+    load_gate_b_root_anchor_bytes,
     validate_gate_b_readiness_human_trust_chain,
 )
+
+if os.name == "nt":
+
+    def _windows_short_tmp_path(request, factory):
+        case_id = sha256_bytes(request.node.nodeid.encode("utf-8"))[:6]
+        return factory.mktemp(case_id, numbered=True)
+
+    pytest_tmpdir._mk_tmp = _windows_short_tmp_path
+
 
 HASH_A = "a" * 64
 HASH_B = "b" * 64
@@ -256,6 +276,341 @@ def readiness_payload(test_batch_hash: str, context_hash: str, roots_hash: str) 
             "quarantine_base/<test_batch_hash>/attempt-<ordinal:06d>"
         ),
     }
+
+
+def _preapproval_root_identity_projection_roots() -> dict[str, dict[str, object]]:
+    if os.name == "nt":
+        paths = {
+            "ledger_base": r"C:\projection\ledger",
+            "quarantine_base": r"C:\projection\quarantine",
+            "test_root": r"C:\projection\test",
+        }
+        identity_scheme = "windows-volume-file-id-v1"
+    else:
+        paths = {
+            "ledger_base": "/projection/ledger",
+            "quarantine_base": "/projection/quarantine",
+            "test_root": "/projection/test",
+        }
+        identity_scheme = "posix-device-inode-v1"
+    identities = {
+        "ledger_base": ("1", "2"),
+        "quarantine_base": ("3", "4"),
+        "test_root": ("5", "6"),
+    }
+    return {
+        role: {
+            "absolute_path": paths[role],
+            "anchor_relative_path": (None if role == "test_root" else ".gate-b-root-anchor.json"),
+            "anchor_sha256": None,
+            "file_id_hex": identities[role][1],
+            "identity_scheme": identity_scheme,
+            "root_role": role,
+            "volume_id_hex": identities[role][0],
+        }
+        for role in PREAPPROVAL_ROOT_ROLE_ORDER
+    }
+
+
+def _assert_preapproval_root_identity_projection_invariants(
+    projection: GateBPreApprovalRootIdentityProjection,
+) -> None:
+    assert projection.canonical_bytes == canonical_json_bytes(
+        {
+            "anchor_policy_version": projection.payload["anchor_policy_version"],
+            "roots": [dict(root) for root in projection.payload["roots"]],
+            "schema_version": projection.payload["schema_version"],
+        }
+    )
+    assert projection.sha256 == sha256_bytes(projection.canonical_bytes)
+
+
+def test_preapproval_root_identity_projection_exact_golden_vector_and_order() -> None:
+    roots = _preapproval_root_identity_projection_roots()
+    projection = build_gate_b_preapproval_root_identity_projection(roots)
+    repeated = build_gate_b_preapproval_root_identity_projection(copy.deepcopy(roots))
+    if os.name == "nt":
+        expected = (
+            b'{"anchor_policy_version":"phase6-gate-b-root-anchor-policy-v1",'
+            b'"roots":[{"absolute_path":"C:\\\\projection\\\\ledger",'
+            b'"anchor_relative_path":".gate-b-root-anchor.json","file_id_hex":"2",'
+            b'"identity_scheme":"windows-volume-file-id-v1","root_role":"ledger_base",'
+            b'"volume_id_hex":"1"},{"absolute_path":"C:\\\\projection\\\\quarantine",'
+            b'"anchor_relative_path":".gate-b-root-anchor.json","file_id_hex":"4",'
+            b'"identity_scheme":"windows-volume-file-id-v1","root_role":"quarantine_base",'
+            b'"volume_id_hex":"3"},{"absolute_path":"C:\\\\projection\\\\test",'
+            b'"anchor_relative_path":null,"file_id_hex":"6",'
+            b'"identity_scheme":"windows-volume-file-id-v1","root_role":"test_root",'
+            b'"volume_id_hex":"5"}],"schema_version":'
+            b'"phase6-gate-b-preapproval-root-identity-projection-v1"}\n'
+        )
+        expected_hash = "6f57fe6342c1b63d7d369206c170d60030cfedceb1fb8de6f2637614a367a036"
+    else:
+        expected = (
+            b'{"anchor_policy_version":"phase6-gate-b-root-anchor-policy-v1",'
+            b'"roots":[{"absolute_path":"/projection/ledger",'
+            b'"anchor_relative_path":".gate-b-root-anchor.json","file_id_hex":"2",'
+            b'"identity_scheme":"posix-device-inode-v1","root_role":"ledger_base",'
+            b'"volume_id_hex":"1"},{"absolute_path":"/projection/quarantine",'
+            b'"anchor_relative_path":".gate-b-root-anchor.json","file_id_hex":"4",'
+            b'"identity_scheme":"posix-device-inode-v1","root_role":"quarantine_base",'
+            b'"volume_id_hex":"3"},{"absolute_path":"/projection/test",'
+            b'"anchor_relative_path":null,"file_id_hex":"6",'
+            b'"identity_scheme":"posix-device-inode-v1","root_role":"test_root",'
+            b'"volume_id_hex":"5"}],"schema_version":'
+            b'"phase6-gate-b-preapproval-root-identity-projection-v1"}\n'
+        )
+        expected_hash = "f133adc2596cb7aa7531d16876c7985f2f6ecb34e8266314067793e27c919134"
+    assert projection.canonical_bytes == expected
+    assert projection.sha256 == expected_hash
+    assert repeated.canonical_bytes == expected
+    assert repeated.sha256 == expected_hash
+    assert projection.payload["schema_version"] == (
+        PREAPPROVAL_ROOT_IDENTITY_PROJECTION_SCHEMA_VERSION
+    )
+    assert projection.payload["anchor_policy_version"] == ROOT_ANCHOR_POLICY_VERSION
+    assert tuple(root["root_role"] for root in projection.payload["roots"]) == (
+        PREAPPROVAL_ROOT_ROLE_ORDER
+    )
+    _assert_preapproval_root_identity_projection_invariants(projection)
+
+
+def test_preapproval_root_identity_projection_is_order_and_anchor_hash_independent() -> None:
+    roots = _preapproval_root_identity_projection_roots()
+    baseline = build_gate_b_preapproval_root_identity_projection(roots)
+    inner_orders = (
+        tuple(roots["ledger_base"]),
+        tuple(reversed(tuple(roots["ledger_base"]))),
+    )
+    for roles in itertools.permutations(PREAPPROVAL_ROOT_ROLE_ORDER):
+        for inner_order in inner_orders:
+            reordered = {
+                role: {
+                    key: roots[role][key]
+                    for key in (
+                        inner_order if role == "ledger_base" else reversed(tuple(roots[role]))
+                    )
+                }
+                for role in roles
+            }
+            candidate = build_gate_b_preapproval_root_identity_projection(reordered)
+            assert candidate.canonical_bytes == baseline.canonical_bytes
+            assert candidate.sha256 == baseline.sha256
+    for first, second in ((None, "a" * 64), ("b" * 64, "c" * 64)):
+        changed = copy.deepcopy(roots)
+        changed["ledger_base"]["anchor_sha256"] = first
+        changed["quarantine_base"]["anchor_sha256"] = second
+        candidate = build_gate_b_preapproval_root_identity_projection(changed)
+        assert candidate.canonical_bytes == baseline.canonical_bytes
+        assert candidate.sha256 == baseline.sha256
+
+
+def test_preapproval_root_identity_projection_is_sensitive_to_every_variable_included_field() -> (
+    None
+):
+    roots = _preapproval_root_identity_projection_roots()
+    baseline = build_gate_b_preapproval_root_identity_projection(roots)
+    for index, role in enumerate(PREAPPROVAL_ROOT_ROLE_ORDER):
+        for field, replacement in (
+            (
+                "absolute_path",
+                str(Path(str(roots[role]["absolute_path"])).with_name(f"{role}-alternate")),
+            ),
+            ("volume_id_hex", format(14 + index * 2, "x")),
+            ("file_id_hex", format(15 + index * 2, "x")),
+        ):
+            changed = copy.deepcopy(roots)
+            changed[role][field] = replacement
+            candidate = build_gate_b_preapproval_root_identity_projection(changed)
+            assert candidate.canonical_bytes != baseline.canonical_bytes
+            assert candidate.sha256 != baseline.sha256
+            assert candidate.payload["roots"][index][field] == replacement
+
+
+@pytest.mark.parametrize("role", PREAPPROVAL_ROOT_ROLE_ORDER)
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("root_role", "wrong_role"),
+        ("identity_scheme", "wrong-scheme"),
+        ("anchor_relative_path", "wrong-anchor.json"),
+    ],
+)
+def test_preapproval_root_identity_projection_rejects_changes_to_fixed_included_fields(
+    role: str,
+    field: str,
+    replacement: str,
+) -> None:
+    roots = _preapproval_root_identity_projection_roots()
+    roots[role][field] = replacement
+    with pytest.raises(GateBContractError):
+        build_gate_b_preapproval_root_identity_projection(roots)
+
+
+def test_preapproval_root_identity_projection_is_copy_owned_and_recursively_immutable() -> None:
+    roots = _preapproval_root_identity_projection_roots()
+    projection = build_gate_b_preapproval_root_identity_projection(roots)
+    frozen_bytes = projection.canonical_bytes
+    frozen_hash = projection.sha256
+    assert isinstance(projection.payload, MappingProxyType)
+    assert isinstance(projection.payload["roots"], tuple)
+    assert all(isinstance(root, MappingProxyType) for root in projection.payload["roots"])
+    with pytest.raises(TypeError):
+        GateBPreApprovalRootIdentityProjection()
+    mutation_attempts = (
+        lambda: projection.payload.__setitem__("schema_version", "mutated"),
+        lambda: projection.payload["roots"][0].__setitem__("file_id_hex", "f"),
+        lambda: projection.payload["roots"].__setitem__(0, {}),
+    )
+    for mutate in mutation_attempts:
+        with pytest.raises((AttributeError, TypeError)):
+            mutate()
+        assert projection.canonical_bytes == frozen_bytes
+        assert projection.sha256 == frozen_hash
+        _assert_preapproval_root_identity_projection_invariants(projection)
+    roots["ledger_base"]["absolute_path"] = roots["test_root"]["absolute_path"]
+    roots["ledger_base"]["file_id_hex"] = "f"
+    roots["test_root"]["anchor_sha256"] = "e" * 64
+    roots["new_role"] = {}
+    assert projection.canonical_bytes == frozen_bytes
+    assert projection.sha256 == frozen_hash
+    _assert_preapproval_root_identity_projection_invariants(projection)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda roots: roots.pop("test_root"),
+        lambda roots: roots.update({"extra": {}}),
+        lambda roots: roots["ledger_base"].pop("file_id_hex"),
+        lambda roots: roots["ledger_base"].update({"extra": None}),
+        lambda roots: roots.__setitem__("ledger_base", []),
+        lambda roots: roots["ledger_base"].__setitem__("root_role", True),
+        lambda roots: roots["ledger_base"].__setitem__("root_role", "quarantine_base"),
+        lambda roots: roots["ledger_base"].__setitem__("absolute_path", True),
+        lambda roots: roots["ledger_base"].__setitem__("absolute_path", "relative/root"),
+        lambda roots: roots["ledger_base"].__setitem__(
+            "absolute_path",
+            (r"C:\projection\..\ledger" if os.name == "nt" else "/projection/../ledger"),
+        ),
+        lambda roots: roots["ledger_base"].__setitem__(
+            "absolute_path",
+            roots["ledger_base"]["absolute_path"] + "\u200e",
+        ),
+        lambda roots: roots["ledger_base"].__setitem__("identity_scheme", "POSIX"),
+        lambda roots: roots["ledger_base"].__setitem__("volume_id_hex", ""),
+        lambda roots: roots["ledger_base"].__setitem__("volume_id_hex", "01"),
+        lambda roots: roots["ledger_base"].__setitem__("file_id_hex", "A"),
+        lambda roots: roots["ledger_base"].__setitem__("file_id_hex", 1),
+        lambda roots: roots["ledger_base"].__setitem__("anchor_relative_path", None),
+        lambda roots: roots["ledger_base"].__setitem__("anchor_relative_path", True),
+        lambda roots: roots["ledger_base"].__setitem__("anchor_sha256", "A" * 64),
+        lambda roots: roots["ledger_base"].__setitem__("anchor_sha256", 1),
+        lambda roots: roots["test_root"].__setitem__(
+            "anchor_relative_path", ".gate-b-root-anchor.json"
+        ),
+        lambda roots: roots["test_root"].__setitem__("anchor_sha256", "a" * 64),
+    ],
+)
+def test_preapproval_root_identity_projection_rejects_noncanonical_inputs(mutate) -> None:
+    roots = _preapproval_root_identity_projection_roots()
+    mutate(roots)
+    with pytest.raises(GateBContractError):
+        build_gate_b_preapproval_root_identity_projection(roots)
+
+
+def test_preapproval_root_identity_projection_rejects_container_subclasses_and_has_no_io(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    roots = _preapproval_root_identity_projection_roots()
+
+    class DictSubclass(dict):
+        pass
+
+    class StrSubclass(str):
+        pass
+
+    with pytest.raises(GateBContractError):
+        build_gate_b_preapproval_root_identity_projection(DictSubclass(roots))
+    nested = copy.deepcopy(roots)
+    nested["ledger_base"] = DictSubclass(nested["ledger_base"])
+    with pytest.raises(GateBContractError):
+        build_gate_b_preapproval_root_identity_projection(nested)
+    outer_key = copy.deepcopy(roots)
+    outer_key[StrSubclass("ledger_base")] = outer_key.pop("ledger_base")
+    with pytest.raises(GateBContractError):
+        build_gate_b_preapproval_root_identity_projection(outer_key)
+    inner_key = copy.deepcopy(roots)
+    inner_key["ledger_base"][StrSubclass("file_id_hex")] = inner_key["ledger_base"].pop(
+        "file_id_hex"
+    )
+    with pytest.raises(GateBContractError):
+        build_gate_b_preapproval_root_identity_projection(inner_key)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("pure projection performed filesystem I/O")
+
+    monkeypatch.setattr(Path, "open", forbidden)
+    monkeypatch.setattr(Path, "read_bytes", forbidden)
+    monkeypatch.setattr(Path, "write_bytes", forbidden)
+    projection = build_gate_b_preapproval_root_identity_projection(roots)
+    _assert_preapproval_root_identity_projection_invariants(projection)
+
+
+def test_preapproval_root_identity_projection_rejects_bytes_and_str_subclass_field_values() -> None:
+    class StrSubclass(str):
+        pass
+
+    roots = _preapproval_root_identity_projection_roots()
+    field_values = {
+        "root_role": roots["ledger_base"]["root_role"],
+        "absolute_path": roots["ledger_base"]["absolute_path"],
+        "identity_scheme": roots["ledger_base"]["identity_scheme"],
+        "volume_id_hex": roots["ledger_base"]["volume_id_hex"],
+        "file_id_hex": roots["ledger_base"]["file_id_hex"],
+        "anchor_relative_path": roots["ledger_base"]["anchor_relative_path"],
+        "anchor_sha256": "a" * 64,
+    }
+    for field, value in field_values.items():
+        assert type(value) is str
+        for replacement in (value.encode("ascii"), StrSubclass(value)):
+            changed = copy.deepcopy(roots)
+            changed["ledger_base"][field] = replacement
+            with pytest.raises(GateBContractError):
+                build_gate_b_preapproval_root_identity_projection(changed)
+
+
+def test_preapproval_root_identity_projection_v2_trust_chain_and_v1_mixed_rejection() -> None:
+    approval, signature = _strict_human_records()
+    readiness = readiness_payload(HASH_A, HASH_B, HASH_C)
+    readiness["approval_record_sha256"] = approval.sha256
+    readiness["signature_record_sha256"] = signature.sha256
+    assert validate_gate_b_readiness_human_trust_chain(approval, signature, readiness) is None
+    assert approval.payload["approved_roots_sha256"] == HASH_C
+    assert signature.payload["approved_roots_sha256"] == HASH_C
+    assert readiness["approved_roots_sha256"] == HASH_C
+
+    v1_approval = human_approval_payload()
+    v1_approval["schema_version"] = "phase6-gate-b-human-approval-record-v1"
+    v1_approval_raw = canonical_json_bytes(v1_approval)
+    with pytest.raises(GateBContractError):
+        load_gate_b_human_approval_record_bytes(
+            v1_approval_raw,
+            expected_sha256=sha256_bytes(v1_approval_raw),
+        )
+    v1_signature = human_signature_payload(approval.sha256)
+    v1_signature["schema_version"] = "phase6-gate-b-human-signature-record-v1"
+    v1_signature_raw = canonical_json_bytes(v1_signature)
+    with pytest.raises(GateBContractError):
+        load_gate_b_human_signature_record_bytes(
+            v1_signature_raw,
+            expected_sha256=sha256_bytes(v1_signature_raw),
+            approval=approval,
+        )
+    v1_readiness = dict(readiness)
+    v1_readiness["schema_version"] = "phase6-gate-b-readiness-authorization-v1"
+    with pytest.raises(GateBContractError):
+        validate_gate_b_readiness_human_trust_chain(approval, signature, v1_readiness)
 
 
 def test_all_fourteen_schema_identities_are_distinct() -> None:
@@ -1139,3 +1494,274 @@ def test_human_trust_chain_rejects_every_retained_property_mutation(
             signature,
             readiness,
         )
+
+
+def _retained_bytes_cases(tmp_path: Path) -> list[dict[str, object]]:
+    batch_path = _fixture_path(tmp_path, "retained-batch.json").resolve()
+    batch_hash = _write(batch_path, batch_payload())
+
+    readiness_path = _fixture_path(tmp_path, "retained-readiness.json").resolve()
+    readiness_hash = _write(readiness_path, readiness_payload(HASH_A, HASH_B, HASH_C))
+
+    anchor_path = _fixture_path(tmp_path, "retained-anchor.json").resolve()
+    anchor_hash = _write(
+        anchor_path,
+        {
+            "schema_version": ROOT_ANCHOR_SCHEMA_VERSION,
+            "artifact_type": "gate_b_root_anchor",
+            "root_role": "ledger_base",
+            "anchor_id": "fixture-retained-anchor",
+            "created_at_utc": "2026-07-24T00:00:00Z",
+            "approval_record_sha256": APPROVAL_HASH,
+        },
+    )
+
+    lock_path = _fixture_path(tmp_path, "retained-dependency-lock.json").resolve()
+    lock_path.write_bytes(b"fixture\n")
+    repository_root = tmp_path.resolve()
+    metadata = repository_root.stat()
+    context_path = _fixture_path(tmp_path, "retained-context.json").resolve()
+    context_hash = _write(
+        context_path,
+        {
+            "schema_version": EXECUTION_CONTEXT_SCHEMA_VERSION,
+            "artifact_type": "gate_b_execution_context",
+            "active_modules": [
+                {
+                    "module_name": module_name,
+                    "repository_relative_path": relative_path,
+                    "sha256": HASH_A,
+                }
+                for module_name, relative_path in ACTIVE_MODULE_PATHS
+            ],
+            "created_at_utc": "2026-07-24T00:00:00Z",
+            "repository_root": {
+                "absolute_path": str(repository_root),
+                "file_id_hex": format(metadata.st_ino, "x"),
+                "identity_scheme": (
+                    "windows-volume-file-id-v1" if os.name == "nt" else "posix-device-inode-v1"
+                ),
+                "volume_id_hex": format(metadata.st_dev, "x"),
+            },
+            "expected_implementation_commit": COMMIT,
+            "runtime_fingerprint": {
+                "python_implementation": "CPython",
+                "python_version": "3.12.0",
+                "python_compiler": "fixture-compiler",
+                "platform": "fixture-platform",
+                "system": "fixture-os",
+                "release": "fixture-release",
+                "version": "fixture-version",
+                "machine": "fixture-machine",
+            },
+            "dependency_lock": {
+                "absolute_path": str(lock_path),
+                "sha256": sha256_bytes(lock_path.read_bytes()),
+                "size_bytes": len(lock_path.read_bytes()),
+            },
+        },
+    )
+
+    return [
+        {
+            "name": "batch",
+            "path": batch_path,
+            "raw": batch_path.read_bytes(),
+            "hash": batch_hash,
+            "path_loader": lambda: load_gate_b_batch_manifest(
+                batch_path,
+                expected_sha256=batch_hash,
+            ),
+            "bytes_loader": lambda raw, reference_path, expected=batch_hash: (
+                load_gate_b_batch_manifest_bytes(
+                    raw,
+                    expected_sha256=expected,
+                    reference_path=reference_path,
+                )
+            ),
+        },
+        {
+            "name": "readiness",
+            "path": readiness_path,
+            "raw": readiness_path.read_bytes(),
+            "hash": readiness_hash,
+            "path_loader": lambda: load_gate_b_readiness_authorization(
+                readiness_path,
+                expected_sha256=readiness_hash,
+                expected_approval_record_sha256=APPROVAL_HASH,
+                expected_signature_record_sha256=SIGNATURE_HASH,
+            ),
+            "bytes_loader": lambda raw, reference_path, expected=readiness_hash: (
+                load_gate_b_readiness_authorization_bytes(
+                    raw,
+                    expected_sha256=expected,
+                    expected_approval_record_sha256=APPROVAL_HASH,
+                    expected_signature_record_sha256=SIGNATURE_HASH,
+                    reference_path=reference_path,
+                )
+            ),
+        },
+        {
+            "name": "root_anchor",
+            "path": anchor_path,
+            "raw": anchor_path.read_bytes(),
+            "hash": anchor_hash,
+            "path_loader": lambda: load_gate_b_root_anchor(
+                anchor_path,
+                expected_sha256=anchor_hash,
+                expected_root_role="ledger_base",
+                expected_approval_record_sha256=APPROVAL_HASH,
+            ),
+            "bytes_loader": lambda raw, reference_path, expected=anchor_hash: (
+                load_gate_b_root_anchor_bytes(
+                    raw,
+                    expected_sha256=expected,
+                    expected_root_role="ledger_base",
+                    expected_approval_record_sha256=APPROVAL_HASH,
+                    reference_path=reference_path,
+                )
+            ),
+        },
+        {
+            "name": "execution_context",
+            "path": context_path,
+            "raw": context_path.read_bytes(),
+            "hash": context_hash,
+            "path_loader": lambda: load_gate_b_execution_context(
+                context_path,
+                expected_sha256=context_hash,
+            ),
+            "bytes_loader": lambda raw, reference_path, expected=context_hash: (
+                load_gate_b_execution_context_bytes(
+                    raw,
+                    expected_sha256=expected,
+                    reference_path=reference_path,
+                )
+            ),
+        },
+    ]
+
+
+def test_retained_bytes_entries_accept_exact_path_type_and_match_path_wrappers(
+    tmp_path: Path,
+) -> None:
+    for case in _retained_bytes_cases(tmp_path):
+        path = case["path"]
+        raw = case["raw"]
+        path_loaded = case["path_loader"]()
+        retained_loaded = case["bytes_loader"](raw, path)
+        assert type(path) is type(Path())
+        assert retained_loaded == path_loaded
+        assert retained_loaded.sha256 == path_loaded.sha256
+        assert retained_loaded.payload == path_loaded.payload
+
+
+def test_every_retained_bytes_entry_rejects_nonexact_inputs_and_bad_contracts(
+    tmp_path: Path,
+) -> None:
+    class BytesSubclass(bytes):
+        pass
+
+    class ConcretePathSubclass(type(Path())):
+        pass
+
+    for case in _retained_bytes_cases(tmp_path):
+        path = case["path"]
+        raw = case["raw"]
+        loader = case["bytes_loader"]
+        invalid_paths = (
+            str(path),
+            PurePath(path),
+            ConcretePathSubclass(str(path)),
+            Path("relative.json"),
+            Path(path.anchor) / "fixture" / ".." / "retained.json",
+            path.with_name("control\u200e.json"),
+        )
+        for invalid_path in invalid_paths:
+            with pytest.raises(GateBContractError):
+                loader(raw, invalid_path)
+        for invalid_raw in (
+            BytesSubclass(raw),
+            bytearray(raw),
+            memoryview(raw),
+        ):
+            with pytest.raises(GateBContractError):
+                loader(invalid_raw, path)
+        with pytest.raises(GateBContractError):
+            loader(raw, path, expected="f" * 64)
+        with pytest.raises(GateBContractError):
+            loader(b"{}\n", path, expected=sha256_bytes(b"{}\n"))
+
+
+def test_every_retained_bytes_entry_performs_zero_filesystem_io(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cases = _retained_bytes_cases(tmp_path)
+    expected = [case["path_loader"]() for case in cases]
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("retained bytes loader performed filesystem I/O")
+
+    retained = []
+    with monkeypatch.context() as guard:
+        for name in (
+            "resolve",
+            "absolute",
+            "stat",
+            "lstat",
+            "open",
+            "read_bytes",
+            "iterdir",
+        ):
+            guard.setattr(Path, name, forbidden)
+        for name in ("lstat", "stat", "open", "read", "listdir", "scandir"):
+            guard.setattr(contracts_module.os, name, forbidden)
+        for case in cases:
+            retained.append(case["bytes_loader"](case["raw"], case["path"]))
+
+    assert retained == expected
+
+
+def test_retained_bytes_trust_mismatch_matrix_is_exact_base_and_sanitized(
+    tmp_path: Path,
+) -> None:
+    cases = {case["name"]: case for case in _retained_bytes_cases(tmp_path)}
+    readiness = cases["readiness"]
+    anchor = cases["root_anchor"]
+    calls = (
+        lambda: load_gate_b_readiness_authorization_bytes(
+            readiness["raw"],
+            expected_sha256=readiness["hash"],
+            expected_approval_record_sha256="f" * 64,
+            expected_signature_record_sha256=SIGNATURE_HASH,
+            reference_path=readiness["path"],
+        ),
+        lambda: load_gate_b_readiness_authorization_bytes(
+            readiness["raw"],
+            expected_sha256=readiness["hash"],
+            expected_approval_record_sha256=APPROVAL_HASH,
+            expected_signature_record_sha256="f" * 64,
+            reference_path=readiness["path"],
+        ),
+        lambda: load_gate_b_root_anchor_bytes(
+            anchor["raw"],
+            expected_sha256=anchor["hash"],
+            expected_root_role="quarantine_base",
+            expected_approval_record_sha256=APPROVAL_HASH,
+            reference_path=anchor["path"],
+        ),
+        lambda: load_gate_b_root_anchor_bytes(
+            anchor["raw"],
+            expected_sha256=anchor["hash"],
+            expected_root_role="ledger_base",
+            expected_approval_record_sha256="f" * 64,
+            reference_path=anchor["path"],
+        ),
+    )
+    for call in calls:
+        with pytest.raises(GateBContractError) as rejected:
+            call()
+        assert type(rejected.value) is GateBContractError
+        assert rejected.value.__cause__ is None
+        assert rejected.value.__context__ is None

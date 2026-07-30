@@ -20,7 +20,9 @@ import struct
 import subprocess
 import sys
 import sysconfig
+import unicodedata
 from collections.abc import Mapping
+from contextlib import ExitStack, suppress
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import wraps
@@ -40,16 +42,19 @@ from phase6.gate_b_contracts import (
     GateBBatchManifest,
     GateBExecutionContext,
     GateBReadinessAuthorization,
-    load_gate_b_batch_manifest,
-    load_gate_b_execution_context,
-    load_gate_b_readiness_authorization,
-    load_gate_b_root_anchor,
+    build_gate_b_preapproval_root_identity_projection,
+    load_gate_b_batch_manifest_bytes,
+    load_gate_b_execution_context_bytes,
+    load_gate_b_readiness_authorization_bytes,
+    load_gate_b_root_anchor_bytes,
 )
 from phase6.gate_b_ledger import (
     GateBAttemptReservation,
     GateBLedgerError,
     GateBLedgerRecord,
     GateBLedgerStore,
+    GateBPinnedArtifact,
+    GateBPinnedDirectory,
     GateBQuarantine,
     mark_gate_b_failed_closed,
     seal_gate_b_attempt,
@@ -70,6 +75,138 @@ _ROOT_REF_FIELDS = {
     "root_role",
     "volume_id_hex",
 }
+_RETAINED_MESSAGES = {
+    "retained acquisition argument mismatch",
+    "retained acquisition role mismatch",
+    "retained directory acquisition failed closed",
+    "retained artifact acquisition failed closed",
+    "retained artifact creation failed closed",
+    "retained provenance mismatch",
+    "retained directory is closed",
+    "retained directory close failed closed",
+    "retained loader bundle mismatch",
+    "retained loader request failed closed",
+}
+_RETAINED_TOKEN = object()
+_RETAINED_ARTIFACT_SLOTS: Mapping[str, str | None] = MappingProxyType(
+    {
+        "readiness.spec": None,
+        "readiness.approval_record": None,
+        "readiness.signature_record": None,
+        "readiness.output": "readiness_authorization",
+        "request.spec": None,
+        "request.batch_manifest": "batch_manifest",
+        "request.readiness_authorization": "readiness_authorization",
+        "request.human_approval_record": None,
+        "request.human_signature_record": None,
+        "request.execution_context": "execution_context",
+        "request.ledger_root_anchor": "ledger_root_anchor",
+        "request.quarantine_root_anchor": "quarantine_root_anchor",
+        "request.output": "request",
+        "one_shot.spec": None,
+        "one_shot.loader_request": "request",
+        "one_shot.batch_manifest": "batch_manifest",
+        "one_shot.readiness_authorization": "readiness_authorization",
+        "one_shot.human_approval_record": None,
+        "one_shot.human_signature_record": None,
+        "one_shot.execution_context": "execution_context",
+        "one_shot.calibration_root_manifest": None,
+        "one_shot.ledger_root_anchor": "ledger_root_anchor",
+        "one_shot.quarantine_root_anchor": "quarantine_root_anchor",
+        "compatibility.loader_request": "request",
+        "compatibility.batch_manifest": "batch_manifest",
+        "compatibility.readiness_authorization": "readiness_authorization",
+        "compatibility.execution_context": "execution_context",
+        "compatibility.ledger_root_anchor": "ledger_root_anchor",
+        "compatibility.quarantine_root_anchor": "quarantine_root_anchor",
+    }
+)
+_RETAINED_DIRECTORY_SLOTS: Mapping[str, str | None] = MappingProxyType(
+    {
+        "readiness.spec.parent": None,
+        "readiness.approval_record.parent": None,
+        "readiness.signature_record.parent": None,
+        "readiness.output.parent": None,
+        "request.spec.parent": None,
+        "request.batch_manifest.parent": None,
+        "request.readiness_authorization.parent": None,
+        "request.human_approval_record.parent": None,
+        "request.human_signature_record.parent": None,
+        "request.execution_context.parent": None,
+        "request.output.parent": None,
+        "request.test_root": "test_root",
+        "request.ledger_base": "ledger_base",
+        "request.quarantine_base": "quarantine_base",
+        "one_shot.spec.parent": None,
+        "one_shot.loader_request.parent": None,
+        "one_shot.batch_manifest.parent": None,
+        "one_shot.readiness_authorization.parent": None,
+        "one_shot.human_approval_record.parent": None,
+        "one_shot.human_signature_record.parent": None,
+        "one_shot.execution_context.parent": None,
+        "one_shot.calibration_root_manifest.parent": None,
+        "one_shot.test_root": "test_root",
+        "one_shot.ledger_base": "ledger_base",
+        "one_shot.quarantine_base": "quarantine_base",
+        "one_shot.common_parent": None,
+        "compatibility.loader_request.parent": None,
+        "compatibility.batch_manifest.parent": None,
+        "compatibility.readiness_authorization.parent": None,
+        "compatibility.execution_context.parent": None,
+        "compatibility.test_root": "test_root",
+        "compatibility.ledger_base": "ledger_base",
+        "compatibility.quarantine_base": "quarantine_base",
+    }
+)
+_RETAINED_ANCHOR_PARENTS: Mapping[str, str] = MappingProxyType(
+    {
+        "request.ledger_root_anchor": "request.ledger_base",
+        "request.quarantine_root_anchor": "request.quarantine_base",
+        "one_shot.ledger_root_anchor": "one_shot.ledger_base",
+        "one_shot.quarantine_root_anchor": "one_shot.quarantine_base",
+        "compatibility.ledger_root_anchor": "compatibility.ledger_base",
+        "compatibility.quarantine_root_anchor": "compatibility.quarantine_base",
+    }
+)
+_RETAINED_BUNDLE_ROLE_FAMILIES: Mapping[str, tuple[str, ...]] = MappingProxyType(
+    {
+        "compatibility": (
+            "compatibility.loader_request",
+            "compatibility.batch_manifest",
+            "compatibility.readiness_authorization",
+            "compatibility.execution_context",
+            "compatibility.ledger_root_anchor",
+            "compatibility.quarantine_root_anchor",
+            "compatibility.test_root",
+            "compatibility.ledger_base",
+            "compatibility.quarantine_base",
+        ),
+        "request": (
+            "request.output",
+            "request.batch_manifest",
+            "request.readiness_authorization",
+            "request.execution_context",
+            "request.ledger_root_anchor",
+            "request.quarantine_root_anchor",
+            "request.test_root",
+            "request.ledger_base",
+            "request.quarantine_base",
+        ),
+        "one_shot": (
+            "one_shot.loader_request",
+            "one_shot.batch_manifest",
+            "one_shot.readiness_authorization",
+            "one_shot.execution_context",
+            "one_shot.ledger_root_anchor",
+            "one_shot.quarantine_root_anchor",
+            "one_shot.test_root",
+            "one_shot.ledger_base",
+            "one_shot.quarantine_base",
+        ),
+    }
+)
+_RETAINED_DYNAMIC_ARTIFACT_ROLES: set[str] = set()
+_RETAINED_DYNAMIC_DIRECTORY_ROLES: set[str] = set()
 
 
 class GateBLoaderError(RuntimeError):
@@ -120,6 +257,48 @@ def _sanitized_api(function):
         raise error
 
     return wrapped
+
+
+def _loader_request_sanitized_api(function):
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        try:
+            return function(*args, **kwargs)
+        except GateBLoaderError as exc:
+            error = type(exc)(str(exc))
+        except GateBLedgerError as exc:
+            error = GateBLoaderError(str(exc))
+        except Exception:
+            error = GateBLoaderError("Gate B operation failed closed")
+        error.__cause__ = None
+        error.__context__ = None
+        error.__traceback__ = None
+        raise error
+
+    return wrapped
+
+
+def _retained_sanitized_api(default_message: str):
+    def decorate(function):
+        @wraps(function)
+        def wrapped(*args, **kwargs):
+            message = default_message
+            try:
+                return function(*args, **kwargs)
+            except TypeError:
+                message = "retained acquisition argument mismatch"
+            except Exception as exc:
+                if type(exc) is GateBLoaderError and str(exc) in _RETAINED_MESSAGES:
+                    message = str(exc)
+            error = GateBLoaderError(message)
+            error.__cause__ = None
+            error.__context__ = None
+            error.__traceback__ = None
+            raise error
+
+        return wrapped
+
+    return decorate
 
 
 class GateBApprovedExecutor(Protocol):
@@ -545,6 +724,27 @@ def _path_ref(value: object, label: str) -> tuple[Path, str]:
     return _absolute(ref["absolute_path"], f"{label} path"), _sha(ref["sha256"], f"{label} hash")
 
 
+def _retained_embedded_absolute(value: object, label: str) -> Path:
+    if (
+        not isinstance(value, str)
+        or not value
+        or any(unicodedata.category(character) in {"Cc", "Cf"} for character in value)
+    ):
+        _fail(f"{label} must be a nonempty path without control characters")
+    path = Path(value)
+    if not path.is_absolute() or ".." in path.parts or str(path) != value:
+        _fail(f"{label} must use canonical absolute spelling")
+    return path
+
+
+def _retained_path_ref(value: object, label: str) -> tuple[Path, str]:
+    ref = _closed(value, _REQUEST_REF_FIELDS, label)
+    return _retained_embedded_absolute(
+        ref["absolute_path"],
+        f"{label} path",
+    ), _sha(ref["sha256"], f"{label} hash")
+
+
 def _validate_root_ref(value: object, role: str) -> tuple[dict[str, Any], Path]:
     ref = _closed(value, _ROOT_REF_FIELDS, f"{role} root reference")
     if ref["root_role"] != role:
@@ -566,6 +766,486 @@ def _validate_root_ref(value: object, role: str) -> tuple[dict[str, Any], Path]:
             _fail("writable root anchor path mismatch")
         _sha(ref["anchor_sha256"], f"{role} anchor hash")
     return ref, path
+
+
+def _retained_hex(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or any(character not in "0123456789abcdef" for character in value)
+        or (len(value) > 1 and value[0] == "0")
+    ):
+        raise GateBLoaderError("retained acquisition argument mismatch")
+    return value
+
+
+def _retained_path(value: object) -> Path:
+    if type(value) is not type(Path()):
+        raise GateBLoaderError("retained acquisition argument mismatch")
+    text = str(value)
+    if (
+        not text
+        or not value.is_absolute()
+        or ".." in value.parts
+        or any(unicodedata.category(character) in {"Cc", "Cf"} for character in text)
+    ):
+        raise GateBLoaderError("retained acquisition argument mismatch")
+    return value
+
+
+def _retained_role_slot(logical_role: object, *, directory: bool) -> str | None:
+    if type(logical_role) is not str:
+        raise GateBLoaderError("retained acquisition argument mismatch")
+    mapping = _RETAINED_DIRECTORY_SLOTS if directory else _RETAINED_ARTIFACT_SLOTS
+    dynamic = _RETAINED_DYNAMIC_DIRECTORY_ROLES if directory else _RETAINED_DYNAMIC_ARTIFACT_ROLES
+    if logical_role in mapping:
+        return mapping[logical_role]
+    if logical_role in dynamic:
+        return None
+    raise GateBLoaderError("retained acquisition role mismatch")
+
+
+def _register_gate_b_retained_calibration_roles(relative_paths: tuple[str, ...]) -> None:
+    expected = tuple(sorted(set(relative_paths)))
+    if relative_paths != expected or not relative_paths:
+        raise GateBLoaderError("retained acquisition role mismatch")
+    artifact_roles: set[str] = set()
+    directory_roles: set[str] = set()
+    for relative_path in relative_paths:
+        if (
+            not isinstance(relative_path, str)
+            or not relative_path
+            or "\\" in relative_path
+            or relative_path.startswith("/")
+            or any(part in {"", ".", ".."} for part in relative_path.split("/"))
+        ):
+            raise GateBLoaderError("retained acquisition role mismatch")
+        role = f"one_shot.calibration_artifact:{relative_path}"
+        artifact_roles.add(role)
+        directory_roles.add(f"{role}.parent")
+    _RETAINED_DYNAMIC_ARTIFACT_ROLES.clear()
+    _RETAINED_DYNAMIC_ARTIFACT_ROLES.update(artifact_roles)
+    _RETAINED_DYNAMIC_DIRECTORY_ROLES.clear()
+    _RETAINED_DYNAMIC_DIRECTORY_ROLES.update(directory_roles)
+
+
+def _clear_gate_b_retained_calibration_roles() -> None:
+    _RETAINED_DYNAMIC_ARTIFACT_ROLES.clear()
+    _RETAINED_DYNAMIC_DIRECTORY_ROLES.clear()
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class GateBRetainedArtifactSnapshot:
+    logical_role: str
+    bundle_slot_role: str | None
+    reference_path: Path
+    raw: bytes = field(repr=False)
+    sha256: str
+    size_bytes: int
+    volume_id_hex: str
+    file_id_hex: str
+    physical_identity: tuple[str, str]
+    _parent: GateBRetainedDirectorySnapshot = field(repr=False, compare=False)
+    _provenance_token: object = field(repr=False, compare=False)
+    _provenance: tuple[object, ...] = field(repr=False, compare=False)
+
+    def __new__(cls, *, _token: object | None = None) -> GateBRetainedArtifactSnapshot:
+        if _token is not _RETAINED_TOKEN:
+            raise TypeError("retained artifact construction is private")
+        return object.__new__(cls)
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class GateBRetainedDirectorySnapshot:
+    logical_role: str
+    bundle_slot_role: str | None
+    reference_path: Path
+    volume_id_hex: str
+    file_id_hex: str
+    identity_scheme: str
+    physical_identity: tuple[str, str]
+    _directory: GateBPinnedDirectory = field(repr=False, compare=False)
+    _closed: bool = field(repr=False, compare=False)
+    _provenance_token: object = field(repr=False, compare=False)
+    _provenance: tuple[object, ...] = field(repr=False, compare=False)
+
+    def __new__(cls, *, _token: object | None = None) -> GateBRetainedDirectorySnapshot:
+        if _token is not _RETAINED_TOKEN:
+            raise TypeError("retained directory construction is private")
+        return object.__new__(cls)
+
+    @_retained_sanitized_api("retained provenance mismatch")
+    def verify_identity(self) -> None:
+        directory = _validated_retained_directory(self)
+        if self._closed:
+            raise GateBLoaderError("retained directory is closed")
+        directory.verify_identity()
+
+    @_retained_sanitized_api("retained provenance mismatch")
+    def direct_child_names(self) -> tuple[str, ...]:
+        directory = _validated_retained_directory(self)
+        if self._closed:
+            raise GateBLoaderError("retained directory is closed")
+        return directory.direct_child_names()
+
+    @_retained_sanitized_api("retained directory close failed closed")
+    def close(self) -> None:
+        try:
+            directory = _validated_retained_directory(self)
+        except GateBLoaderError:
+            candidate = getattr(self, "_directory", None)
+            if type(candidate) is GateBPinnedDirectory:
+                with suppress(Exception):
+                    candidate.close()
+            raise
+        if self._closed:
+            return
+        directory.close()
+        object.__setattr__(self, "_closed", True)
+        object.__setattr__(self, "_provenance", _retained_directory_provenance(self))
+
+    @_retained_sanitized_api("retained provenance mismatch")
+    def __enter__(self) -> GateBRetainedDirectorySnapshot:
+        _validated_retained_directory(self)
+        if self._closed:
+            raise GateBLoaderError("retained directory is closed")
+        return self
+
+    @_retained_sanitized_api("retained directory close failed closed")
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class GateBRetainedLoaderBundle:
+    request: GateBRetainedArtifactSnapshot
+    batch_manifest: GateBRetainedArtifactSnapshot
+    readiness_authorization: GateBRetainedArtifactSnapshot
+    execution_context: GateBRetainedArtifactSnapshot
+    ledger_root_anchor: GateBRetainedArtifactSnapshot
+    quarantine_root_anchor: GateBRetainedArtifactSnapshot
+    test_root: GateBRetainedDirectorySnapshot
+    ledger_base: GateBRetainedDirectorySnapshot
+    quarantine_base: GateBRetainedDirectorySnapshot
+    _provenance_token: object = field(repr=False, compare=False)
+    _provenance: tuple[object, ...] = field(repr=False, compare=False)
+
+    def __new__(cls, *, _token: object | None = None) -> GateBRetainedLoaderBundle:
+        if _token is not _RETAINED_TOKEN:
+            raise TypeError("retained loader bundle construction is private")
+        return object.__new__(cls)
+
+
+def _validated_retained_artifact(
+    snapshot: GateBRetainedArtifactSnapshot,
+) -> GateBRetainedArtifactSnapshot:
+    if type(snapshot) is not GateBRetainedArtifactSnapshot:
+        raise GateBLoaderError("retained provenance mismatch")
+    try:
+        current = (
+            snapshot.logical_role,
+            snapshot.bundle_slot_role,
+            snapshot.reference_path,
+            snapshot.raw,
+            snapshot.sha256,
+            snapshot.size_bytes,
+            snapshot.volume_id_hex,
+            snapshot.file_id_hex,
+            snapshot.physical_identity,
+            snapshot._parent,
+        )
+    except Exception:
+        raise GateBLoaderError("retained provenance mismatch") from None
+    if (
+        snapshot._provenance_token is not _RETAINED_TOKEN
+        or snapshot._provenance != current
+        or type(snapshot.raw) is not bytes
+        or sha256_bytes(snapshot.raw) != snapshot.sha256
+        or len(snapshot.raw) != snapshot.size_bytes
+        or snapshot.physical_identity != (snapshot.volume_id_hex, snapshot.file_id_hex)
+        or _retained_role_slot(snapshot.logical_role, directory=False) != snapshot.bundle_slot_role
+        or snapshot.reference_path.parent != snapshot._parent.reference_path
+    ):
+        raise GateBLoaderError("retained provenance mismatch")
+    _validated_retained_directory(snapshot._parent)
+    return snapshot
+
+
+def _retained_directory_provenance(
+    snapshot: GateBRetainedDirectorySnapshot,
+) -> tuple[object, ...]:
+    return (
+        snapshot.logical_role,
+        snapshot.bundle_slot_role,
+        snapshot.reference_path,
+        snapshot.volume_id_hex,
+        snapshot.file_id_hex,
+        snapshot.identity_scheme,
+        snapshot.physical_identity,
+        snapshot._directory,
+        snapshot._closed,
+    )
+
+
+def _validated_retained_directory(
+    snapshot: GateBRetainedDirectorySnapshot,
+) -> GateBPinnedDirectory:
+    if type(snapshot) is not GateBRetainedDirectorySnapshot:
+        raise GateBLoaderError("retained provenance mismatch")
+    try:
+        current = _retained_directory_provenance(snapshot)
+    except Exception:
+        raise GateBLoaderError("retained provenance mismatch") from None
+    if (
+        snapshot._provenance_token is not _RETAINED_TOKEN
+        or snapshot._provenance != current
+        or type(snapshot._directory) is not GateBPinnedDirectory
+        or type(snapshot._closed) is not bool
+        or snapshot._closed is not snapshot._directory._closed
+        or snapshot.physical_identity != (snapshot.volume_id_hex, snapshot.file_id_hex)
+        or _retained_role_slot(snapshot.logical_role, directory=True) != snapshot.bundle_slot_role
+    ):
+        raise GateBLoaderError("retained provenance mismatch")
+    return snapshot._directory
+
+
+def _new_retained_artifact(
+    directory: GateBRetainedDirectorySnapshot,
+    *,
+    logical_role: str,
+    direct_child_name: str,
+    pinned: GateBPinnedArtifact,
+) -> GateBRetainedArtifactSnapshot:
+    slot = _retained_role_slot(logical_role, directory=False)
+    if type(pinned) is not GateBPinnedArtifact:
+        raise GateBLoaderError("retained provenance mismatch")
+    raw = bytes(pinned.raw)
+    reference_path = directory.reference_path / direct_child_name
+    snapshot = GateBRetainedArtifactSnapshot(_token=_RETAINED_TOKEN)
+    values = {
+        "logical_role": logical_role,
+        "bundle_slot_role": slot,
+        "reference_path": reference_path,
+        "raw": raw,
+        "sha256": pinned.sha256,
+        "size_bytes": pinned.size_bytes,
+        "volume_id_hex": pinned.volume_id_hex,
+        "file_id_hex": pinned.file_id_hex,
+        "physical_identity": pinned.physical_identity,
+        "_parent": directory,
+    }
+    for name, value in values.items():
+        object.__setattr__(snapshot, name, value)
+    provenance = (
+        snapshot.logical_role,
+        snapshot.bundle_slot_role,
+        snapshot.reference_path,
+        snapshot.raw,
+        snapshot.sha256,
+        snapshot.size_bytes,
+        snapshot.volume_id_hex,
+        snapshot.file_id_hex,
+        snapshot.physical_identity,
+        snapshot._parent,
+    )
+    object.__setattr__(snapshot, "_provenance_token", _RETAINED_TOKEN)
+    object.__setattr__(snapshot, "_provenance", provenance)
+    return snapshot
+
+
+@_retained_sanitized_api("retained directory acquisition failed closed")
+def open_gate_b_retained_directory(
+    *,
+    logical_role: str,
+    absolute_path: Path,
+    expected_volume_id_hex: str,
+    expected_file_id_hex: str,
+) -> GateBRetainedDirectorySnapshot:
+    slot = _retained_role_slot(logical_role, directory=True)
+    path = _retained_path(absolute_path)
+    volume_id = _retained_hex(expected_volume_id_hex)
+    file_id = _retained_hex(expected_file_id_hex)
+    directory = GateBPinnedDirectory.open(
+        path,
+        expected_volume_id_hex=volume_id,
+        expected_file_id_hex=file_id,
+    )
+    snapshot = GateBRetainedDirectorySnapshot(_token=_RETAINED_TOKEN)
+    values = {
+        "logical_role": logical_role,
+        "bundle_slot_role": slot,
+        "reference_path": path,
+        "volume_id_hex": volume_id,
+        "file_id_hex": file_id,
+        "identity_scheme": (
+            "windows-volume-file-id-v1" if os.name == "nt" else "posix-device-inode-v1"
+        ),
+        "physical_identity": (volume_id, file_id),
+        "_directory": directory,
+        "_closed": False,
+    }
+    for name, value in values.items():
+        object.__setattr__(snapshot, name, value)
+    provenance = _retained_directory_provenance(snapshot)
+    object.__setattr__(snapshot, "_provenance_token", _RETAINED_TOKEN)
+    object.__setattr__(snapshot, "_provenance", provenance)
+    return snapshot
+
+
+def _expected_retained_parent_role(logical_role: str) -> str:
+    if logical_role in _RETAINED_ANCHOR_PARENTS:
+        return _RETAINED_ANCHOR_PARENTS[logical_role]
+    return f"{logical_role}.parent"
+
+
+@_retained_sanitized_api("retained artifact acquisition failed closed")
+def read_gate_b_retained_artifact(
+    directory: GateBRetainedDirectorySnapshot,
+    *,
+    logical_role: str,
+    direct_child_name: str,
+    expected_sha256: str,
+    expected_size_bytes: int,
+) -> GateBRetainedArtifactSnapshot:
+    pinned_directory = _validated_retained_directory(directory)
+    if directory._closed:
+        raise GateBLoaderError("retained directory is closed")
+    _retained_role_slot(logical_role, directory=False)
+    if directory.logical_role != _expected_retained_parent_role(logical_role):
+        raise GateBLoaderError("retained acquisition role mismatch")
+    expected_hash = _sha(expected_sha256, "retained artifact expected hash")
+    expected_size = _positive(expected_size_bytes, "retained artifact expected size")
+    pinned = pinned_directory.read_regular(
+        direct_child_name,
+        expected_sha256=expected_hash,
+        expected_size_bytes=expected_size,
+    )
+    return _new_retained_artifact(
+        directory,
+        logical_role=logical_role,
+        direct_child_name=direct_child_name,
+        pinned=pinned,
+    )
+
+
+@_retained_sanitized_api("retained artifact creation failed closed")
+def create_gate_b_retained_artifact(
+    directory: GateBRetainedDirectorySnapshot,
+    *,
+    logical_role: str,
+    direct_child_name: str,
+    raw: bytes,
+) -> GateBRetainedArtifactSnapshot:
+    pinned_directory = _validated_retained_directory(directory)
+    if directory._closed:
+        raise GateBLoaderError("retained directory is closed")
+    _retained_role_slot(logical_role, directory=False)
+    if logical_role not in {"readiness.output", "request.output"}:
+        raise GateBLoaderError("retained acquisition role mismatch")
+    if directory.logical_role != f"{logical_role}.parent":
+        raise GateBLoaderError("retained acquisition role mismatch")
+    if type(raw) is not bytes:
+        raise GateBLoaderError("retained acquisition argument mismatch")
+    pinned = pinned_directory.create_regular(direct_child_name, bytes(raw))
+    return _new_retained_artifact(
+        directory,
+        logical_role=logical_role,
+        direct_child_name=direct_child_name,
+        pinned=pinned,
+    )
+
+
+def _validated_retained_bundle(bundle: GateBRetainedLoaderBundle) -> GateBRetainedLoaderBundle:
+    if type(bundle) is not GateBRetainedLoaderBundle:
+        raise GateBLoaderError("retained loader bundle mismatch")
+    artifact_names = (
+        "request",
+        "batch_manifest",
+        "readiness_authorization",
+        "execution_context",
+        "ledger_root_anchor",
+        "quarantine_root_anchor",
+    )
+    directory_names = ("test_root", "ledger_base", "quarantine_base")
+    artifacts = tuple(
+        _validated_retained_artifact(getattr(bundle, name)) for name in artifact_names
+    )
+    directories = tuple(getattr(bundle, name) for name in directory_names)
+    for directory in directories:
+        _validated_retained_directory(directory)
+    expected_slots = artifact_names
+    if tuple(item.bundle_slot_role for item in artifacts) != expected_slots:
+        raise GateBLoaderError("retained loader bundle mismatch")
+    if tuple(item.bundle_slot_role for item in directories) != directory_names:
+        raise GateBLoaderError("retained loader bundle mismatch")
+    role_tuple = tuple(item.logical_role for item in (*artifacts, *directories))
+    if role_tuple not in _RETAINED_BUNDLE_ROLE_FAMILIES.values():
+        raise GateBLoaderError("retained loader bundle mismatch")
+    if artifacts[4]._parent is not directories[1] or artifacts[5]._parent is not directories[2]:
+        raise GateBLoaderError("retained loader bundle mismatch")
+    if (
+        len({id(item) for item in (*artifacts, *directories)}) != len(artifacts) + len(directories)
+        or len({item.physical_identity for item in artifacts}) != len(artifacts)
+        or len({item.physical_identity for item in directories}) != len(directories)
+    ):
+        raise GateBLoaderError("retained loader bundle mismatch")
+    paths = tuple(item.reference_path for item in directories)
+    if len({os.path.normcase(str(path)) for path in paths}) != len(paths):
+        raise GateBLoaderError("retained loader bundle mismatch")
+    for left in paths:
+        for right in paths:
+            if left != right and (left in right.parents or right in left.parents):
+                raise GateBLoaderError("retained loader bundle mismatch")
+    current = (*artifacts, *directories)
+    if bundle._provenance_token is not _RETAINED_TOKEN or bundle._provenance != current:
+        raise GateBLoaderError("retained loader bundle mismatch")
+    return bundle
+
+
+@_retained_sanitized_api("retained loader bundle mismatch")
+def build_gate_b_retained_loader_bundle(
+    *,
+    request: GateBRetainedArtifactSnapshot,
+    batch_manifest: GateBRetainedArtifactSnapshot,
+    readiness_authorization: GateBRetainedArtifactSnapshot,
+    execution_context: GateBRetainedArtifactSnapshot,
+    ledger_root_anchor: GateBRetainedArtifactSnapshot,
+    quarantine_root_anchor: GateBRetainedArtifactSnapshot,
+    test_root: GateBRetainedDirectorySnapshot,
+    ledger_base: GateBRetainedDirectorySnapshot,
+    quarantine_base: GateBRetainedDirectorySnapshot,
+) -> GateBRetainedLoaderBundle:
+    values = (
+        request,
+        batch_manifest,
+        readiness_authorization,
+        execution_context,
+        ledger_root_anchor,
+        quarantine_root_anchor,
+        test_root,
+        ledger_base,
+        quarantine_base,
+    )
+    bundle = GateBRetainedLoaderBundle(_token=_RETAINED_TOKEN)
+    for name, value in zip(
+        (
+            "request",
+            "batch_manifest",
+            "readiness_authorization",
+            "execution_context",
+            "ledger_root_anchor",
+            "quarantine_root_anchor",
+            "test_root",
+            "ledger_base",
+            "quarantine_base",
+        ),
+        values,
+        strict=True,
+    ):
+        object.__setattr__(bundle, name, value)
+    object.__setattr__(bundle, "_provenance_token", _RETAINED_TOKEN)
+    object.__setattr__(bundle, "_provenance", values)
+    return _validated_retained_bundle(bundle)
 
 
 @dataclass(frozen=True, slots=True)
@@ -591,24 +1271,16 @@ class GateBLoaderRequest:
         )
 
 
-@_sanitized_api
-def load_gate_b_loader_request(
-    path: Path | str,
-    *,
+def _parse_gate_b_loader_request_envelope(
+    raw: bytes,
     expected_sha256: str,
-    expected_readiness_authorization_sha256: str,
-    expected_readiness_approval_record_sha256: str,
-    expected_readiness_signature_record_sha256: str,
-) -> GateBLoaderRequest:
-    """Load and join one explicit request without opening any Test-root child."""
-    request_path = Path(path)
-    try:
-        raw = _read_pinned(request_path, "loader request")
-    except GateBLedgerError as exc:
-        raise GateBLoaderError("loader request physical verification failed") from exc
-    if sha256_bytes(raw) != _sha(expected_sha256, "request hash"):
+) -> tuple[dict[str, Any], str]:
+    if type(raw) is not bytes:
+        _fail("loader request input must be bytes")
+    expected = _sha(expected_sha256, "request hash")
+    if sha256_bytes(raw) != expected:
         _fail("loader request stored-byte hash mismatch")
-    value = _strict_canonical_object(raw, "Gate B loader request")
+    value = _strict_canonical_object(bytes(raw), "Gate B loader request")
     _closed(
         value,
         {
@@ -633,40 +1305,98 @@ def load_gate_b_loader_request(
         _timestamp(value["requested_at_utc"], "loader request timestamp")
     except ValueError as exc:
         raise GateBLoaderError("loader request timestamp is invalid") from exc
-    batch_path, batch_hash = _path_ref(value["batch_manifest"], "batch manifest ref")
-    readiness_path, readiness_hash = _path_ref(
+    return value, expected
+
+
+def _root_ref_from_payload(
+    value: object,
+    role: str,
+    *,
+    retained: bool,
+) -> tuple[dict[str, Any], Path]:
+    ref = _closed(value, _ROOT_REF_FIELDS, f"{role} root reference")
+    if ref["root_role"] != role:
+        _fail("root reference role mismatch")
+    path = (
+        _retained_embedded_absolute(ref["absolute_path"], f"{role} root path")
+        if retained
+        else _absolute(ref["absolute_path"], f"{role} root path")
+    )
+    expected_scheme = "windows-volume-file-id-v1" if os.name == "nt" else "posix-device-inode-v1"
+    if ref["identity_scheme"] != expected_scheme:
+        _fail(f"{role} root identity scheme mismatch")
+    for name in ("volume_id_hex", "file_id_hex"):
+        value_hex = ref[name]
+        if (
+            not isinstance(value_hex, str)
+            or not value_hex
+            or any(character not in "0123456789abcdef" for character in value_hex)
+            or (len(value_hex) > 1 and value_hex[0] == "0")
+        ):
+            _fail(f"{role} root physical identity mismatch")
+    if role == "test_root":
+        if ref["anchor_relative_path"] is not None or ref["anchor_sha256"] is not None:
+            _fail("Test root anchor fields must be null")
+    else:
+        if ref["anchor_relative_path"] != ".gate-b-root-anchor.json":
+            _fail("writable root anchor path mismatch")
+        _sha(ref["anchor_sha256"], f"{role} anchor hash")
+    return ref, path
+
+
+def _join_gate_b_loader_request(
+    value: dict[str, Any],
+    *,
+    request_sha256: str,
+    request_path: Path,
+    batch: GateBBatchManifest,
+    readiness: GateBReadinessAuthorization,
+    context: GateBExecutionContext,
+    bundle: GateBRetainedLoaderBundle,
+) -> GateBLoaderRequest:
+    batch_path, batch_hash = _retained_path_ref(
+        value["batch_manifest"],
+        "batch manifest ref",
+    )
+    readiness_path, readiness_hash = _retained_path_ref(
         value["readiness_authorization"], "readiness authorization ref"
     )
-    context_path, context_hash = _path_ref(value["execution_context"], "execution context ref")
-    for artifact_path, artifact_hash, label in (
-        (batch_path, batch_hash, "batch manifest"),
-        (readiness_path, readiness_hash, "readiness authorization"),
-        (context_path, context_hash, "execution context"),
-    ):
-        try:
-            artifact_raw = _read_pinned(artifact_path, label)
-        except GateBLedgerError as exc:
-            raise GateBLoaderError(f"{label} physical verification failed") from exc
-        if sha256_bytes(artifact_raw) != artifact_hash:
-            _fail(f"{label} stored-byte hash mismatch")
-    if readiness_hash != expected_readiness_authorization_sha256:
-        _fail("request readiness hash differs from its caller trust anchor")
-    readiness = load_gate_b_readiness_authorization(
-        readiness_path,
-        expected_sha256=expected_readiness_authorization_sha256,
-        expected_approval_record_sha256=expected_readiness_approval_record_sha256,
-        expected_signature_record_sha256=expected_readiness_signature_record_sha256,
+    context_path, context_hash = _retained_path_ref(
+        value["execution_context"],
+        "execution context ref",
     )
-    batch = load_gate_b_batch_manifest(batch_path, expected_sha256=batch_hash)
-    context = load_gate_b_execution_context(context_path, expected_sha256=context_hash)
+    for artifact_path, artifact_hash, snapshot, label in (
+        (batch_path, batch_hash, bundle.batch_manifest, "batch manifest"),
+        (
+            readiness_path,
+            readiness_hash,
+            bundle.readiness_authorization,
+            "readiness authorization",
+        ),
+        (context_path, context_hash, bundle.execution_context, "execution context"),
+    ):
+        if artifact_path != snapshot.reference_path or artifact_hash != snapshot.sha256:
+            _fail(f"{label} retained reference mismatch")
 
     roots_value = _closed(
         value["roots"], {"ledger_base", "quarantine_base", "test_root"}, "loader roots"
     )
     roots: dict[str, dict[str, Any]] = {}
-    paths = {}
+    paths: dict[str, Path] = {}
     for role in ("ledger_base", "quarantine_base", "test_root"):
-        ref, root_path = _validate_root_ref(roots_value[role], role)
+        ref, root_path = _root_ref_from_payload(
+            roots_value[role],
+            role,
+            retained=True,
+        )
+        retained_root = getattr(bundle, role)
+        if (
+            root_path != retained_root.reference_path
+            or ref["volume_id_hex"] != retained_root.volume_id_hex
+            or ref["file_id_hex"] != retained_root.file_id_hex
+            or ref["identity_scheme"] != retained_root.identity_scheme
+        ):
+            _fail(f"{role} root physical identity mismatch")
         roots[role] = ref
         paths[role] = root_path
     if len({os.path.normcase(str(root)) for root in paths.values()}) != 3:
@@ -681,19 +1411,24 @@ def load_gate_b_loader_request(
             if left_name != right_name and (left in right.parents or right in left.parents):
                 _fail("loader roots must be non-nested")
     approval_hash = readiness.payload["approval_record_sha256"]
-    for role in ("ledger_base", "quarantine_base"):
-        anchor_path = paths[role] / roots[role]["anchor_relative_path"]
-        try:
-            anchor_raw = _read_pinned(anchor_path, f"{role} root anchor")
-        except GateBLedgerError as exc:
-            raise GateBLoaderError(f"{role} root anchor physical verification failed") from exc
-        if sha256_bytes(anchor_raw) != roots[role]["anchor_sha256"]:
+    for role, anchor_snapshot in (
+        ("ledger_base", bundle.ledger_root_anchor),
+        ("quarantine_base", bundle.quarantine_root_anchor),
+    ):
+        matching_root = getattr(bundle, role)
+        anchor_path = paths[role] / str(roots[role]["anchor_relative_path"])
+        if (
+            anchor_snapshot.reference_path != anchor_path
+            or anchor_snapshot.sha256 != roots[role]["anchor_sha256"]
+            or anchor_snapshot._parent is not matching_root
+        ):
             _fail(f"{role} root anchor stored-byte hash mismatch")
-        anchor = load_gate_b_root_anchor(
-            anchor_path,
-            expected_sha256=roots[role]["anchor_sha256"],
+        anchor = load_gate_b_root_anchor_bytes(
+            anchor_snapshot.raw,
+            expected_sha256=anchor_snapshot.sha256,
             expected_root_role=role,
             expected_approval_record_sha256=approval_hash,
+            reference_path=anchor_snapshot.reference_path,
         )
         if anchor.payload["root_role"] != role:
             _fail("writable root anchor role mismatch")
@@ -714,9 +1449,9 @@ def load_gate_b_loader_request(
         != readiness.payload["approved_implementation_commit"]
     ):
         _fail("batch, readiness, and execution-context commit join failed")
-    roots_hash = sha256_bytes(canonical_json_bytes(_plain(roots_value)))
+    roots_hash = build_gate_b_preapproval_root_identity_projection(roots_value).sha256
     if roots_hash != readiness.payload["approved_roots_sha256"]:
-        _fail("complete root-reference hash mismatch")
+        _fail("preapproval root-identity projection hash mismatch")
     batch_runtime = batch.payload["runtime"]
     context_fingerprint = context.payload["runtime_fingerprint"]
     expected_runtime = {
@@ -737,7 +1472,7 @@ def load_gate_b_loader_request(
     ):
         _fail("batch and context dependency-lock identity mismatch")
     return GateBLoaderRequest(
-        expected_sha256,
+        request_sha256,
         batch,
         readiness,
         context,
@@ -746,8 +1481,241 @@ def load_gate_b_loader_request(
         actor["actor_role"],
         attempt_ordinal,
         _freeze(value),
-        request_path.resolve(),
+        request_path,
     )
+
+
+def _load_gate_b_loader_request_from_retained_impl(
+    bundle: GateBRetainedLoaderBundle,
+    *,
+    expected_sha256: str,
+    expected_readiness_authorization_sha256: str,
+    expected_readiness_approval_record_sha256: str,
+    expected_readiness_signature_record_sha256: str,
+    parsed_envelope: tuple[dict[str, Any], str] | None = None,
+) -> GateBLoaderRequest:
+    retained = _validated_retained_bundle(bundle)
+    envelope = (
+        _parse_gate_b_loader_request_envelope(retained.request.raw, expected_sha256)
+        if parsed_envelope is None
+        else parsed_envelope
+    )
+    value, request_hash = envelope
+    if (
+        request_hash != retained.request.sha256
+        or sha256_bytes(retained.request.raw) != request_hash
+    ):
+        _fail("loader request retained snapshot mismatch")
+    readiness_hash = _sha(
+        expected_readiness_authorization_sha256,
+        "request readiness caller trust anchor",
+    )
+    if retained.readiness_authorization.sha256 != readiness_hash:
+        _fail("request readiness hash differs from its caller trust anchor")
+
+    retained.test_root.verify_identity()
+    retained.ledger_base.verify_identity()
+    retained.quarantine_base.verify_identity()
+
+    batch = load_gate_b_batch_manifest_bytes(
+        retained.batch_manifest.raw,
+        expected_sha256=retained.batch_manifest.sha256,
+        reference_path=retained.batch_manifest.reference_path,
+    )
+    readiness = load_gate_b_readiness_authorization_bytes(
+        retained.readiness_authorization.raw,
+        expected_sha256=readiness_hash,
+        expected_approval_record_sha256=expected_readiness_approval_record_sha256,
+        expected_signature_record_sha256=expected_readiness_signature_record_sha256,
+        reference_path=retained.readiness_authorization.reference_path,
+    )
+    context = load_gate_b_execution_context_bytes(
+        retained.execution_context.raw,
+        expected_sha256=retained.execution_context.sha256,
+        reference_path=retained.execution_context.reference_path,
+    )
+    return _join_gate_b_loader_request(
+        value,
+        request_sha256=request_hash,
+        request_path=retained.request.reference_path,
+        batch=batch,
+        readiness=readiness,
+        context=context,
+        bundle=retained,
+    )
+
+
+@_retained_sanitized_api("retained loader request failed closed")
+def load_gate_b_loader_request_from_retained(
+    bundle: GateBRetainedLoaderBundle,
+    *,
+    expected_sha256: str,
+    expected_readiness_authorization_sha256: str,
+    expected_readiness_approval_record_sha256: str,
+    expected_readiness_signature_record_sha256: str,
+) -> GateBLoaderRequest:
+    """Load a request exclusively from loader-provenance-bearing retained state."""
+    return _load_gate_b_loader_request_from_retained_impl(
+        bundle,
+        expected_sha256=expected_sha256,
+        expected_readiness_authorization_sha256=expected_readiness_authorization_sha256,
+        expected_readiness_approval_record_sha256=expected_readiness_approval_record_sha256,
+        expected_readiness_signature_record_sha256=expected_readiness_signature_record_sha256,
+    )
+
+
+def _canonicalize_loader_request_path(path: Path | str) -> Path:
+    request_path = Path(path)
+    return request_path.resolve(strict=False)
+
+
+def _compatibility_read_artifact(
+    path: Path,
+    *,
+    logical_role: str,
+    expected_sha256: str,
+    stack: ExitStack,
+) -> GateBRetainedArtifactSnapshot:
+    metadata = _verify_regular(path, "compatibility retained artifact")
+    parent_identity = _root_identity_payload(path.parent)
+    parent = stack.enter_context(
+        open_gate_b_retained_directory(
+            logical_role=f"{logical_role}.parent",
+            absolute_path=Path(parent_identity["absolute_path"]),
+            expected_volume_id_hex=parent_identity["volume_id_hex"],
+            expected_file_id_hex=parent_identity["file_id_hex"],
+        )
+    )
+    return read_gate_b_retained_artifact(
+        parent,
+        logical_role=logical_role,
+        direct_child_name=path.name,
+        expected_sha256=expected_sha256,
+        expected_size_bytes=metadata.st_size,
+    )
+
+
+@_loader_request_sanitized_api
+def load_gate_b_loader_request(
+    path: Path | str,
+    *,
+    expected_sha256: str,
+    expected_readiness_authorization_sha256: str,
+    expected_readiness_approval_record_sha256: str,
+    expected_readiness_signature_record_sha256: str,
+) -> GateBLoaderRequest:
+    """Compatibility route with one named canonicalization and retained joins."""
+    request_path = _canonicalize_loader_request_path(path)
+    with ExitStack() as stack:
+        request = _compatibility_read_artifact(
+            request_path,
+            logical_role="compatibility.loader_request",
+            expected_sha256=expected_sha256,
+            stack=stack,
+        )
+        envelope = _parse_gate_b_loader_request_envelope(request.raw, expected_sha256)
+        value = envelope[0]
+        batch_path, batch_hash = _path_ref(value["batch_manifest"], "batch manifest ref")
+        readiness_path, readiness_hash = _path_ref(
+            value["readiness_authorization"],
+            "readiness authorization ref",
+        )
+        context_path, context_hash = _path_ref(
+            value["execution_context"],
+            "execution context ref",
+        )
+        batch = _compatibility_read_artifact(
+            batch_path,
+            logical_role="compatibility.batch_manifest",
+            expected_sha256=batch_hash,
+            stack=stack,
+        )
+        readiness = _compatibility_read_artifact(
+            readiness_path,
+            logical_role="compatibility.readiness_authorization",
+            expected_sha256=readiness_hash,
+            stack=stack,
+        )
+        context = _compatibility_read_artifact(
+            context_path,
+            logical_role="compatibility.execution_context",
+            expected_sha256=context_hash,
+            stack=stack,
+        )
+
+        roots_payload = _closed(
+            value["roots"],
+            {"ledger_base", "quarantine_base", "test_root"},
+            "loader roots",
+        )
+        retained_roots: dict[str, GateBRetainedDirectorySnapshot] = {}
+        parsed_roots: dict[str, dict[str, Any]] = {}
+        root_paths: dict[str, Path] = {}
+        for role in ("test_root", "ledger_base", "quarantine_base"):
+            ref, root_path = _root_ref_from_payload(
+                roots_payload[role],
+                role,
+                retained=False,
+            )
+            parsed_roots[role] = ref
+            root_paths[role] = root_path
+        anchor_sizes = {
+            role: _verify_regular(
+                root_paths[role] / str(parsed_roots[role]["anchor_relative_path"]),
+                f"compatibility {role} root anchor",
+            ).st_size
+            for role in ("ledger_base", "quarantine_base")
+        }
+        for role, logical_role in (
+            ("test_root", "compatibility.test_root"),
+            ("ledger_base", "compatibility.ledger_base"),
+            ("quarantine_base", "compatibility.quarantine_base"),
+        ):
+            ref = parsed_roots[role]
+            try:
+                retained_roots[role] = stack.enter_context(
+                    open_gate_b_retained_directory(
+                        logical_role=logical_role,
+                        absolute_path=root_paths[role],
+                        expected_volume_id_hex=ref["volume_id_hex"],
+                        expected_file_id_hex=ref["file_id_hex"],
+                    )
+                )
+            except GateBLoaderError:
+                _fail(f"{role} root physical identity mismatch")
+        ledger_anchor = read_gate_b_retained_artifact(
+            retained_roots["ledger_base"],
+            logical_role="compatibility.ledger_root_anchor",
+            direct_child_name=str(parsed_roots["ledger_base"]["anchor_relative_path"]),
+            expected_sha256=str(parsed_roots["ledger_base"]["anchor_sha256"]),
+            expected_size_bytes=anchor_sizes["ledger_base"],
+        )
+        quarantine_anchor = read_gate_b_retained_artifact(
+            retained_roots["quarantine_base"],
+            logical_role="compatibility.quarantine_root_anchor",
+            direct_child_name=str(parsed_roots["quarantine_base"]["anchor_relative_path"]),
+            expected_sha256=str(parsed_roots["quarantine_base"]["anchor_sha256"]),
+            expected_size_bytes=anchor_sizes["quarantine_base"],
+        )
+        bundle = build_gate_b_retained_loader_bundle(
+            request=request,
+            batch_manifest=batch,
+            readiness_authorization=readiness,
+            execution_context=context,
+            ledger_root_anchor=ledger_anchor,
+            quarantine_root_anchor=quarantine_anchor,
+            test_root=retained_roots["test_root"],
+            ledger_base=retained_roots["ledger_base"],
+            quarantine_base=retained_roots["quarantine_base"],
+        )
+        return _load_gate_b_loader_request_from_retained_impl(
+            bundle,
+            expected_sha256=expected_sha256,
+            expected_readiness_authorization_sha256=(expected_readiness_authorization_sha256),
+            expected_readiness_approval_record_sha256=(expected_readiness_approval_record_sha256),
+            expected_readiness_signature_record_sha256=(expected_readiness_signature_record_sha256),
+            parsed_envelope=envelope,
+        )
 
 
 @dataclass(frozen=True, slots=True)
