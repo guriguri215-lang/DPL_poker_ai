@@ -22,7 +22,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - name: Create virtual environment
-        run: python -m venv .venv
+        run: python -m venv --copies .venv
       - name: Install
         run: |
           .venv/bin/python -m pip install --upgrade pip
