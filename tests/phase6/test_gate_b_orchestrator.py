@@ -16,7 +16,7 @@ import textwrap
 from collections.abc import Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from types import MappingProxyType, SimpleNamespace
 from typing import Literal
 
@@ -1116,10 +1116,17 @@ def _run_production_primitive(
         listdir=fake_listdir,
     )
     fake_os.supports_dir_fd = {fake_os.open}
+    modeled_open_path = route.target_parent
+    if state.platform == "windows":
+        modeled_open_path = PureWindowsPath("C:/") / PureWindowsPath(
+            *route.target_parent.relative_to(_MATRIX_ROOT).parts
+        )
     failure: GateBLedgerError | None = None
     try:
         with pytest.MonkeyPatch.context() as patch:
             patch.setattr(ledger_module, "os", fake_os)
+            if state.platform == "windows":
+                patch.setattr(ledger_module, "Path", PureWindowsPath)
             patch.setattr(ledger_module, "_posix_open_directory", fake_posix_directory_open)
             patch.setattr(ledger_module, "_windows_create_file_descriptor", fake_windows_open)
             patch.setattr(ledger_module, "_windows_final_path_from_descriptor", fake_final_path)
@@ -1147,7 +1154,7 @@ def _run_production_primitive(
             )
             if action == "open":
                 opened = GateBPinnedDirectory.open(
-                    route.target_parent,
+                    modeled_open_path,
                     expected_volume_id_hex=route.identity_for(route.target_parent)[0],
                     expected_file_id_hex=route.identity_for(route.target_parent)[1],
                 )
