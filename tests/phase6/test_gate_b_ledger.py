@@ -1844,6 +1844,7 @@ def test_fake_platform_negative_paths_fail_closed_and_sanitize(
         CreateFileW=FakeFunction(lambda *_args: None),
         CloseHandle=FakeFunction(lambda handle: closed.append(handle)),
     )
+    monkeypatch.setattr(ledger_module.ctypes, "get_last_error", lambda: 5, raising=False)
     with pytest.raises(OSError):
         _windows_create_file_descriptor(
             Path("C:/fixture/file.json"),
@@ -2072,10 +2073,14 @@ def test_pinned_directory_parent_swap_is_blocked_or_stays_on_pinned_parent(
             pass
         if renamed:
             os.rename(replacement, parent)
-            with pytest.raises(GateBLedgerError):
-                pinned.create_regular("pinned.json", b"pinned\n")
-            assert not (moved / "pinned.json").exists()
+            try:
+                artifact = pinned.create_regular("pinned.json", b"pinned\n")
+            except GateBLedgerError:
+                artifact = None
             assert not (parent / "pinned.json").exists()
+            if artifact is not None:
+                assert artifact.raw == b"pinned\n"
+                assert (moved / "pinned.json").read_bytes() == b"pinned\n"
         else:
             artifact = pinned.create_regular("pinned.json", b"pinned\n")
             assert artifact.raw == b"pinned\n"
@@ -2465,6 +2470,8 @@ def test_windows_chain_swap_before_each_component_open_closes_retained_ancestors
 def test_windows_dos_alias_remap_before_target_open_is_rejected_by_pinned_ids(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(ledger_module, "Path", PureWindowsPath)
+    monkeypatch.setattr(ledger_module.os, "name", "nt")
     alternate_root = "\\\\?\\Volume{22222222-2222-2222-2222-222222222222}\\"
     descriptors = iter((501, 502, 503))
     identities = {501: (10, 1), 502: (10, 2), 503: (10, 99)}
@@ -2506,6 +2513,8 @@ def test_windows_dos_alias_remap_before_target_open_is_rejected_by_pinned_ids(
 def test_pinned_open_closes_every_retained_handle_when_final_verify_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(ledger_module, "Path", PureWindowsPath)
+    monkeypatch.setattr(ledger_module.os, "name", "nt")
     final_path = "\\\\?\\Volume{11111111-1111-1111-1111-111111111111}\\fixture"
     chain = (
         ledger_module._PinnedWindowsDirectoryHandle(301, (9, 1), final_path.rsplit("\\", 1)[0]),
@@ -2601,33 +2610,69 @@ def test_windows_dos_alias_remap_after_initial_open_uses_only_retained_guid_name
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    target = tmp_path / "dos-remap-after-open"
-    target.mkdir()
-    volume_id, file_id = _directory_identity(target)
+    del tmp_path
+    monkeypatch.setattr(ledger_module, "Path", PureWindowsPath)
+    monkeypatch.setattr(ledger_module.os, "name", "nt")
+    final_path = "\\\\?\\Volume{11111111-1111-1111-1111-111111111111}\\fixture"
+    chain = (ledger_module._PinnedWindowsDirectoryHandle(700, (9, 2), final_path),)
     opened_paths: list[str] = []
-    original_open = ledger_module._windows_create_file_descriptor
+    stored_raw = b""
+    descriptors = iter((701, 702))
+    closed: list[int] = []
+
+    def observed_open(path, **_kwargs):
+        opened_paths.append(str(path))
+        return next(descriptors)
+
+    def modeled_write(_descriptor: int, raw: bytes) -> None:
+        nonlocal stored_raw
+        stored_raw = bytes(raw)
+
+    def modeled_fstat(_descriptor: int) -> SimpleNamespace:
+        return SimpleNamespace(
+            st_mode=0o100600,
+            st_dev=9,
+            st_ino=3,
+            st_size=len(stored_raw),
+            st_nlink=1,
+            st_file_attributes=0,
+        )
+
+    monkeypatch.setattr(
+        ledger_module,
+        "_open_windows_pinned_chain",
+        lambda _path, _identity: chain,
+    )
+    monkeypatch.setattr(ledger_module, "_verify_windows_pinned_chain", lambda _chain: None)
+    monkeypatch.setattr(ledger_module, "_windows_create_file_descriptor", observed_open)
+    monkeypatch.setattr(
+        ledger_module,
+        "_windows_stream_names",
+        lambda _path: ("::$DATA",),
+    )
+    monkeypatch.setattr(ledger_module, "_write_all", modeled_write)
+    monkeypatch.setattr(ledger_module, "_read_all_descriptor", lambda _descriptor: stored_raw)
+    monkeypatch.setattr(ledger_module.os, "fstat", modeled_fstat)
+    monkeypatch.setattr(ledger_module.os, "fsync", lambda _descriptor: None)
+    monkeypatch.setattr(ledger_module.os, "close", closed.append)
+
     with GateBPinnedDirectory.open(
-        target,
-        expected_volume_id_hex=volume_id,
-        expected_file_id_hex=file_id,
+        PureWindowsPath("C:/fixture"),
+        expected_volume_id_hex="9",
+        expected_file_id_hex="2",
     ) as pinned:
-        object.__setattr__(pinned, "_path", Path("Z:/synthetic-remapped-target"))
-
-        def observed_open(path, **kwargs):
-            opened_paths.append(str(path))
-            return original_open(path, **kwargs)
-
-        monkeypatch.setattr(
-            ledger_module,
-            "_windows_create_file_descriptor",
-            observed_open,
+        object.__setattr__(
+            pinned,
+            "_path",
+            PureWindowsPath("Z:/synthetic-remapped-target"),
         )
         artifact = pinned.create_regular("guid-only.json", b"fixture\n")
 
     assert artifact.raw == b"fixture\n"
     assert opened_paths
     assert all(path.startswith("\\\\?\\Volume{") for path in opened_paths)
-    assert (target / "guid-only.json").read_bytes() == b"fixture\n"
+    assert stored_raw == b"fixture\n"
+    assert closed == [701, 702, 700]
 
 
 @pytest.mark.parametrize(

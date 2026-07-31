@@ -1143,6 +1143,7 @@ def _run_production_primitive(
                         namespace_visible=namespace_visible,
                     )
                 ),
+                raising=False,
             )
             if action == "open":
                 opened = GateBPinnedDirectory.open(
