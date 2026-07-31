@@ -1249,10 +1249,8 @@ def _run_production_primitive(
     return tuple(probe.trace), probe.first_changed_field_check, failure
 
 
-_MATRIX_ROOT = Path(
-    "C:\\substituted"
-    "\u30dd\u30fc\u30ab\u30fcAI\u691c\u8a0e"
-    r"\.tmp_gate_b_retained_byte_typed_matrix_successor"
+_MATRIX_ROOT = (
+    Path(__file__).resolve().parents[2] / ".tmp_gate_b_retained_byte_typed_matrix_successor"
 )
 _FAULTS = (
     "ancestor-substitution",
