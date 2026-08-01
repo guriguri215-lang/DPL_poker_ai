@@ -16,6 +16,7 @@ from phase6.gate_b_contracts import (
     QUARANTINE_OUTPUT_NAMES,
     RELEASE_AUTHORIZATION_SCHEMA_VERSION,
     RETRY_AUTHORIZATION_SCHEMA_VERSION,
+    GateBV2CompatibilityObject,
     _root_identity_payload,
 )
 from phase6.gate_b_ledger import (
@@ -42,12 +43,16 @@ from phase6.gate_b_ledger import (
     _windows_reject_network_volume,
     _windows_stream_names,
     _windows_unlock_adapter,
+    _windows_v2_identity_from_descriptor,
     _write_exclusive,
     _write_exclusive_at,
     authorize_gate_b_release,
     authorize_gate_b_retry,
     mark_gate_b_failed_closed,
+    open_gate_b_v2_pinned_directory,
     seal_gate_b_attempt,
+    verify_gate_b_v2_pinned_directory,
+    verify_gate_b_v2_retained_root_topology,
 )
 
 HASH_A = "a" * 64
@@ -2779,3 +2784,159 @@ def test_pinned_human_record_files_reject_physical_alias(
                     expected_sha256=sha256_bytes(raw),
                     expected_size_bytes=len(raw),
                 )
+
+
+def test_windows_v2_native_identity_uses_exact_volume_serial_and_file_index() -> None:
+    class Function:
+        argtypes = None
+        restype = None
+
+        def __call__(self, handle, output) -> int:
+            assert handle.value == 1234
+            information = output._obj
+            information.volume_serial_number = 0x00355357
+            information.file_index_high = 0x0EDB0000
+            information.file_index_low = 0x0002971B
+            return 1
+
+    kernel32 = SimpleNamespace(GetFileInformationByHandle=Function())
+    assert _windows_v2_identity_from_descriptor(
+        9,
+        _kernel32=kernel32,
+        _get_osfhandle=lambda descriptor: 1234 if descriptor == 9 else 0,
+    ) == (0x00355357, 0x0EDB00000002971B)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="v2 profile is Windows-only")
+def test_v2_pinned_directory_exact_text_numeric_and_same_profile_round_trip(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "v2-native-root"
+    root.mkdir()
+    descriptor = ledger_module._open_directory_descriptor(root)
+    try:
+        volume, file_id = _windows_v2_identity_from_descriptor(descriptor)
+    finally:
+        os.close(descriptor)
+    volume_text = format(volume, "08x")
+    file_text = format(file_id, "016x")
+    with open_gate_b_v2_pinned_directory(
+        root,
+        serialization_profile="windows-volume8-file16-lowerhex-v1",
+        expected_volume_id_hex=volume_text,
+        expected_file_id_hex=file_text,
+    ) as pinned:
+        assert (
+            verify_gate_b_v2_pinned_directory(
+                pinned,
+                serialization_profile="windows-volume8-file16-lowerhex-v1",
+                expected_volume_id_hex=volume_text,
+                expected_file_id_hex=file_text,
+            )
+            is None
+        )
+
+
+@pytest.mark.parametrize(
+    ("volume", "file_id"),
+    [
+        ("355357", "0edb00000002971b"),
+        ("00355357", "edb00000002971b"),
+        ("0035535A", "0edb00000002971b"),
+        ("00355357", "0EDB00000002971B"),
+        ("00000000", "0edb00000002971b"),
+        ("00355357", "0000000000000000"),
+    ],
+)
+def test_v2_pinned_directory_rejects_text_before_any_native_identity_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    volume: str,
+    file_id: str,
+) -> None:
+    native_reads = []
+
+    def forbidden(*_args, **_kwargs):
+        native_reads.append("called")
+        raise AssertionError("invalid text reached native identity parsing")
+
+    monkeypatch.setattr(ledger_module, "_windows_v2_identity_from_descriptor", forbidden)
+    with pytest.raises(GateBLedgerError):
+        open_gate_b_v2_pinned_directory(
+            tmp_path,
+            serialization_profile="windows-volume8-file16-lowerhex-v1",
+            expected_volume_id_hex=volume,
+            expected_file_id_hex=file_id,
+        )
+    assert native_reads == []
+
+
+def test_v2_retained_root_topology_rejects_native_alias_nesting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    volume_root = r"\\?\Volume{11111111-1111-1111-1111-111111111111}"
+    final_paths = {
+        81: volume_root + r"\physical-parent",
+        82: volume_root + r"\physical-parent\aliased-child",
+        83: volume_root + r"\independent-root",
+    }
+    native_identities = {81: (9, 1), 82: (9, 2), 83: (9, 3)}
+    directories = {}
+    for role, descriptor in zip(
+        ("ledger_base", "quarantine_base", "test_root"),
+        (81, 82, 83),
+        strict=True,
+    ):
+        directory = object.__new__(GateBPinnedDirectory)
+        object.__setattr__(directory, "_descriptor", descriptor)
+        object.__setattr__(directory, "_stable_path", PureWindowsPath(final_paths[descriptor]))
+        directories[role] = directory
+
+    monkeypatch.setattr(ledger_module.os, "name", "nt")
+    monkeypatch.setattr(GateBPinnedDirectory, "verify_identity", lambda _self: None)
+    monkeypatch.setattr(
+        ledger_module,
+        "_windows_final_path_from_descriptor",
+        lambda descriptor: final_paths[descriptor],
+    )
+    monkeypatch.setattr(
+        ledger_module,
+        "_windows_v2_identity_from_descriptor",
+        lambda descriptor: native_identities[descriptor],
+    )
+    with pytest.raises(GateBLedgerError, match="physically nested"):
+        verify_gate_b_v2_retained_root_topology(directories)
+
+
+def test_every_ledger_request_consumer_nominally_rejects_v2_before_create(
+    tmp_path: Path,
+) -> None:
+    class SyntheticV2(GateBV2CompatibilityObject):
+        pass
+
+    request = SyntheticV2()
+    calls = (
+        lambda: GateBLedgerStore(request),
+        lambda: GateBLedgerStore.reserve_attempt(request, expected_latest_record_sha256=None),
+        lambda: GateBQuarantine.create(request),
+        lambda: _new_record(
+            request,
+            None,
+            attempt_ordinal=1,
+            from_state="UNSEEN",
+            to_state="RESERVED",
+            actor_id="fixture",
+            actor_role="fixture",
+        ),
+        lambda: _reserve_attempt(request, expected_latest_record_sha256=None),
+        lambda: _append_started(request, request, store=request),
+        lambda: mark_gate_b_failed_closed(request, request),
+        lambda: seal_gate_b_attempt(request, request),
+        lambda: authorize_gate_b_release(request, request),
+        lambda: authorize_gate_b_retry(request, request),
+    )
+    before = tuple(tmp_path.iterdir())
+    for call in calls:
+        with pytest.raises(GateBLedgerError):
+            call()
+    assert tuple(tmp_path.iterdir()) == before == ()

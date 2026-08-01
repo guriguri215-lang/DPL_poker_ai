@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 import importlib.metadata
 import inspect
 import io
@@ -21,6 +22,7 @@ from types import MappingProxyType, SimpleNamespace
 from typing import Literal
 
 import pytest
+from test_gate_b_contracts import _v2_chain_fixture
 from test_gate_b_contracts import batch_payload as _contract_batch_payload
 from test_gate_b_executor import _build_genuine_evidence
 from test_gate_b_loader import (
@@ -58,12 +60,17 @@ from phase6.gate_b_loader import (
     GateBPartialEvidenceError,
 )
 from phase6.gate_b_orchestrator import (
+    READINESS_SPEC_V2_SCHEMA,
+    REQUEST_SPEC_V2_SCHEMA,
     GateBMaterializationError,
     GateBPinnedSpecReference,
     GateBPreflightError,
     GateBSpecError,
+    GateBV2CompatibilityMaterializationSpecs,
     execute_gate_b_once,
     materialize_gate_b_readiness,
+    prepare_gate_b_v2_compatibility,
+    validate_gate_b_v2_compatibility_materialization_specs,
 )
 
 HASH_A = "a" * 64
@@ -93,6 +100,49 @@ def _store(path: Path, payload: object) -> tuple[str, int]:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(raw)
     return sha256_bytes(raw), len(raw)
+
+
+def _v2_specs_fixture():
+    fixture = _v2_chain_fixture()
+    hashes = dict(fixture.chain.artifact_hashes)
+    readiness = {
+        "schema_version": READINESS_SPEC_V2_SCHEMA,
+        "artifact_type": "gate_b_readiness_materialization_spec",
+        "projection_descriptor": fixture.descriptor,
+        "approval_record_sha256": hashes["approval_record"],
+        "signature_record_sha256": hashes["signature_record"],
+        "readiness_authorization_sha256": hashes["readiness_authorization"],
+    }
+    readiness_raw = canonical_json_bytes(readiness)
+    request = {
+        "schema_version": REQUEST_SPEC_V2_SCHEMA,
+        "artifact_type": "gate_b_request_materialization_spec",
+        "projection_descriptor": fixture.descriptor,
+        "approval_record_sha256": hashes["approval_record"],
+        "signature_record_sha256": hashes["signature_record"],
+        "readiness_authorization_sha256": hashes["readiness_authorization"],
+        "root_anchor_sha256s": {
+            "ledger_base": hashes["ledger_root_anchor"],
+            "quarantine_base": hashes["quarantine_root_anchor"],
+        },
+        "loader_request_sha256": hashes["loader_request"],
+    }
+    request_raw = canonical_json_bytes(request)
+    specs = validate_gate_b_v2_compatibility_materialization_specs(
+        fixture.chain,
+        readiness_spec_raw=readiness_raw,
+        expected_readiness_spec_sha256=sha256_bytes(readiness_raw),
+        request_spec_raw=request_raw,
+        expected_request_spec_sha256=sha256_bytes(request_raw),
+    )
+    return SimpleNamespace(
+        chain_fixture=fixture,
+        readiness=readiness,
+        readiness_raw=readiness_raw,
+        request=request,
+        request_raw=request_raw,
+        specs=specs,
+    )
 
 
 def _identity(path: Path) -> tuple[str, str]:
@@ -4401,3 +4451,205 @@ def test_strict_spec_parsers_reject_unknown_fields_and_caller_forgery() -> None:
             forged,
             orchestrator._OneShotExecutionSpec,
         )
+
+
+def test_v2_materialization_specs_join_exact_hashes_without_materializing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    forbidden = []
+
+    def create_forbidden(*_args, **_kwargs):
+        forbidden.append("create")
+        raise AssertionError("v2 compatibility spec validation created output")
+
+    monkeypatch.setattr(GateBPinnedDirectory, "create_regular", create_forbidden)
+    fixture = _v2_specs_fixture()
+    assert type(fixture.specs) is GateBV2CompatibilityMaterializationSpecs
+    assert fixture.specs.readiness_spec_sha256 == sha256_bytes(fixture.readiness_raw)
+    assert fixture.specs.request_spec_sha256 == sha256_bytes(fixture.request_raw)
+    assert forbidden == []
+
+
+@pytest.mark.parametrize(
+    ("artifact", "mutation"),
+    [
+        ("readiness", lambda value: value.pop("schema_version")),
+        (
+            "readiness",
+            lambda value: value.__setitem__(
+                "schema_version", "phase6-gate-b-readiness-materialization-spec-v1"
+            ),
+        ),
+        ("readiness", lambda value: value.update({"unknown": None})),
+        ("request", lambda value: value.pop("schema_version")),
+        (
+            "request",
+            lambda value: value.__setitem__(
+                "schema_version", "phase6-gate-b-request-materialization-spec-v1"
+            ),
+        ),
+        (
+            "request",
+            lambda value: value["projection_descriptor"].__setitem__(
+                "serialization_profile", "windows-minimal-lowerhex-v1"
+            ),
+        ),
+        (
+            "readiness",
+            lambda value: value["projection_descriptor"].__setitem__(
+                "source_materialization_projection_size_bytes", 1111.0
+            ),
+        ),
+        (
+            "request",
+            lambda value: value["projection_descriptor"].__setitem__(
+                "source_materialization_projection_size_bytes", 1111.0
+            ),
+        ),
+        (
+            "request",
+            lambda value: value.__setitem__("loader_request_sha256", "f" * 64),
+        ),
+        (
+            "request",
+            lambda value: value["root_anchor_sha256s"].__setitem__("ledger_base", "f" * 64),
+        ),
+    ],
+)
+def test_v2_materialization_specs_reject_schema_profile_field_and_hash_drift(
+    artifact: str,
+    mutation,
+) -> None:
+    fixture = _v2_specs_fixture()
+    payload = copy.deepcopy(getattr(fixture, artifact))
+    mutation(payload)
+    raw = canonical_json_bytes(payload)
+    kwargs = {
+        "readiness_spec_raw": fixture.readiness_raw,
+        "expected_readiness_spec_sha256": sha256_bytes(fixture.readiness_raw),
+        "request_spec_raw": fixture.request_raw,
+        "expected_request_spec_sha256": sha256_bytes(fixture.request_raw),
+    }
+    kwargs[f"{artifact}_spec_raw"] = raw
+    kwargs[f"expected_{artifact}_spec_sha256"] = sha256_bytes(raw)
+    with pytest.raises(GateBSpecError):
+        validate_gate_b_v2_compatibility_materialization_specs(
+            fixture.chain_fixture.chain,
+            **kwargs,
+        )
+
+
+def test_v2_materialization_specs_reject_noncanonical_bytes_and_private_tamper() -> None:
+    fixture = _v2_specs_fixture()
+    malformed = fixture.request_raw.rstrip(b"\n") + b" \n"
+    with pytest.raises(GateBSpecError):
+        validate_gate_b_v2_compatibility_materialization_specs(
+            fixture.chain_fixture.chain,
+            readiness_spec_raw=fixture.readiness_raw,
+            expected_readiness_spec_sha256=sha256_bytes(fixture.readiness_raw),
+            request_spec_raw=malformed,
+            expected_request_spec_sha256=sha256_bytes(malformed),
+        )
+    object.__setattr__(fixture.specs, "request_spec_sha256", "f" * 64)
+    with pytest.raises(GateBPreflightError):
+        prepare_gate_b_v2_compatibility(fixture.specs, fixture.chain_fixture.chain)
+
+
+def test_v2_materialization_spec_provenance_rejects_int_float_equivalence() -> None:
+    fixture = _v2_specs_fixture()
+    descriptor = copy.deepcopy(fixture.chain_fixture.descriptor)
+    descriptor["source_materialization_projection_size_bytes"] = 1111.0
+    object.__setattr__(
+        fixture.specs,
+        "projection_descriptor",
+        MappingProxyType(descriptor),
+    )
+    with pytest.raises(GateBPreflightError):
+        prepare_gate_b_v2_compatibility(fixture.specs, fixture.chain_fixture.chain)
+
+
+@pytest.mark.parametrize(
+    "artifact_hash_slot",
+    [
+        "approval_record",
+        "signature_record",
+        "readiness_authorization",
+        "ledger_root_anchor",
+        "quarantine_root_anchor",
+        "loader_request",
+    ],
+)
+def test_v2_compatibility_prepare_rejects_every_cross_chain_artifact_hash_substitution(
+    artifact_hash_slot: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _v2_specs_fixture()
+    substituted = _v2_chain_fixture(artifact_variant=artifact_hash_slot)
+    assert substituted.descriptor == fixture.chain_fixture.descriptor
+    assert (
+        fixture.chain_fixture.chain.artifact_hashes[artifact_hash_slot]
+        != substituted.chain.artifact_hashes[artifact_hash_slot]
+    )
+    reached = []
+
+    def forbidden_prepare(_chain):
+        reached.append("retained-preflight")
+        raise AssertionError("cross-chain substitution reached retained preflight")
+
+    monkeypatch.setattr(
+        orchestrator,
+        "prepare_gate_b_v2_compatibility_preflight",
+        forbidden_prepare,
+    )
+    with pytest.raises(GateBPreflightError):
+        prepare_gate_b_v2_compatibility(fixture.specs, substituted.chain)
+    assert reached == []
+
+
+def test_v2_materialization_spec_private_artifact_hash_snapshot_rejects_tamper() -> None:
+    fixture = _v2_specs_fixture()
+    hashes = dict(fixture.specs._artifact_hashes)
+    hashes["loader_request"] = "f" * 64
+    object.__setattr__(fixture.specs, "_artifact_hashes", MappingProxyType(hashes))
+    with pytest.raises(GateBPreflightError):
+        prepare_gate_b_v2_compatibility(fixture.specs, fixture.chain_fixture.chain)
+
+
+def test_v2_compatibility_prepare_dispatches_only_to_distinct_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _v2_specs_fixture()
+    sentinel = object()
+    calls = []
+
+    def prepare(chain):
+        calls.append(chain)
+        return sentinel
+
+    monkeypatch.setattr(orchestrator, "prepare_gate_b_v2_compatibility_preflight", prepare)
+    assert prepare_gate_b_v2_compatibility(fixture.specs, fixture.chain_fixture.chain) is sentinel
+    assert calls == [fixture.chain_fixture.chain]
+
+
+def test_v1_one_shot_surfaces_nominally_reject_v2_before_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _v2_specs_fixture()
+    lifecycle = []
+
+    def forbidden(*_args, **_kwargs):
+        lifecycle.append("called")
+        raise AssertionError("v2 reached a legacy lifecycle API")
+
+    monkeypatch.setattr(orchestrator, "reserve_gate_b_attempt", forbidden)
+    monkeypatch.setattr(orchestrator, "prepare_gate_b_test_open", forbidden)
+    with pytest.raises(GateBPreflightError):
+        execute_gate_b_once(fixture.specs)
+    with pytest.raises(GateBPreflightError):
+        orchestrator._preflight_gate_b_one_shot(
+            fixture.specs,
+            fixture.chain_fixture.chain,
+            {},
+            fixture.specs,
+        )
+    assert lifecycle == []

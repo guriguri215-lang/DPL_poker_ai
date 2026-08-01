@@ -16,7 +16,7 @@ from contextlib import AbstractContextManager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import wraps
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from types import MappingProxyType
 from typing import Any, BinaryIO, Protocol
 
@@ -30,6 +30,7 @@ from phase6.gate_b_contracts import (
     ZERO_SHA256,
     GateBBatchManifest,
     GateBReadinessAuthorization,
+    is_gate_b_v2_compatibility_object,
     load_gate_b_release_authorization,
     load_gate_b_retry_authorization,
 )
@@ -83,11 +84,18 @@ class GateBLedgerError(RuntimeError):
     """Sanitized failure for ledger, quarantine, or topology rejection."""
 
 
+def _reject_v2_request(request: object) -> None:
+    if is_gate_b_v2_compatibility_object(request):
+        _fail("legacy Gate B consumer rejects v2 compatibility objects")
+
+
 def _sanitized_api(function):
     @wraps(function)
     def wrapped(*args, **kwargs):
         error_message: str | None = None
         try:
+            for value in (*args, *kwargs.values()):
+                _reject_v2_request(value)
             return function(*args, **kwargs)
         except GateBLedgerError as exc:
             error_message = str(exc)
@@ -1008,6 +1016,57 @@ def _windows_final_path_from_descriptor(
     return final_path
 
 
+def _windows_v2_identity_from_descriptor(
+    descriptor: int,
+    *,
+    _kernel32=None,
+    _get_osfhandle=None,
+) -> tuple[int, int]:
+    """Read the native 32-bit volume serial and 64-bit file ID from a handle."""
+    if os.name != "nt" and (_kernel32 is None or _get_osfhandle is None):
+        _fail("v2 Windows identity primitive is unavailable")
+    if _kernel32 is None or _get_osfhandle is None:
+        import msvcrt
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        get_osfhandle = msvcrt.get_osfhandle
+    else:
+        kernel32 = _kernel32
+        get_osfhandle = _get_osfhandle
+
+    class FileTime(ctypes.Structure):
+        _fields_ = (("low", ctypes.c_uint32), ("high", ctypes.c_uint32))
+
+    class ByHandleFileInformation(ctypes.Structure):
+        _fields_ = (
+            ("file_attributes", ctypes.c_uint32),
+            ("creation_time", FileTime),
+            ("last_access_time", FileTime),
+            ("last_write_time", FileTime),
+            ("volume_serial_number", ctypes.c_uint32),
+            ("file_size_high", ctypes.c_uint32),
+            ("file_size_low", ctypes.c_uint32),
+            ("number_of_links", ctypes.c_uint32),
+            ("file_index_high", ctypes.c_uint32),
+            ("file_index_low", ctypes.c_uint32),
+        )
+
+    function = kernel32.GetFileInformationByHandle
+    function.argtypes = (ctypes.c_void_p, ctypes.POINTER(ByHandleFileInformation))
+    function.restype = ctypes.c_int
+    information = ByHandleFileInformation()
+    handle = get_osfhandle(descriptor)
+    if not function(ctypes.c_void_p(handle), ctypes.byref(information)):
+        raise OSError(ctypes.get_last_error(), "GetFileInformationByHandle failed")
+    identity = (
+        int(information.volume_serial_number),
+        (int(information.file_index_high) << 32) | int(information.file_index_low),
+    )
+    if identity[0] == 0 or identity[1] == 0:
+        _fail("v2 Windows retained identity is zero")
+    return identity
+
+
 def _windows_volume_guid_root(final_path: str) -> str:
     match = _WINDOWS_VOLUME_GUID_RE.match(final_path)
     if match is None:
@@ -1522,6 +1581,129 @@ class GateBPinnedDirectory:
     def __exit__(self, _exc_type, _exc, _traceback) -> bool:
         self.close()
         return False
+
+
+@_sanitized_api
+def open_gate_b_v2_pinned_directory(
+    absolute_path: Path | str,
+    *,
+    serialization_profile: str,
+    expected_volume_id_hex: str,
+    expected_file_id_hex: str,
+) -> GateBPinnedDirectory:
+    """Open one Windows root using the sole exact fixed-width v2 profile."""
+    if serialization_profile != "windows-volume8-file16-lowerhex-v1":
+        _fail("v2 pinned directory serialization profile mismatch")
+    if (
+        type(expected_volume_id_hex) is not str
+        or re.fullmatch(r"[0-9a-f]{8}", expected_volume_id_hex) is None
+        or int(expected_volume_id_hex, 16) == 0
+        or type(expected_file_id_hex) is not str
+        or re.fullmatch(r"[0-9a-f]{16}", expected_file_id_hex) is None
+        or int(expected_file_id_hex, 16) == 0
+    ):
+        _fail("v2 pinned directory fixed-width identity mismatch")
+    if os.name != "nt":
+        _fail("v2 Windows pinned directory profile is unavailable")
+    path = Path(absolute_path)
+    if not path.is_absolute() or ".." in path.parts or str(path) != str(absolute_path):
+        _fail("v2 pinned directory path must be canonical and absolute")
+    named = _verify_directory(path, "v2 retained directory")
+    retained_identity = (named.st_dev, named.st_ino)
+    chain = _open_windows_pinned_chain(path, retained_identity)
+    target = chain[-1]
+    instance = GateBPinnedDirectory(
+        path,
+        Path(target.final_path),
+        target.descriptor,
+        retained_identity,
+        chain,
+        _token=_PINNED_ARTIFACT_LOADER_TOKEN,
+    )
+    try:
+        verify_gate_b_v2_pinned_directory(
+            instance,
+            serialization_profile=serialization_profile,
+            expected_volume_id_hex=expected_volume_id_hex,
+            expected_file_id_hex=expected_file_id_hex,
+        )
+        return instance
+    except BaseException:
+        with suppress(Exception):
+            instance.close()
+        raise
+
+
+@_sanitized_api
+def verify_gate_b_v2_pinned_directory(
+    directory: GateBPinnedDirectory,
+    *,
+    serialization_profile: str,
+    expected_volume_id_hex: str,
+    expected_file_id_hex: str,
+) -> None:
+    """Recheck one retained handle and exact-reserialize its native v2 identity."""
+    if type(directory) is not GateBPinnedDirectory:
+        _fail("v2 retained directory nominal type mismatch")
+    if serialization_profile != "windows-volume8-file16-lowerhex-v1":
+        _fail("v2 retained directory serialization profile mismatch")
+    if (
+        type(expected_volume_id_hex) is not str
+        or re.fullmatch(r"[0-9a-f]{8}", expected_volume_id_hex) is None
+        or int(expected_volume_id_hex, 16) == 0
+        or type(expected_file_id_hex) is not str
+        or re.fullmatch(r"[0-9a-f]{16}", expected_file_id_hex) is None
+        or int(expected_file_id_hex, 16) == 0
+    ):
+        _fail("v2 retained directory fixed-width identity mismatch")
+    directory.verify_identity()
+    observed = _windows_v2_identity_from_descriptor(directory._descriptor)
+    expected = (int(expected_volume_id_hex, 16), int(expected_file_id_hex, 16))
+    if observed != expected:
+        _fail("v2 retained directory numeric identity mismatch")
+    if (
+        format(observed[0], "08x") != expected_volume_id_hex
+        or format(observed[1], "016x") != expected_file_id_hex
+    ):
+        _fail("v2 retained directory same-profile reserialization mismatch")
+
+
+@_sanitized_api
+def verify_gate_b_v2_retained_root_topology(
+    directories: Mapping[str, GateBPinnedDirectory],
+) -> None:
+    """Reject physical aliases and nesting across the three retained v2 roots."""
+    roles = ("ledger_base", "quarantine_base", "test_root")
+    if os.name != "nt":
+        _fail("v2 retained root topology requires Windows")
+    if not isinstance(directories, Mapping) or set(directories) != set(roles):
+        _fail("v2 retained root topology fields are not closed-world")
+    stable_parts: dict[str, tuple[str, ...]] = {}
+    native_identities: dict[str, tuple[int, int]] = {}
+    for role in roles:
+        directory = directories[role]
+        if type(directory) is not GateBPinnedDirectory:
+            _fail("v2 retained root topology nominal type mismatch")
+        directory.verify_identity()
+        fresh_final_path = _windows_final_path_from_descriptor(directory._descriptor)
+        if fresh_final_path.casefold() != str(directory._stable_path).casefold():
+            _fail("v2 retained root stable path changed")
+        stable_parts[role] = tuple(
+            part.casefold() for part in PureWindowsPath(fresh_final_path).parts
+        )
+        native_identities[role] = _windows_v2_identity_from_descriptor(directory._descriptor)
+    if len(set(native_identities.values())) != len(roles):
+        _fail("v2 retained roots must be physically distinct")
+    for index, left_role in enumerate(roles):
+        left = stable_parts[left_role]
+        for right_role in roles[index + 1 :]:
+            right = stable_parts[right_role]
+            if (
+                left == right
+                or (len(left) < len(right) and right[: len(left)] == left)
+                or (len(right) < len(left) and left[: len(right)] == right)
+            ):
+                _fail("v2 retained roots must not be physically nested")
 
 
 def _write_exclusive(path: Path, raw: bytes) -> None:
@@ -2245,6 +2427,7 @@ class GateBLedgerStore:
     """Pinned namespace facade for complete chain reload and durable append."""
 
     def __init__(self, request: GateBRequestLike) -> None:
+        _reject_v2_request(request)
         self.request = request
         _six_digit_positive(request.attempt_ordinal, "request attempt ordinal")
         self._retry_catalog = _retry_catalog(request.batch)
@@ -2561,6 +2744,7 @@ def _new_record(
     authorization_record_sha256: str | None = None,
     next_attempt_ordinal: int | None = None,
 ) -> dict[str, Any]:
+    _reject_v2_request(request)
     return {
         "schema_version": ATTEMPT_LEDGER_RECORD_SCHEMA_VERSION,
         "artifact_type": "gate_b_test_attempt_ledger_record",
@@ -2585,6 +2769,7 @@ def _reserve_attempt(
     request: GateBRequestLike, *, expected_latest_record_sha256: str | None
 ) -> GateBAttemptReservation:
     """Durably reserve one attempt through the sole ledger reservation path."""
+    _reject_v2_request(request)
     store = GateBLedgerStore(request)
     with store.lock():
         chain = store.load_chain()
@@ -2638,6 +2823,7 @@ def _append_started(
     store: GateBLedgerStore,
 ) -> GateBLedgerRecord:
     """Append STARTED while the caller still holds the namespace lock."""
+    _reject_v2_request(request)
     latest = reservation.record
     if latest.record_sha256 != reservation.reserved_record_sha256:
         _fail("reservation object hash mismatch")
@@ -2892,6 +3078,7 @@ class GateBQuarantine:
         request: GateBRequestLike,
         quarantine_base_descriptor: int | None = None,
     ) -> GateBQuarantine:
+        _reject_v2_request(request)
         _six_digit_positive(request.attempt_ordinal, "quarantine attempt ordinal")
         base = _verify_root_ref(request.roots["quarantine_base"], "quarantine_base")
         if quarantine_base_descriptor is None:
@@ -3143,6 +3330,7 @@ class GateBQuarantine:
         started_record_sha256: str | None,
         sealed_at_utc: str | None = None,
     ) -> tuple[Path, str]:
+        _reject_v2_request(request)
         if self._sealed or status not in {"sealed", "failed_closed"}:
             _fail("quarantine cannot be sealed in this state")
         _six_digit_positive(request.attempt_ordinal, "quarantine attempt ordinal")
@@ -3356,6 +3544,7 @@ class _PinnedQuarantineLoad(AbstractContextManager["_PinnedQuarantineLoad"]):
         return self
 
     def verify_identity(self, request: GateBRequestLike) -> None:
+        _reject_v2_request(request)
         if self._closed:
             _fail("pinned quarantine evidence is already closed")
         base, base_identity = _verify_pinned_root_descriptor(
@@ -3470,6 +3659,7 @@ def _open_quarantine(
     path: Path | str,
     expected_sha256: str,
 ) -> _PinnedQuarantineLoad:
+    _reject_v2_request(request)
     _six_digit_positive(request.attempt_ordinal, "quarantine attempt ordinal")
     expected_hash = _sha(expected_sha256, "expected quarantine manifest hash")
     quarantine_base = _verify_root_ref(request.roots["quarantine_base"], "quarantine_base")
@@ -3560,6 +3750,7 @@ def _load_quarantine(
     path: Path | str,
     expected_sha256: str,
 ) -> tuple[dict[str, Any], bytes]:
+    _reject_v2_request(request)
     with _open_quarantine(request, path, expected_sha256) as pinned:
         pinned.verify_identity(request)
         return pinned.manifest, pinned.access_raw
@@ -3572,6 +3763,7 @@ def _load_quarantine_pinned(
     expected_directory: Path,
     directory_descriptor: int,
 ) -> tuple[dict[str, Any], bytes, Mapping[str, _PinnedQuarantineFile]]:
+    _reject_v2_request(request)
     manifest_metadata = _regular_metadata_at(
         directory_descriptor,
         expected_directory,
@@ -3702,6 +3894,7 @@ def _validate_failed_access_evidence(
     failed_record: GateBLedgerRecord,
     access_raw: bytes,
 ) -> None:
+    _reject_v2_request(request)
     entries = _validate_access_log_bytes(
         access_raw,
         test_batch_hash=request.batch.test_batch_hash,

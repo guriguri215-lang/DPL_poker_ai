@@ -19,13 +19,18 @@ from phase6.contracts import (
     ValidatedPhase6ContractBundleEvidence,
     canonical_json_bytes,
     load_phase6_contract_bundle_evidence_from_canonical_artifacts,
+    sha256_bytes,
 )
 from phase6.gate_b_contracts import (
     GateBContractError,
+    GateBV2CompatibilityObject,
+    GateBV2CompatibilityTrustChain,
+    is_gate_b_v2_compatibility_object,
     load_gate_b_human_approval_record_bytes,
     load_gate_b_human_signature_record_bytes,
     load_gate_b_readiness_authorization_bytes,
     validate_gate_b_readiness_human_trust_chain,
+    validate_gate_b_v2_compatibility_trust_chain,
 )
 from phase6.gate_b_executor import (
     MAX_AGGREGATE_OUTPUT_BYTES,
@@ -46,6 +51,7 @@ from phase6.gate_b_loader import (
     GateBRetainedArtifactSnapshot,
     GateBRetainedDirectorySnapshot,
     GateBRetainedLoaderBundle,
+    PreparedGateBV2CompatibilityPreflight,
     _clear_gate_b_retained_calibration_roles,
     _register_gate_b_retained_calibration_roles,
     build_gate_b_retained_loader_bundle,
@@ -54,6 +60,7 @@ from phase6.gate_b_loader import (
     open_gate_b_retained_directory,
     open_gate_b_test_input,
     prepare_gate_b_test_open,
+    prepare_gate_b_v2_compatibility_preflight,
     read_gate_b_retained_artifact,
     reserve_gate_b_attempt,
     verify_gate_b_execution_environment,
@@ -63,6 +70,8 @@ READINESS_SPEC_SCHEMA = "phase6-gate-b-readiness-materialization-spec-v1"
 REQUEST_SPEC_SCHEMA = "phase6-gate-b-request-materialization-spec-v1"
 ONE_SHOT_SPEC_SCHEMA = "phase6-gate-b-one-shot-execution-spec-v1"
 CALIBRATION_REFERENCE_SCHEMA = "phase6-gate-b-calibration-bundle-reference-v1"
+READINESS_SPEC_V2_SCHEMA = "phase6-gate-b-readiness-materialization-spec-v2"
+REQUEST_SPEC_V2_SCHEMA = "phase6-gate-b-request-materialization-spec-v2"
 
 _SHA_RE = re.compile(r"[0-9a-f]{64}\Z")
 _HEX_RE = re.compile(r"(?:0|[1-9a-f][0-9a-f]*)\Z")
@@ -75,8 +84,10 @@ _RELATIVE_RE = re.compile(
     r"(?:/[A-Za-z0-9][A-Za-z0-9._-]{0,127})*\Z"
 )
 _SPEC_TOKEN = object()
+_V2_SPEC_TOKEN = object()
 _OPENED_TOKEN = object()
 _LOADED_SPECS: dict[int, object] = {}
+_V2_SPEC_REGISTRY: dict[int, tuple[object, ...]] = {}
 
 _ARTIFACT_REF_FIELDS = {
     "parent_absolute_path",
@@ -330,6 +341,210 @@ class _OneShotExecutionSpec:
     process_timeout_seconds: int
     output_limits: Mapping[str, int]
     _token: object = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class GateBV2CompatibilityMaterializationSpecs(GateBV2CompatibilityObject):
+    """Strict v2 readiness/request spec joins with no materialization capability."""
+
+    projection_descriptor: Mapping[str, Any]
+    readiness_spec_sha256: str
+    request_spec_sha256: str
+    _artifact_hashes: Mapping[str, str] = field(repr=False, compare=False)
+    _readiness_spec_raw: bytes = field(repr=False, compare=False)
+    _request_spec_raw: bytes = field(repr=False, compare=False)
+    _token: object = field(repr=False, compare=False)
+
+    def __new__(
+        cls,
+        *,
+        _token: object | None = None,
+    ) -> GateBV2CompatibilityMaterializationSpecs:
+        if _token is not _V2_SPEC_TOKEN:
+            raise TypeError("v2 compatibility spec construction is private")
+        return object.__new__(cls)
+
+
+def _v2_spec_payload(raw: bytes, expected_sha256: str, label: str) -> dict[str, Any]:
+    if type(raw) is not bytes or sha256_bytes(raw) != _sha(expected_sha256, f"{label} hash"):
+        raise ValueError(f"{label} stored-byte hash mismatch")
+    return _strict_object(raw)
+
+
+def _validate_v2_spec_descriptor(
+    value: object,
+    expected: Mapping[str, Any],
+) -> None:
+    if type(value) is not dict or canonical_json_bytes(value) != canonical_json_bytes(
+        _plain(expected)
+    ):
+        raise ValueError("v2 compatibility spec projection descriptor mismatch")
+
+
+def _validate_v2_materialization_specs(
+    specs: GateBV2CompatibilityMaterializationSpecs,
+) -> GateBV2CompatibilityMaterializationSpecs:
+    if type(specs) is not GateBV2CompatibilityMaterializationSpecs:
+        raise TypeError("v2 compatibility spec nominal type mismatch")
+    registered = _V2_SPEC_REGISTRY.get(id(specs))
+    try:
+        current = (
+            specs,
+            canonical_json_bytes(_plain(specs.projection_descriptor)),
+            specs.readiness_spec_sha256,
+            specs.request_spec_sha256,
+            canonical_json_bytes(_plain(specs._artifact_hashes)),
+            specs._readiness_spec_raw,
+            specs._request_spec_raw,
+            specs._token,
+        )
+    except Exception:
+        raise TypeError("v2 compatibility spec provenance mismatch") from None
+    if (
+        registered is None
+        or registered[0] is not specs
+        or current != registered
+        or current[7] is not _V2_SPEC_TOKEN
+        or sha256_bytes(current[5]) != current[2]
+        or sha256_bytes(current[6]) != current[3]
+    ):
+        raise TypeError("v2 compatibility spec provenance mismatch")
+    return specs
+
+
+def validate_gate_b_v2_compatibility_materialization_specs(
+    chain: GateBV2CompatibilityTrustChain,
+    *,
+    readiness_spec_raw: bytes,
+    expected_readiness_spec_sha256: str,
+    request_spec_raw: bytes,
+    expected_request_spec_sha256: str,
+) -> GateBV2CompatibilityMaterializationSpecs:
+    """Validate schema-first v2 specs without creating readiness or request bytes."""
+    try:
+        validated = validate_gate_b_v2_compatibility_trust_chain(chain)
+        descriptor = _plain(validated.descriptor)
+        hashes = dict(validated.artifact_hashes)
+        readiness = _v2_spec_payload(
+            readiness_spec_raw,
+            expected_readiness_spec_sha256,
+            "v2 readiness materialization spec",
+        )
+        _closed(
+            readiness,
+            {
+                "schema_version",
+                "artifact_type",
+                "projection_descriptor",
+                "approval_record_sha256",
+                "signature_record_sha256",
+                "readiness_authorization_sha256",
+            },
+            "v2 readiness materialization spec",
+        )
+        if (
+            readiness["schema_version"] != READINESS_SPEC_V2_SCHEMA
+            or readiness["artifact_type"] != "gate_b_readiness_materialization_spec"
+        ):
+            raise ValueError("v2 readiness materialization spec identity mismatch")
+        _validate_v2_spec_descriptor(readiness["projection_descriptor"], descriptor)
+        if (
+            readiness["approval_record_sha256"] != hashes["approval_record"]
+            or readiness["signature_record_sha256"] != hashes["signature_record"]
+            or readiness["readiness_authorization_sha256"] != hashes["readiness_authorization"]
+        ):
+            raise ValueError("v2 readiness materialization spec join mismatch")
+
+        request = _v2_spec_payload(
+            request_spec_raw,
+            expected_request_spec_sha256,
+            "v2 request materialization spec",
+        )
+        _closed(
+            request,
+            {
+                "schema_version",
+                "artifact_type",
+                "projection_descriptor",
+                "approval_record_sha256",
+                "signature_record_sha256",
+                "readiness_authorization_sha256",
+                "root_anchor_sha256s",
+                "loader_request_sha256",
+            },
+            "v2 request materialization spec",
+        )
+        if (
+            request["schema_version"] != REQUEST_SPEC_V2_SCHEMA
+            or request["artifact_type"] != "gate_b_request_materialization_spec"
+        ):
+            raise ValueError("v2 request materialization spec identity mismatch")
+        _validate_v2_spec_descriptor(request["projection_descriptor"], descriptor)
+        anchors = _closed(
+            request["root_anchor_sha256s"],
+            {"ledger_base", "quarantine_base"},
+            "v2 request materialization anchor hashes",
+        )
+        if (
+            request["approval_record_sha256"] != hashes["approval_record"]
+            or request["signature_record_sha256"] != hashes["signature_record"]
+            or request["readiness_authorization_sha256"] != hashes["readiness_authorization"]
+            or anchors["ledger_base"] != hashes["ledger_root_anchor"]
+            or anchors["quarantine_base"] != hashes["quarantine_root_anchor"]
+            or request["loader_request_sha256"] != hashes["loader_request"]
+        ):
+            raise ValueError("v2 request materialization spec join mismatch")
+        specs = GateBV2CompatibilityMaterializationSpecs(_token=_V2_SPEC_TOKEN)
+        values = {
+            "projection_descriptor": MappingProxyType(descriptor),
+            "readiness_spec_sha256": expected_readiness_spec_sha256,
+            "request_spec_sha256": expected_request_spec_sha256,
+            "_artifact_hashes": MappingProxyType(dict(hashes)),
+            "_readiness_spec_raw": bytes(readiness_spec_raw),
+            "_request_spec_raw": bytes(request_spec_raw),
+            "_token": _V2_SPEC_TOKEN,
+        }
+        for name, value in values.items():
+            object.__setattr__(specs, name, value)
+        snapshot = (
+            specs,
+            canonical_json_bytes(descriptor),
+            expected_readiness_spec_sha256,
+            expected_request_spec_sha256,
+            canonical_json_bytes(hashes),
+            bytes(readiness_spec_raw),
+            bytes(request_spec_raw),
+            _V2_SPEC_TOKEN,
+        )
+        _V2_SPEC_REGISTRY[id(specs)] = snapshot
+        return specs
+    except GateBSpecError:
+        raise
+    except (GateBContractError, TypeError, ValueError, UnicodeError):
+        _raise_sanitized(GateBSpecError)
+
+
+def prepare_gate_b_v2_compatibility(
+    specs: GateBV2CompatibilityMaterializationSpecs,
+    chain: GateBV2CompatibilityTrustChain,
+) -> PreparedGateBV2CompatibilityPreflight:
+    """Reach only the distinct v2 retained-root prepared boundary."""
+    try:
+        _validate_v2_materialization_specs(specs)
+        validated = validate_gate_b_v2_compatibility_trust_chain(chain)
+        if canonical_json_bytes(_plain(specs.projection_descriptor)) != canonical_json_bytes(
+            _plain(validated.descriptor)
+        ):
+            raise ValueError("v2 compatibility specs and trust chain differ")
+        if canonical_json_bytes(_plain(specs._artifact_hashes)) != canonical_json_bytes(
+            _plain(validated.artifact_hashes)
+        ):
+            raise ValueError("v2 compatibility specs and trust-chain artifact hashes differ")
+        return prepare_gate_b_v2_compatibility_preflight(validated)
+    except GateBPreflightError:
+        raise
+    except (GateBContractError, GateBLedgerError, GateBLoaderError, TypeError, ValueError):
+        _raise_sanitized(GateBPreflightError)
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -1234,6 +1449,8 @@ def _preflight_gate_b_one_shot(
     retained_roots: Mapping[str, GateBRetainedDirectorySnapshot],
     common_parent: GateBRetainedDirectorySnapshot,
 ) -> None:
+    if is_gate_b_v2_compatibility_object(spec) or is_gate_b_v2_compatibility_object(request):
+        _raise_sanitized(GateBPreflightError)
     _require_loaded_spec(spec, _OneShotExecutionSpec)
     try:
         if (
@@ -1373,6 +1590,8 @@ def execute_gate_b_once(
     spec_reference: GateBPinnedSpecReference,
 ) -> Mapping[str, Any]:
     """Execute exactly one prevalidated Gate B attempt and stop at SEALED."""
+    if is_gate_b_v2_compatibility_object(spec_reference):
+        _raise_sanitized(GateBPreflightError)
     with ExitStack() as stack:
         spec = _load_top_spec(spec_reference, stack, operation="execute-once")
         _require_loaded_spec(spec, _OneShotExecutionSpec)

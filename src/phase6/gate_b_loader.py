@@ -38,15 +38,20 @@ from phase6.gate_b_contracts import (
     EXECUTION_CONFIG_INDEX_SCHEMA_VERSION,
     LOADER_REQUEST_SCHEMA_VERSION,
     OPPONENT_PAYLOAD_INDEX_SCHEMA_VERSION,
+    ROOT_IDENTITY_SERIALIZATION_PROFILE_V2,
     SELECTED_CONFIG_LOCK_SCHEMA_VERSION,
     GateBBatchManifest,
     GateBExecutionContext,
     GateBReadinessAuthorization,
+    GateBV2CompatibilityObject,
+    GateBV2CompatibilityTrustChain,
     build_gate_b_preapproval_root_identity_projection,
+    is_gate_b_v2_compatibility_object,
     load_gate_b_batch_manifest_bytes,
     load_gate_b_execution_context_bytes,
     load_gate_b_readiness_authorization_bytes,
     load_gate_b_root_anchor_bytes,
+    validate_gate_b_v2_compatibility_trust_chain,
 )
 from phase6.gate_b_ledger import (
     GateBAttemptReservation,
@@ -57,7 +62,10 @@ from phase6.gate_b_ledger import (
     GateBPinnedDirectory,
     GateBQuarantine,
     mark_gate_b_failed_closed,
+    open_gate_b_v2_pinned_directory,
     seal_gate_b_attempt,
+    verify_gate_b_v2_pinned_directory,
+    verify_gate_b_v2_retained_root_topology,
 )
 
 _SHA_ZERO = "0" * 64
@@ -88,6 +96,8 @@ _RETAINED_MESSAGES = {
     "retained loader request failed closed",
 }
 _RETAINED_TOKEN = object()
+_V2_PREPARED_TOKEN = object()
+_V2_PREPARED_REGISTRY: dict[int, tuple[object, ...]] = {}
 _RETAINED_ARTIFACT_SLOTS: Mapping[str, str | None] = MappingProxyType(
     {
         "readiness.spec": None,
@@ -1271,6 +1281,178 @@ class GateBLoaderRequest:
         )
 
 
+@dataclass(frozen=True, slots=True, init=False)
+class PreparedGateBV2CompatibilityPreflight(GateBV2CompatibilityObject):
+    """Retained-root v2 boundary with no reservation, Test, or output capability."""
+
+    projection_sha256: str
+    loader_request_sha256: str
+    roots: Mapping[str, Mapping[str, Any]]
+    _chain: GateBV2CompatibilityTrustChain = field(repr=False, compare=False)
+    _directories: Mapping[str, GateBPinnedDirectory] = field(repr=False, compare=False)
+    _closed: bool = field(repr=False, compare=False)
+    _token: object = field(repr=False, compare=False)
+
+    def __new__(
+        cls,
+        *,
+        _token: object | None = None,
+    ) -> PreparedGateBV2CompatibilityPreflight:
+        if _token is not _V2_PREPARED_TOKEN:
+            raise TypeError("v2 prepared-object construction is private")
+        return object.__new__(cls)
+
+    def __repr__(self) -> str:
+        state = "closed" if self._closed else "compatibility-qualified"
+        return (
+            "PreparedGateBV2CompatibilityPreflight("
+            f"projection_sha256={self.projection_sha256!r}, state={state!r})"
+        )
+
+    @_sanitized_api
+    def verify_identity(self) -> None:
+        prepared = validate_gate_b_v2_compatibility_preflight(self)
+        if prepared._closed:
+            _fail("v2 compatibility preflight is closed")
+        for role in ("ledger_base", "quarantine_base", "test_root"):
+            root = _plain(prepared.roots[role])
+            verify_gate_b_v2_pinned_directory(
+                prepared._directories[role],
+                serialization_profile=ROOT_IDENTITY_SERIALIZATION_PROFILE_V2,
+                expected_volume_id_hex=root["volume_id_hex"],
+                expected_file_id_hex=root["file_id_hex"],
+            )
+        verify_gate_b_v2_retained_root_topology(prepared._directories)
+
+    @_sanitized_api
+    def close(self) -> None:
+        validate_gate_b_v2_compatibility_preflight(self)
+        if self._closed:
+            return
+        first_error: BaseException | None = None
+        for role in ("test_root", "quarantine_base", "ledger_base"):
+            try:
+                self._directories[role].close()
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+        object.__setattr__(self, "_closed", True)
+        if first_error is not None:
+            raise GateBLoaderError("v2 retained-root close failed closed") from first_error
+
+    def __enter__(self) -> PreparedGateBV2CompatibilityPreflight:
+        validate_gate_b_v2_compatibility_preflight(self)
+        if self._closed:
+            _fail("v2 compatibility preflight is closed")
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback) -> None:
+        self.close()
+
+
+def validate_gate_b_v2_compatibility_preflight(
+    prepared: PreparedGateBV2CompatibilityPreflight,
+) -> PreparedGateBV2CompatibilityPreflight:
+    """Validate the prepared object's exact nominal type and private provenance."""
+    if type(prepared) is not PreparedGateBV2CompatibilityPreflight:
+        _fail("v2 compatibility prepared-object nominal type mismatch")
+    registered = _V2_PREPARED_REGISTRY.get(id(prepared))
+    try:
+        current = (
+            prepared,
+            prepared.projection_sha256,
+            prepared.loader_request_sha256,
+            canonical_json_bytes(_plain(prepared.roots)),
+            prepared._chain,
+            tuple(
+                (role, prepared._directories[role])
+                for role in ("ledger_base", "quarantine_base", "test_root")
+            ),
+            prepared._token,
+        )
+    except Exception:
+        _fail("v2 compatibility prepared-object provenance mismatch")
+    if (
+        registered is None
+        or registered[0] is not prepared
+        or current != registered
+        or current[6] is not _V2_PREPARED_TOKEN
+    ):
+        _fail("v2 compatibility prepared-object provenance mismatch")
+    validate_gate_b_v2_compatibility_trust_chain(prepared._chain)
+    return prepared
+
+
+@_sanitized_api
+def prepare_gate_b_v2_compatibility_preflight(
+    chain: GateBV2CompatibilityTrustChain,
+) -> PreparedGateBV2CompatibilityPreflight:
+    """Verify fixed-width retained roots and stop before every lifecycle action."""
+    validated = validate_gate_b_v2_compatibility_trust_chain(chain)
+    roots = _plain(validated.roots)
+    descriptor = _plain(validated.descriptor)
+    profile = descriptor["serialization_profile"]
+    opened: dict[str, GateBPinnedDirectory] = {}
+    try:
+        for role in ("ledger_base", "quarantine_base", "test_root"):
+            root = roots[role]
+            opened[role] = open_gate_b_v2_pinned_directory(
+                root["absolute_path"],
+                serialization_profile=profile,
+                expected_volume_id_hex=root["volume_id_hex"],
+                expected_file_id_hex=root["file_id_hex"],
+            )
+        verify_gate_b_v2_retained_root_topology(opened)
+        for role, artifact_name in (
+            ("ledger_base", "ledger_root_anchor"),
+            ("quarantine_base", "quarantine_root_anchor"),
+        ):
+            root = roots[role]
+            if opened[role].direct_child_names() != (root["anchor_relative_path"],):
+                _fail("v2 writable root must contain only its direct-child anchor")
+            expected_raw = validated._artifact_raws[artifact_name]
+            retained_anchor = opened[role].read_regular(
+                root["anchor_relative_path"],
+                expected_sha256=validated.artifact_hashes[artifact_name],
+                expected_size_bytes=len(expected_raw),
+            )
+            if (
+                retained_anchor.raw != expected_raw
+                or retained_anchor.sha256 != validated.artifact_hashes[artifact_name]
+            ):
+                _fail("v2 retained root anchor stored-byte identity mismatch")
+        prepared = PreparedGateBV2CompatibilityPreflight(_token=_V2_PREPARED_TOKEN)
+        values = {
+            "projection_sha256": validated.projection.sha256,
+            "loader_request_sha256": validated.artifact_hashes["loader_request"],
+            "roots": _freeze(roots),
+            "_chain": validated,
+            "_directories": MappingProxyType(dict(opened)),
+            "_closed": False,
+            "_token": _V2_PREPARED_TOKEN,
+        }
+        for name, value in values.items():
+            object.__setattr__(prepared, name, value)
+        snapshot = (
+            prepared,
+            prepared.projection_sha256,
+            prepared.loader_request_sha256,
+            canonical_json_bytes(roots),
+            validated,
+            tuple((role, opened[role]) for role in ("ledger_base", "quarantine_base", "test_root")),
+            _V2_PREPARED_TOKEN,
+        )
+        _V2_PREPARED_REGISTRY[id(prepared)] = snapshot
+        return prepared
+    except BaseException:
+        for role in ("test_root", "quarantine_base", "ledger_base"):
+            directory = opened.get(role)
+            if directory is not None:
+                with suppress(Exception):
+                    directory.close()
+        raise
+
+
 def _parse_gate_b_loader_request_envelope(
     raw: bytes,
     expected_sha256: str,
@@ -1605,6 +1787,8 @@ def load_gate_b_loader_request(
     expected_readiness_signature_record_sha256: str,
 ) -> GateBLoaderRequest:
     """Compatibility route with one named canonicalization and retained joins."""
+    if is_gate_b_v2_compatibility_object(path):
+        _fail("legacy loader request route rejects v2 compatibility objects")
     request_path = _canonicalize_loader_request_path(path)
     with ExitStack() as stack:
         request = _compatibility_read_artifact(
@@ -2120,6 +2304,8 @@ def verify_gate_b_execution_environment(
 def _reserve_attempt(
     request: GateBLoaderRequest, *, expected_latest_record_sha256: str | None
 ) -> GateBAttemptReservation:
+    if is_gate_b_v2_compatibility_object(request):
+        _fail("legacy reservation rejects v2 compatibility objects")
     return GateBLedgerStore.reserve_attempt(
         request,
         expected_latest_record_sha256=expected_latest_record_sha256,
@@ -2132,6 +2318,8 @@ def _append_started(
     *,
     store: GateBLedgerStore,
 ) -> GateBLedgerRecord:
+    if is_gate_b_v2_compatibility_object(request):
+        _fail("legacy STARTED append rejects v2 compatibility objects")
     return store.append_started(request, reservation)
 
 
@@ -2140,6 +2328,8 @@ def reserve_gate_b_attempt(
     request: GateBLoaderRequest, *, expected_latest_record_sha256: str | None
 ) -> GateBAttemptReservation:
     """Create the one durable reservation path before any Test-child open."""
+    if is_gate_b_v2_compatibility_object(request):
+        _fail("legacy reservation rejects v2 compatibility objects")
     return _reserve_attempt(request, expected_latest_record_sha256=expected_latest_record_sha256)
 
 
@@ -2187,6 +2377,8 @@ def prepare_gate_b_test_open(
     request: GateBLoaderRequest, reservation: GateBAttemptReservation
 ) -> PreparedGateBTestOpen:
     """Acquire and retain the namespace lock without opening any Test child."""
+    if is_gate_b_v2_compatibility_object(request) or is_gate_b_v2_compatibility_object(reservation):
+        _fail("legacy Test preparation rejects v2 compatibility objects")
     if (
         reservation.test_batch_hash != request.batch.test_batch_hash
         or reservation.attempt_ordinal != request.attempt_ordinal
@@ -3176,6 +3368,8 @@ def open_gate_b_test_input(
     prepared: PreparedGateBTestOpen, *, executor: GateBApprovedExecutor
 ) -> GateBExecutionReceipt:
     """Run one approved callback and return only a sanitized sealed receipt."""
+    if is_gate_b_v2_compatibility_object(prepared):
+        _fail("legacy Test input route rejects v2 compatibility objects")
     if prepared._closed or prepared._consumed:
         _fail("prepared Test open is not single-use")
     prepared._consumed = True

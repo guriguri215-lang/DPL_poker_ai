@@ -256,6 +256,40 @@ def _complete_argv(tmp_path: Path, operation: str) -> list[str]:
 
 
 @pytest.mark.parametrize(
+    ("flag", "fixed_width_value"),
+    [
+        ("--spec-parent-volume-id-hex", "00355357"),
+        ("--spec-parent-file-id-hex", "0edb00000002971b"),
+    ],
+)
+def test_v1_cli_pinned_parent_rejects_v2_fixed_width_identity_without_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    flag: str,
+    fixed_width_value: str,
+) -> None:
+    calls = []
+
+    def forbidden(*_args, **_kwargs):
+        calls.append("called")
+        raise AssertionError("v2 identity reached v1 CLI lifecycle dispatch")
+
+    monkeypatch.setattr(orchestrator, "execute_gate_b_once", forbidden)
+    argv = _complete_argv(tmp_path, "execute-once")
+    argv[argv.index(flag) + 1] = fixed_width_value
+    status, stdout, stderr = _run(monkeypatch, argv)
+    assert status == 2
+    assert stdout == b""
+    assert json.loads(stderr) == {
+        "schema_version": "phase6-gate-b-cli-error-v1",
+        "operation": "execute-once",
+        "status": "failed",
+        "error_code": "gate_b_invalid_arguments",
+    }
+    assert calls == []
+
+
+@pytest.mark.parametrize(
     ("operation", "schema", "status_value"),
     [
         (

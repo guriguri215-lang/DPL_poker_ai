@@ -20,25 +20,39 @@ from phase6.gate_b_contracts import (
     EXECUTION_CONFIG_INDEX_SCHEMA_VERSION,
     EXECUTION_CONTEXT_SCHEMA_VERSION,
     HUMAN_APPROVAL_RECORD_SCHEMA_VERSION,
+    HUMAN_APPROVAL_RECORD_V3_SCHEMA_VERSION,
     HUMAN_SIGNATURE_RECORD_SCHEMA_VERSION,
+    HUMAN_SIGNATURE_RECORD_V3_SCHEMA_VERSION,
     LOADER_REQUEST_SCHEMA_VERSION,
+    LOADER_REQUEST_V2_SCHEMA_VERSION,
     OPPONENT_PAYLOAD_INDEX_SCHEMA_VERSION,
     PREAPPROVAL_ROOT_IDENTITY_PROJECTION_SCHEMA_VERSION,
+    PREAPPROVAL_ROOT_IDENTITY_PROJECTION_V2_SCHEMA_VERSION,
     PREAPPROVAL_ROOT_ROLE_ORDER,
     QUARANTINE_MANIFEST_SCHEMA_VERSION,
     READINESS_AUTHORIZATION_SCHEMA_VERSION,
+    READINESS_AUTHORIZATION_V3_SCHEMA_VERSION,
     RELEASE_AUTHORIZATION_SCHEMA_VERSION,
     RETRY_AUTHORIZATION_SCHEMA_VERSION,
     ROOT_ANCHOR_POLICY_VERSION,
     ROOT_ANCHOR_SCHEMA_VERSION,
+    ROOT_ANCHOR_V2_SCHEMA_VERSION,
+    ROOT_IDENTITY_PROJECTION_DESCRIPTOR_V2_SCHEMA_VERSION,
+    ROOT_IDENTITY_SERIALIZATION_PROFILE_V2,
+    SOURCE_MATERIALIZATION_PROJECTION_SHA256,
+    SOURCE_MATERIALIZATION_PROJECTION_SIZE_BYTES,
     GateBContractError,
     GateBHumanApprovalRecord,
     GateBHumanSignatureRecord,
     GateBPreApprovalRootIdentityProjection,
+    GateBPreApprovalRootIdentityProjectionV2,
     _canonical_reason_detail_sha256,
     _required_posix_nofollow,
     _windows_open_contract_descriptor,
     build_gate_b_preapproval_root_identity_projection,
+    build_gate_b_preapproval_root_identity_projection_v2,
+    build_gate_b_v2_compatibility_trust_chain,
+    gate_b_root_identity_projection_descriptor_v2,
     load_gate_b_batch_manifest,
     load_gate_b_batch_manifest_bytes,
     load_gate_b_execution_context,
@@ -52,6 +66,7 @@ from phase6.gate_b_contracts import (
     load_gate_b_root_anchor,
     load_gate_b_root_anchor_bytes,
     validate_gate_b_readiness_human_trust_chain,
+    validate_gate_b_v2_compatibility_trust_chain,
 )
 
 if os.name == "nt":
@@ -310,6 +325,270 @@ def _preapproval_root_identity_projection_roots() -> dict[str, dict[str, object]
         }
         for role in PREAPPROVAL_ROOT_ROLE_ORDER
     }
+
+
+def _v2_projection_roots(
+    paths: dict[str, str] | None = None,
+) -> dict[str, dict[str, object]]:
+    selected_paths = paths or {
+        "ledger_base": (
+            r"C:\synthetic\poker_xai\gate_b_v2\ledger"
+            r"\gate_b_test_v2_ledger"
+        ),
+        "quarantine_base": (
+            r"C:\synthetic\poker_xai\gate_b_v2\quarantine"
+            r"\gate_b_test_v2_quarantine"
+        ),
+        "test_root": (
+            r"C:\synthetic\poker_xai\gate_b_v2\input"
+            r"\gate_b_test_v2_input"
+        ),
+    }
+    identities = {
+        "ledger_base": ("00355357", "008f000000277838"),
+        "quarantine_base": ("00355357", "0055000000277839"),
+        "test_root": ("00355357", "0edb00000002971b"),
+    }
+    return {
+        role: {
+            "absolute_path": selected_paths[role],
+            "anchor_relative_path": (None if role == "test_root" else ".gate-b-root-anchor.json"),
+            "anchor_sha256": None,
+            "file_id_hex": identities[role][1],
+            "identity_scheme": "windows-volume-file-id-v1",
+            "root_role": role,
+            "volume_id_hex": identities[role][0],
+        }
+        for role in PREAPPROVAL_ROOT_ROLE_ORDER
+    }
+
+
+def _v2_chain_fixture(
+    roots: dict[str, dict[str, object]] | None = None,
+    *,
+    artifact_variant: str | None = None,
+) -> SimpleNamespace:
+    selected_roots = copy.deepcopy(roots or _v2_projection_roots())
+    projection = build_gate_b_preapproval_root_identity_projection_v2(selected_roots)
+    descriptor = dict(gate_b_root_identity_projection_descriptor_v2(projection))
+    approval = {
+        "schema_version": HUMAN_APPROVAL_RECORD_V3_SCHEMA_VERSION,
+        "artifact_type": "gate_b_human_approval_record",
+        "approval_record_id": "compat-approval-001",
+        "approved_at_utc": "2026-08-01T00:00:00Z",
+        "approver_actor_id": "compat-approver",
+        "approver_role": "human_gate_b_compatibility_approver",
+        "approval_decision": "APPROVE_COMPATIBILITY_PREFLIGHT_ONLY",
+        "projection_descriptor": descriptor,
+    }
+    if artifact_variant == "approval_record":
+        approval["approver_actor_id"] = "compat-approver-variant"
+    approval_raw = canonical_json_bytes(approval)
+    approval_hash = sha256_bytes(approval_raw)
+    signature = {
+        "schema_version": HUMAN_SIGNATURE_RECORD_V3_SCHEMA_VERSION,
+        "artifact_type": "gate_b_human_signature_record",
+        "signature_record_id": "compat-signature-001",
+        "signed_at_utc": "2026-08-01T00:01:00Z",
+        "signer_actor_id": "compat-signer",
+        "signer_role": "human_gate_b_compatibility_signer",
+        "attestation": "ATTEST_COMPATIBILITY_PREFLIGHT_ONLY",
+        "approval_record_id": approval["approval_record_id"],
+        "approval_record_sha256": approval_hash,
+        "projection_descriptor": descriptor,
+    }
+    if artifact_variant == "signature_record":
+        signature["signer_actor_id"] = "compat-signer-variant"
+    signature_raw = canonical_json_bytes(signature)
+    signature_hash = sha256_bytes(signature_raw)
+    readiness = {
+        "schema_version": READINESS_AUTHORIZATION_V3_SCHEMA_VERSION,
+        "artifact_type": "gate_b_readiness_authorization",
+        "authorization_id": "compat-readiness-001",
+        "authorized_at_utc": "2026-08-01T00:02:00Z",
+        "approval_record_id": approval["approval_record_id"],
+        "approval_record_sha256": approval_hash,
+        "signature_record_sha256": signature_hash,
+        "compatibility_preflight_ready": True,
+        "gate_b_ready": False,
+        "projection_descriptor": descriptor,
+    }
+    if artifact_variant == "readiness_authorization":
+        readiness["authorization_id"] = "compat-readiness-variant"
+    readiness_raw = canonical_json_bytes(readiness)
+    readiness_hash = sha256_bytes(readiness_raw)
+    anchors = {}
+    anchor_raws = {}
+    anchor_hashes = {}
+    for role in ("ledger_base", "quarantine_base"):
+        anchor = {
+            "schema_version": ROOT_ANCHOR_V2_SCHEMA_VERSION,
+            "artifact_type": "gate_b_root_anchor",
+            "root_role": role,
+            "root_absolute_path": selected_roots[role]["absolute_path"],
+            "anchor_id": f"compat-{role.replace('_base', '')}-anchor-001",
+            "created_at_utc": "2026-08-01T00:03:00Z",
+            "approval_record_sha256": approval_hash,
+            "readiness_authorization_sha256": readiness_hash,
+            "projection_descriptor": descriptor,
+        }
+        if artifact_variant == f"{role.removesuffix('_base')}_root_anchor":
+            anchor["anchor_id"] = f"compat-{role.removesuffix('_base')}-anchor-variant"
+        raw = canonical_json_bytes(anchor)
+        anchors[role] = anchor
+        anchor_raws[role] = raw
+        anchor_hashes[role] = sha256_bytes(raw)
+    request_roots = copy.deepcopy(selected_roots)
+    for role in ("ledger_base", "quarantine_base"):
+        request_roots[role]["anchor_sha256"] = anchor_hashes[role]
+    request = {
+        "schema_version": LOADER_REQUEST_V2_SCHEMA_VERSION,
+        "artifact_type": "gate_b_test_loader_request",
+        "requested_at_utc": "2026-08-01T00:04:00Z",
+        "operation": "compatibility_preflight_only",
+        "approval_record_sha256": approval_hash,
+        "signature_record_sha256": signature_hash,
+        "readiness_authorization_sha256": readiness_hash,
+        "projection_descriptor": descriptor,
+        "roots": request_roots,
+    }
+    if artifact_variant == "loader_request":
+        request["requested_at_utc"] = "2026-08-01T00:05:00Z"
+    request_raw = canonical_json_bytes(request)
+    chain = build_gate_b_v2_compatibility_trust_chain(
+        projection,
+        approval_record_raw=approval_raw,
+        signature_record_raw=signature_raw,
+        readiness_authorization_raw=readiness_raw,
+        root_anchor_raws=anchor_raws,
+        loader_request_raw=request_raw,
+    )
+    return SimpleNamespace(
+        roots=selected_roots,
+        projection=projection,
+        descriptor=descriptor,
+        approval=approval,
+        approval_raw=approval_raw,
+        signature=signature,
+        signature_raw=signature_raw,
+        readiness=readiness,
+        readiness_raw=readiness_raw,
+        anchors=anchors,
+        anchor_raws=anchor_raws,
+        anchor_hashes=anchor_hashes,
+        request=request,
+        request_raw=request_raw,
+        chain=chain,
+    )
+
+
+def _rebuild_v2_chain(fixture: SimpleNamespace, **replacements):
+    return build_gate_b_v2_compatibility_trust_chain(
+        replacements.get("projection", fixture.projection),
+        approval_record_raw=replacements.get("approval_raw", fixture.approval_raw),
+        signature_record_raw=replacements.get("signature_raw", fixture.signature_raw),
+        readiness_authorization_raw=replacements.get("readiness_raw", fixture.readiness_raw),
+        root_anchor_raws=replacements.get("anchor_raws", fixture.anchor_raws),
+        loader_request_raw=replacements.get("request_raw", fixture.request_raw),
+    )
+
+
+def _rejected_synthetic_v2_request_raw(*, requested_at_utc: str) -> bytes:
+    """Reproduce the rejected freeze's request bytes without constructing a v2 object."""
+    roots = _v2_projection_roots(
+        {
+            "ledger_base": r"C:\gate-b-v2\ledger",
+            "quarantine_base": r"C:\gate-b-v2\quarantine",
+            "test_root": r"C:\gate-b-v2\test",
+        }
+    )
+    descriptor = {
+        "schema_version": ROOT_IDENTITY_PROJECTION_DESCRIPTOR_V2_SCHEMA_VERSION,
+        "projection_schema_version": PREAPPROVAL_ROOT_IDENTITY_PROJECTION_V2_SCHEMA_VERSION,
+        "serialization_profile": ROOT_IDENTITY_SERIALIZATION_PROFILE_V2,
+        "anchor_policy_version": ROOT_ANCHOR_POLICY_VERSION,
+        "projection_sha256": "a45352aca4a60d45d5e768d963ed0fe4cb290ef11db8c6458ec63e090858c742",
+        "source_materialization_projection_schema_version": (
+            PREAPPROVAL_ROOT_IDENTITY_PROJECTION_SCHEMA_VERSION
+        ),
+        "source_materialization_projection_serialization_profile": (
+            ROOT_IDENTITY_SERIALIZATION_PROFILE_V2
+        ),
+        "source_materialization_projection_size_bytes": (
+            SOURCE_MATERIALIZATION_PROJECTION_SIZE_BYTES
+        ),
+        "source_materialization_projection_sha256": SOURCE_MATERIALIZATION_PROJECTION_SHA256,
+    }
+    approval = {
+        "schema_version": HUMAN_APPROVAL_RECORD_V3_SCHEMA_VERSION,
+        "artifact_type": "gate_b_human_approval_record",
+        "approval_record_id": "compat-approval-001",
+        "approved_at_utc": "2026-08-01T00:00:00Z",
+        "approver_actor_id": "compat-approver",
+        "approver_role": "human_gate_b_compatibility_approver",
+        "approval_decision": "APPROVE_COMPATIBILITY_PREFLIGHT_ONLY",
+        "projection_descriptor": descriptor,
+    }
+    approval_hash = sha256_bytes(canonical_json_bytes(approval))
+    signature = {
+        "schema_version": HUMAN_SIGNATURE_RECORD_V3_SCHEMA_VERSION,
+        "artifact_type": "gate_b_human_signature_record",
+        "signature_record_id": "compat-signature-001",
+        "signed_at_utc": "2026-08-01T00:01:00Z",
+        "signer_actor_id": "compat-signer",
+        "signer_role": "human_gate_b_compatibility_signer",
+        "attestation": "ATTEST_COMPATIBILITY_PREFLIGHT_ONLY",
+        "approval_record_id": approval["approval_record_id"],
+        "approval_record_sha256": approval_hash,
+        "projection_descriptor": descriptor,
+    }
+    signature_hash = sha256_bytes(canonical_json_bytes(signature))
+    readiness = {
+        "schema_version": READINESS_AUTHORIZATION_V3_SCHEMA_VERSION,
+        "artifact_type": "gate_b_readiness_authorization",
+        "authorization_id": "compat-readiness-001",
+        "authorized_at_utc": "2026-08-01T00:02:00Z",
+        "approval_record_id": approval["approval_record_id"],
+        "approval_record_sha256": approval_hash,
+        "signature_record_sha256": signature_hash,
+        "compatibility_preflight_ready": True,
+        "gate_b_ready": False,
+        "projection_descriptor": descriptor,
+    }
+    readiness_hash = sha256_bytes(canonical_json_bytes(readiness))
+    anchor_hashes = {}
+    for role in ("ledger_base", "quarantine_base"):
+        anchor_hashes[role] = sha256_bytes(
+            canonical_json_bytes(
+                {
+                    "schema_version": ROOT_ANCHOR_V2_SCHEMA_VERSION,
+                    "artifact_type": "gate_b_root_anchor",
+                    "root_role": role,
+                    "root_absolute_path": roots[role]["absolute_path"],
+                    "anchor_id": f"compat-{role.replace('_base', '')}-anchor-001",
+                    "created_at_utc": "2026-08-01T00:03:00Z",
+                    "approval_record_sha256": approval_hash,
+                    "readiness_authorization_sha256": readiness_hash,
+                    "projection_descriptor": descriptor,
+                }
+            )
+        )
+    request_roots = copy.deepcopy(roots)
+    for role in ("ledger_base", "quarantine_base"):
+        request_roots[role]["anchor_sha256"] = anchor_hashes[role]
+    return canonical_json_bytes(
+        {
+            "schema_version": LOADER_REQUEST_V2_SCHEMA_VERSION,
+            "artifact_type": "gate_b_test_loader_request",
+            "requested_at_utc": requested_at_utc,
+            "operation": "compatibility_preflight_only",
+            "approval_record_sha256": approval_hash,
+            "signature_record_sha256": signature_hash,
+            "readiness_authorization_sha256": readiness_hash,
+            "projection_descriptor": descriptor,
+            "roots": request_roots,
+        }
+    )
 
 
 def _assert_preapproval_root_identity_projection_invariants(
@@ -1765,3 +2044,320 @@ def test_retained_bytes_trust_mismatch_matrix_is_exact_base_and_sanitized(
         assert type(rejected.value) is GateBContractError
         assert rejected.value.__cause__ is None
         assert rejected.value.__context__ is None
+
+
+def test_v2_root_projection_exact_golden_vectors_and_source_binding() -> None:
+    fixture = _v2_chain_fixture()
+    expected = (
+        b'{"anchor_policy_version":"phase6-gate-b-root-anchor-policy-v1","roots":['
+        b'{"absolute_path":"C:\\\\Users\\\\gurig\\\\Desktop\\\\claude code\\\\'
+        b"\\u30dd\\u30fc\\u30ab\\u30fcAI\\u691c\\u8a0e\\\\controlled_evaluation"
+        b'\\\\gate_b_test_v2_ledger","anchor_relative_path":'
+        b'".gate-b-root-anchor.json","file_id_hex":"008f000000277838",'
+        b'"identity_scheme":"windows-volume-file-id-v1","root_role":"ledger_base",'
+        b'"volume_id_hex":"00355357"},{"absolute_path":"C:\\\\Users\\\\gurig\\\\Desktop'
+        b"\\\\claude code\\\\\\u30dd\\u30fc\\u30ab\\u30fcAI\\u691c\\u8a0e"
+        b'\\\\controlled_evaluation\\\\gate_b_test_v2_quarantine",'
+        b'"anchor_relative_path":".gate-b-root-anchor.json","file_id_hex":'
+        b'"0055000000277839","identity_scheme":"windows-volume-file-id-v1",'
+        b'"root_role":"quarantine_base","volume_id_hex":"00355357"},'
+        b'{"absolute_path":"C:\\\\Users\\\\gurig\\\\Desktop\\\\claude code\\\\'
+        b"\\u30dd\\u30fc\\u30ab\\u30fcAI\\u691c\\u8a0e\\\\controlled_evaluation"
+        b'\\\\gate_b_test_v2_input","anchor_relative_path":null,'
+        b'"file_id_hex":"0edb00000002971b","identity_scheme":'
+        b'"windows-volume-file-id-v1","root_role":"test_root","volume_id_hex":'
+        b'"00355357"}],"schema_version":'
+        b'"phase6-gate-b-preapproval-root-identity-projection-v2",'
+        b'"serialization_profile":"windows-volume8-file16-lowerhex-v1",'
+        b'"source_materialization_projection":{"schema_version":'
+        b'"phase6-gate-b-preapproval-root-identity-projection-v1",'
+        b'"serialization_profile":"windows-volume8-file16-lowerhex-v1",'
+        b'"sha256":"134f7169a949b41de3bb0b6de8f9c80c3e65cab477d31bae2581281df8c57a09",'
+        b'"size_bytes":1111}}\n'
+    )
+    assert fixture.projection.canonical_bytes == expected
+    assert len(expected) == 1438
+    assert fixture.projection.sha256 == (
+        "32df0fa0fa6a09e9ecfa7e39e5441953c6aa4578300f9c942f08f0db2d756d26"
+    )
+    assert fixture.descriptor == {
+        "schema_version": ROOT_IDENTITY_PROJECTION_DESCRIPTOR_V2_SCHEMA_VERSION,
+        "projection_schema_version": PREAPPROVAL_ROOT_IDENTITY_PROJECTION_V2_SCHEMA_VERSION,
+        "serialization_profile": ROOT_IDENTITY_SERIALIZATION_PROFILE_V2,
+        "anchor_policy_version": ROOT_ANCHOR_POLICY_VERSION,
+        "projection_sha256": fixture.projection.sha256,
+        "source_materialization_projection_schema_version": (
+            PREAPPROVAL_ROOT_IDENTITY_PROJECTION_SCHEMA_VERSION
+        ),
+        "source_materialization_projection_serialization_profile": (
+            ROOT_IDENTITY_SERIALIZATION_PROFILE_V2
+        ),
+        "source_materialization_projection_size_bytes": (
+            SOURCE_MATERIALIZATION_PROJECTION_SIZE_BYTES
+        ),
+        "source_materialization_projection_sha256": (SOURCE_MATERIALIZATION_PROJECTION_SHA256),
+    }
+    assert len(canonical_json_bytes(fixture.descriptor)) == 732
+    assert sha256_bytes(canonical_json_bytes(fixture.descriptor)) == (
+        "ed31edde3f62c99271223e2885d857f006c6b6d7bb344446295bc25335319ee5"
+    )
+
+
+@pytest.mark.parametrize(
+    ("role", "field", "replacement"),
+    [
+        ("ledger_base", "root_role", "quarantine_base"),
+        ("ledger_base", "absolute_path", r"C:\synthetic\ledger"),
+        ("quarantine_base", "absolute_path", r"C:\synthetic\quarantine"),
+        ("test_root", "absolute_path", r"C:\synthetic\test"),
+        ("ledger_base", "volume_id_hex", "00355358"),
+        ("quarantine_base", "file_id_hex", "0055000000277838"),
+        ("ledger_base", "anchor_relative_path", ".different-root-anchor.json"),
+    ],
+)
+def test_v2_projection_rejects_source_root_tuple_substitution_before_artifact_creation(
+    role: str,
+    field: str,
+    replacement: str,
+) -> None:
+    roots = _v2_projection_roots()
+    roots[role][field] = replacement
+    with pytest.raises(GateBContractError):
+        build_gate_b_preapproval_root_identity_projection_v2(roots)
+
+
+def test_v2_projection_rejects_synthetic_source_provenance(tmp_path: Path) -> None:
+    synthetic_paths = {
+        role: str((tmp_path / role).resolve()) for role in PREAPPROVAL_ROOT_ROLE_ORDER
+    }
+    with pytest.raises(GateBContractError):
+        build_gate_b_preapproval_root_identity_projection_v2(_v2_projection_roots(synthetic_paths))
+
+
+def test_previous_reviewer_request_hash_pair_cannot_reach_a_full_v2_chain() -> None:
+    original = _rejected_synthetic_v2_request_raw(requested_at_utc="2026-08-01T00:04:00Z")
+    substituted = _rejected_synthetic_v2_request_raw(requested_at_utc="2026-08-01T00:05:00Z")
+    assert sha256_bytes(original) == (
+        "6f2c9a59dce7fd8a6d75ac2b5a5cb86984b001529a11159ef62af8b7819e9bf2"
+    )
+    assert sha256_bytes(substituted) == (
+        "fc73e83f693b087c1d6a0acfd6caa19772266f1fba9cd28863355067670ec523"
+    )
+    with pytest.raises(GateBContractError):
+        build_gate_b_preapproval_root_identity_projection_v2(
+            _v2_projection_roots(
+                {
+                    "ledger_base": r"C:\gate-b-v2\ledger",
+                    "quarantine_base": r"C:\gate-b-v2\quarantine",
+                    "test_root": r"C:\gate-b-v2\test",
+                }
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("volume_id_hex", "355357"),
+        ("volume_id_hex", "00000000"),
+        ("volume_id_hex", "0035535A"),
+        ("volume_id_hex", "0035535g"),
+        ("volume_id_hex", "100000000"),
+        ("file_id_hex", "8f000000277838"),
+        ("file_id_hex", "0000000000000000"),
+        ("file_id_hex", "008F000000277838"),
+        ("file_id_hex", "008f00000027783g"),
+        ("file_id_hex", "10000000000000000"),
+    ],
+)
+def test_v2_root_projection_rejects_width_case_nonhex_zero_and_overflow(
+    field: str,
+    replacement: str,
+) -> None:
+    roots = _v2_projection_roots()
+    roots["ledger_base"][field] = replacement
+    with pytest.raises(GateBContractError):
+        build_gate_b_preapproval_root_identity_projection_v2(roots)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda roots: roots.pop("test_root"),
+        lambda roots: roots.update({"unknown": {}}),
+        lambda roots: roots["ledger_base"].pop("root_role"),
+        lambda roots: roots["ledger_base"].update({"unknown": None}),
+        lambda roots: roots["ledger_base"].__setitem__("root_role", "test_root"),
+        lambda roots: roots["ledger_base"].__setitem__("absolute_path", "relative"),
+        lambda roots: roots["ledger_base"].__setitem__("absolute_path", r"C:\gate-b-v2\..\ledger"),
+        lambda roots: roots["test_root"].__setitem__(
+            "anchor_relative_path", ".gate-b-root-anchor.json"
+        ),
+    ],
+)
+def test_v2_root_projection_rejects_field_role_path_and_anchor_drift(mutate) -> None:
+    roots = _v2_projection_roots()
+    mutate(roots)
+    with pytest.raises(GateBContractError):
+        build_gate_b_preapproval_root_identity_projection_v2(roots)
+
+
+def test_v2_projection_has_one_profile_and_rejects_source_or_policy_drift() -> None:
+    roots = _v2_projection_roots()
+    calls = (
+        lambda: build_gate_b_preapproval_root_identity_projection_v2(
+            roots, source_projection_size_bytes=1110
+        ),
+        lambda: build_gate_b_preapproval_root_identity_projection_v2(
+            roots, source_projection_sha256="f" * 64
+        ),
+        lambda: build_gate_b_preapproval_root_identity_projection_v2(
+            roots, anchor_policy_version="phase6-gate-b-root-anchor-policy-v2"
+        ),
+    )
+    for call in calls:
+        with pytest.raises(GateBContractError):
+            call()
+    minimal = copy.deepcopy(roots)
+    minimal["ledger_base"]["volume_id_hex"] = "355357"
+    with pytest.raises(GateBContractError):
+        build_gate_b_preapproval_root_identity_projection_v2(minimal)
+    with pytest.raises(GateBContractError):
+        build_gate_b_preapproval_root_identity_projection(roots)
+
+
+def test_v2_trust_chain_exact_stored_byte_hash_join_and_golden_hashes() -> None:
+    fixture = _v2_chain_fixture()
+    assert validate_gate_b_v2_compatibility_trust_chain(fixture.chain) is fixture.chain
+    assert fixture.chain.artifact_hashes == {
+        "approval_record": "86cf4c0372a4c7906dc76256879543cd3a889b5edfb2cf0648d465d567e389f0",
+        "signature_record": "b621f392ee60331b2effa786791af66c4abf16d2d444088918b853cd02c66a08",
+        "readiness_authorization": (
+            "dc2135cfc7429082456eaed05cb2d4530f9d78681d03c94214d54601237daee7"
+        ),
+        "ledger_root_anchor": "0fb77a8b1861fd2db73be46be6957ff893a007df940ee28b1158ecdfb5dd8961",
+        "quarantine_root_anchor": (
+            "2b35c1425fa7d0c5b5b3a57e8f03065f3c8cbbbcac5aea4b56afc199f0feefe9"
+        ),
+        "loader_request": "cbbd3ee39e8e63afac0b2f01c75d15aec7980a30576a383e216db58a13eb51cb",
+    }
+    assert tuple(fixture.chain.roots) == PREAPPROVAL_ROOT_ROLE_ORDER
+    assert fixture.chain.request_payload["operation"] == "compatibility_preflight_only"
+    assert fixture.chain.request_payload["schema_version"] == LOADER_REQUEST_V2_SCHEMA_VERSION
+
+
+@pytest.mark.parametrize(
+    ("artifact", "field", "replacement"),
+    [
+        ("approval", "schema_version", HUMAN_APPROVAL_RECORD_SCHEMA_VERSION),
+        ("approval", "schema_version", "phase6-gate-b-human-approval-record-v99"),
+        ("signature", "schema_version", HUMAN_SIGNATURE_RECORD_SCHEMA_VERSION),
+        ("readiness", "schema_version", READINESS_AUTHORIZATION_SCHEMA_VERSION),
+        ("request", "schema_version", LOADER_REQUEST_SCHEMA_VERSION),
+        ("request", "operation", "execute"),
+    ],
+)
+def test_v2_trust_chain_rejects_missing_unknown_mixed_and_downgraded_schema(
+    artifact: str,
+    field: str,
+    replacement: str,
+) -> None:
+    fixture = _v2_chain_fixture()
+    payload = copy.deepcopy(getattr(fixture, artifact))
+    payload[field] = replacement
+    with pytest.raises(GateBContractError):
+        _rebuild_v2_chain(fixture, **{f"{artifact}_raw": canonical_json_bytes(payload)})
+    payload = copy.deepcopy(getattr(fixture, artifact))
+    payload.pop("schema_version")
+    with pytest.raises(GateBContractError):
+        _rebuild_v2_chain(fixture, **{f"{artifact}_raw": canonical_json_bytes(payload)})
+
+
+def test_v2_trust_chain_rejects_profile_hash_field_and_canonical_malleability() -> None:
+    fixture = _v2_chain_fixture()
+    approval = copy.deepcopy(fixture.approval)
+    approval["projection_descriptor"]["serialization_profile"] = "windows-minimal-lowerhex-v1"
+    with pytest.raises(GateBContractError):
+        _rebuild_v2_chain(fixture, approval_raw=canonical_json_bytes(approval))
+    approval = copy.deepcopy(fixture.approval)
+    approval["projection_descriptor"]["projection_sha256"] = (
+        SOURCE_MATERIALIZATION_PROJECTION_SHA256
+    )
+    with pytest.raises(GateBContractError):
+        _rebuild_v2_chain(fixture, approval_raw=canonical_json_bytes(approval))
+    approval = copy.deepcopy(fixture.approval)
+    approval["projection_descriptor"]["source_materialization_projection_sha256"] = (
+        fixture.projection.sha256
+    )
+    with pytest.raises(GateBContractError):
+        _rebuild_v2_chain(fixture, approval_raw=canonical_json_bytes(approval))
+    approval = copy.deepcopy(fixture.approval)
+    approval["unknown"] = None
+    with pytest.raises(GateBContractError):
+        _rebuild_v2_chain(fixture, approval_raw=canonical_json_bytes(approval))
+    with pytest.raises(GateBContractError):
+        _rebuild_v2_chain(
+            fixture,
+            approval_raw=fixture.approval_raw.rstrip(b"\n") + b" \n",
+        )
+
+
+def test_v2_trust_chain_rejects_every_cross_link_and_root_topology_drift() -> None:
+    fixture = _v2_chain_fixture()
+    mutations = []
+    signature = copy.deepcopy(fixture.signature)
+    signature["approval_record_sha256"] = "f" * 64
+    mutations.append({"signature_raw": canonical_json_bytes(signature)})
+    readiness = copy.deepcopy(fixture.readiness)
+    readiness["signature_record_sha256"] = "f" * 64
+    mutations.append({"readiness_raw": canonical_json_bytes(readiness)})
+    anchors = copy.deepcopy(fixture.anchors)
+    anchors["ledger_base"]["readiness_authorization_sha256"] = "f" * 64
+    mutations.append(
+        {"anchor_raws": {role: canonical_json_bytes(value) for role, value in anchors.items()}}
+    )
+    request = copy.deepcopy(fixture.request)
+    request["approval_record_sha256"] = "f" * 64
+    mutations.append({"request_raw": canonical_json_bytes(request)})
+    request = copy.deepcopy(fixture.request)
+    request["roots"]["ledger_base"]["anchor_sha256"] = "f" * 64
+    mutations.append({"request_raw": canonical_json_bytes(request)})
+    request = copy.deepcopy(fixture.request)
+    request["roots"]["ledger_base"]["file_id_hex"] = request["roots"]["test_root"]["file_id_hex"]
+    mutations.append({"request_raw": canonical_json_bytes(request)})
+    request = copy.deepcopy(fixture.request)
+    request["roots"]["ledger_base"]["absolute_path"] = request["roots"]["test_root"][
+        "absolute_path"
+    ]
+    mutations.append({"request_raw": canonical_json_bytes(request)})
+    request = copy.deepcopy(fixture.request)
+    request["roots"]["ledger_base"]["absolute_path"] = (
+        request["roots"]["test_root"]["absolute_path"] + r"\nested"
+    )
+    mutations.append({"request_raw": canonical_json_bytes(request)})
+    for replacement in mutations:
+        with pytest.raises(GateBContractError):
+            _rebuild_v2_chain(fixture, **replacement)
+
+
+def test_v2_projection_and_chain_private_provenance_reject_tamper_and_forgery() -> None:
+    fixture = _v2_chain_fixture()
+    forged = object.__new__(GateBPreApprovalRootIdentityProjectionV2)
+    for name in ("payload", "canonical_bytes", "sha256", "_token"):
+        object.__setattr__(forged, name, object.__getattribute__(fixture.projection, name))
+    with pytest.raises(GateBContractError):
+        gate_b_root_identity_projection_descriptor_v2(forged)
+    object.__setattr__(fixture.chain, "request_payload", MappingProxyType({}))
+    with pytest.raises(GateBContractError):
+        validate_gate_b_v2_compatibility_trust_chain(fixture.chain)
+
+
+def test_execution_context_v1_bytes_route_cannot_type_consume_v2_object() -> None:
+    fixture = _v2_chain_fixture()
+    reference = Path(r"C:\gate-b-v2\execution-context.json")
+    with pytest.raises(GateBContractError):
+        load_gate_b_execution_context_bytes(
+            fixture.chain,
+            expected_sha256="f" * 64,
+            reference_path=reference,
+        )

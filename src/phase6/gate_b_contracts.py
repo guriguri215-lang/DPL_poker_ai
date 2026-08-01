@@ -37,6 +37,22 @@ ROOT_ANCHOR_SCHEMA_VERSION = "phase6-gate-b-root-anchor-v1"
 PREAPPROVAL_ROOT_IDENTITY_PROJECTION_SCHEMA_VERSION = (
     "phase6-gate-b-preapproval-root-identity-projection-v1"
 )
+PREAPPROVAL_ROOT_IDENTITY_PROJECTION_V2_SCHEMA_VERSION = (
+    "phase6-gate-b-preapproval-root-identity-projection-v2"
+)
+ROOT_IDENTITY_PROJECTION_DESCRIPTOR_V2_SCHEMA_VERSION = (
+    "phase6-gate-b-root-identity-projection-descriptor-v2"
+)
+ROOT_IDENTITY_SERIALIZATION_PROFILE_V2 = "windows-volume8-file16-lowerhex-v1"
+HUMAN_APPROVAL_RECORD_V3_SCHEMA_VERSION = "phase6-gate-b-human-approval-record-v3"
+HUMAN_SIGNATURE_RECORD_V3_SCHEMA_VERSION = "phase6-gate-b-human-signature-record-v3"
+READINESS_AUTHORIZATION_V3_SCHEMA_VERSION = "phase6-gate-b-readiness-authorization-v3"
+ROOT_ANCHOR_V2_SCHEMA_VERSION = "phase6-gate-b-root-anchor-v2"
+LOADER_REQUEST_V2_SCHEMA_VERSION = "phase6-gate-b-test-loader-request-v2"
+SOURCE_MATERIALIZATION_PROJECTION_SIZE_BYTES = 1111
+SOURCE_MATERIALIZATION_PROJECTION_SHA256 = (
+    "134f7169a949b41de3bb0b6de8f9c80c3e65cab477d31bae2581281df8c57a09"
+)
 ROOT_ANCHOR_POLICY_VERSION = "phase6-gate-b-root-anchor-policy-v1"
 OPPONENT_PAYLOAD_INDEX_SCHEMA_VERSION = "phase6-gate-b-opponent-payload-index-v1"
 EXECUTION_CONFIG_INDEX_SCHEMA_VERSION = "phase6-gate-b-execution-config-index-v1"
@@ -101,6 +117,10 @@ _HEX_ID_RE = re.compile(r"(?:0|[1-9a-f][0-9a-f]*)\Z")
 _DECIMAL_RE = re.compile(r"-?(?:0|[1-9]\d*)(?:\.\d*[1-9])?\Z")
 _HUMAN_RECORD_LOADER_TOKEN = object()
 _PREAPPROVAL_PROJECTION_TOKEN = object()
+_PREAPPROVAL_PROJECTION_V2_TOKEN = object()
+_V2_TRUST_CHAIN_TOKEN = object()
+_V2_PROJECTION_REGISTRY: dict[int, tuple[object, ...]] = {}
+_V2_TRUST_CHAIN_REGISTRY: dict[int, tuple[object, ...]] = {}
 
 
 class GateBContractError(ValueError):
@@ -1302,6 +1322,675 @@ def build_gate_b_preapproval_root_identity_projection(
     object.__setattr__(projection, "canonical_bytes", canonical_bytes)
     object.__setattr__(projection, "sha256", sha256_bytes(canonical_bytes))
     return projection
+
+
+class GateBV2CompatibilityObject:
+    """Nominal boundary shared only by compatibility-qualified v2 objects."""
+
+    __slots__ = ()
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class GateBPreApprovalRootIdentityProjectionV2(GateBV2CompatibilityObject):
+    """Canonical fixed-width Windows root projection with immutable provenance."""
+
+    payload: Mapping[str, Any]
+    canonical_bytes: bytes
+    sha256: str
+    _token: object = field(repr=False, compare=False)
+
+    def __new__(
+        cls,
+        *,
+        _token: object | None = None,
+    ) -> GateBPreApprovalRootIdentityProjectionV2:
+        if _token is not _PREAPPROVAL_PROJECTION_V2_TOKEN:
+            raise TypeError("v2 preapproval projection construction is private")
+        return object.__new__(cls)
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class GateBV2CompatibilityTrustChain(GateBV2CompatibilityObject):
+    """Opaque, schema-joined compatibility chain that grants no lifecycle capability."""
+
+    projection: GateBPreApprovalRootIdentityProjectionV2
+    descriptor: Mapping[str, Any]
+    roots: Mapping[str, Mapping[str, Any]]
+    artifact_hashes: Mapping[str, str]
+    request_payload: Mapping[str, Any]
+    _artifact_raws: Mapping[str, bytes] = field(repr=False, compare=False)
+    _token: object = field(repr=False, compare=False)
+
+    def __new__(
+        cls,
+        *,
+        _token: object | None = None,
+    ) -> GateBV2CompatibilityTrustChain:
+        if _token is not _V2_TRUST_CHAIN_TOKEN:
+            raise TypeError("v2 compatibility trust-chain construction is private")
+        return object.__new__(cls)
+
+
+def is_gate_b_v2_compatibility_object(value: object) -> bool:
+    """Return whether a value is nominally part of the non-executable v2 boundary."""
+    return isinstance(value, GateBV2CompatibilityObject)
+
+
+def _fixed_width_v2_identity(
+    value: object,
+    label: str,
+    *,
+    width: int,
+) -> str:
+    if (
+        type(value) is not str
+        or len(value) != width
+        or any(character not in "0123456789abcdef" for character in value)
+        or int(value, 16) == 0
+    ):
+        _fail(f"{label} must be exact nonzero fixed-width lowercase hexadecimal")
+    return value
+
+
+def _source_materialization_projection_v2(
+    *,
+    size_bytes: object,
+    sha256: object,
+    roots: list[dict[str, Any]],
+) -> dict[str, Any]:
+    size = _integer(
+        size_bytes,
+        "source materialization projection size",
+        minimum=1,
+    )
+    digest = _sha(sha256, "source materialization projection hash")
+    source_payload = {
+        "schema_version": PREAPPROVAL_ROOT_IDENTITY_PROJECTION_SCHEMA_VERSION,
+        "anchor_policy_version": ROOT_ANCHOR_POLICY_VERSION,
+        "roots": copy.deepcopy(roots),
+    }
+    source_raw = canonical_json_bytes(source_payload)
+    if (
+        size != SOURCE_MATERIALIZATION_PROJECTION_SIZE_BYTES
+        or digest != SOURCE_MATERIALIZATION_PROJECTION_SHA256
+        or len(source_raw) != SOURCE_MATERIALIZATION_PROJECTION_SIZE_BYTES
+        or sha256_bytes(source_raw) != SOURCE_MATERIALIZATION_PROJECTION_SHA256
+    ):
+        _fail("source materialization projection bytes and root tuple mismatch")
+    return {
+        "schema_version": PREAPPROVAL_ROOT_IDENTITY_PROJECTION_SCHEMA_VERSION,
+        "serialization_profile": ROOT_IDENTITY_SERIALIZATION_PROFILE_V2,
+        "size_bytes": size,
+        "sha256": digest,
+    }
+
+
+def _validate_v2_projection_provenance(
+    projection: GateBPreApprovalRootIdentityProjectionV2,
+) -> dict[str, Any]:
+    if (
+        type(projection) is not GateBPreApprovalRootIdentityProjectionV2
+        or object.__getattribute__(projection, "_token") is not _PREAPPROVAL_PROJECTION_V2_TOKEN
+    ):
+        _fail("v2 projection provenance mismatch")
+    try:
+        payload = _plain(projection.payload)
+        current = (
+            projection,
+            copy.deepcopy(payload),
+            projection.canonical_bytes,
+            projection.sha256,
+            object.__getattribute__(projection, "_token"),
+        )
+    except Exception:
+        _fail("v2 projection provenance mismatch")
+    if (
+        _V2_PROJECTION_REGISTRY.get(id(projection)) != current
+        or type(projection.canonical_bytes) is not bytes
+        or canonical_json_bytes(payload) != projection.canonical_bytes
+        or sha256_bytes(projection.canonical_bytes) != projection.sha256
+    ):
+        _fail("v2 projection provenance mismatch")
+    return payload
+
+
+@_sanitized_api
+def build_gate_b_preapproval_root_identity_projection_v2(
+    roots: object,
+    *,
+    source_projection_size_bytes: int = SOURCE_MATERIALIZATION_PROJECTION_SIZE_BYTES,
+    source_projection_sha256: str = SOURCE_MATERIALIZATION_PROJECTION_SHA256,
+    anchor_policy_version: str = ROOT_ANCHOR_POLICY_VERSION,
+) -> GateBPreApprovalRootIdentityProjectionV2:
+    """Build the sole fixed-width v2 projection without accepting a v1 alias."""
+    expected_roles = set(PREAPPROVAL_ROOT_ROLE_ORDER)
+    expected_fields = {
+        "absolute_path",
+        "anchor_relative_path",
+        "anchor_sha256",
+        "file_id_hex",
+        "identity_scheme",
+        "root_role",
+        "volume_id_hex",
+    }
+    if (
+        type(roots) is not dict
+        or set(roots) != expected_roles
+        or any(type(key) is not str for key in roots)
+    ):
+        _fail("v2 preapproval roots fields are not closed-world")
+    if (
+        type(anchor_policy_version) is not str
+        or anchor_policy_version != ROOT_ANCHOR_POLICY_VERSION
+    ):
+        _fail("v2 anchor policy version mismatch")
+    projected_roots: list[dict[str, Any]] = []
+    for role in PREAPPROVAL_ROOT_ROLE_ORDER:
+        raw = roots[role]
+        if (
+            type(raw) is not dict
+            or set(raw) != expected_fields
+            or any(type(key) is not str for key in raw)
+        ):
+            _fail(f"{role} v2 preapproval root fields are not closed-world")
+        if type(raw["root_role"]) is not str or raw["root_role"] != role:
+            _fail("v2 preapproval root role mismatch")
+        absolute_path = raw["absolute_path"]
+        if (
+            type(absolute_path) is not str
+            or not absolute_path
+            or any(unicodedata.category(character) in {"Cc", "Cf"} for character in absolute_path)
+        ):
+            _fail(f"{role} v2 preapproval root path mismatch")
+        path = Path(absolute_path)
+        if not path.is_absolute() or ".." in path.parts or str(path) != absolute_path:
+            _fail(f"{role} v2 preapproval root path must be canonical and absolute")
+        if raw["identity_scheme"] != "windows-volume-file-id-v1":
+            _fail(f"{role} v2 preapproval root identity scheme mismatch")
+        volume_id = _fixed_width_v2_identity(
+            raw["volume_id_hex"],
+            f"{role} v2 volume ID",
+            width=8,
+        )
+        file_id = _fixed_width_v2_identity(
+            raw["file_id_hex"],
+            f"{role} v2 file ID",
+            width=16,
+        )
+        anchor_relative_path = raw["anchor_relative_path"]
+        anchor_sha256 = raw["anchor_sha256"]
+        if role == "test_root":
+            if anchor_relative_path is not None or anchor_sha256 is not None:
+                _fail("v2 Test root anchor fields must be null")
+        else:
+            if anchor_relative_path != ".gate-b-root-anchor.json":
+                _fail("v2 writable root anchor path mismatch")
+            if anchor_sha256 is not None:
+                _sha(anchor_sha256, "v2 writable root anchor hash")
+        projected_roots.append(
+            {
+                "root_role": role,
+                "absolute_path": absolute_path,
+                "identity_scheme": "windows-volume-file-id-v1",
+                "volume_id_hex": volume_id,
+                "file_id_hex": file_id,
+                "anchor_relative_path": anchor_relative_path,
+            }
+        )
+    source = _source_materialization_projection_v2(
+        size_bytes=source_projection_size_bytes,
+        sha256=source_projection_sha256,
+        roots=projected_roots,
+    )
+    plain_payload = {
+        "schema_version": PREAPPROVAL_ROOT_IDENTITY_PROJECTION_V2_SCHEMA_VERSION,
+        "serialization_profile": ROOT_IDENTITY_SERIALIZATION_PROFILE_V2,
+        "anchor_policy_version": ROOT_ANCHOR_POLICY_VERSION,
+        "source_materialization_projection": source,
+        "roots": projected_roots,
+    }
+    canonical_bytes = canonical_json_bytes(plain_payload)
+    projection = GateBPreApprovalRootIdentityProjectionV2(_token=_PREAPPROVAL_PROJECTION_V2_TOKEN)
+    object.__setattr__(projection, "payload", _frozen(plain_payload))
+    object.__setattr__(projection, "canonical_bytes", canonical_bytes)
+    object.__setattr__(projection, "sha256", sha256_bytes(canonical_bytes))
+    object.__setattr__(projection, "_token", _PREAPPROVAL_PROJECTION_V2_TOKEN)
+    _V2_PROJECTION_REGISTRY[id(projection)] = (
+        projection,
+        copy.deepcopy(plain_payload),
+        canonical_bytes,
+        projection.sha256,
+        _PREAPPROVAL_PROJECTION_V2_TOKEN,
+    )
+    return projection
+
+
+def _projection_descriptor_v2(
+    projection: GateBPreApprovalRootIdentityProjectionV2,
+) -> dict[str, Any]:
+    payload = _validate_v2_projection_provenance(projection)
+    return {
+        "schema_version": ROOT_IDENTITY_PROJECTION_DESCRIPTOR_V2_SCHEMA_VERSION,
+        "projection_schema_version": payload["schema_version"],
+        "serialization_profile": payload["serialization_profile"],
+        "anchor_policy_version": payload["anchor_policy_version"],
+        "projection_sha256": projection.sha256,
+        "source_materialization_projection_schema_version": payload[
+            "source_materialization_projection"
+        ]["schema_version"],
+        "source_materialization_projection_serialization_profile": payload[
+            "source_materialization_projection"
+        ]["serialization_profile"],
+        "source_materialization_projection_size_bytes": payload[
+            "source_materialization_projection"
+        ]["size_bytes"],
+        "source_materialization_projection_sha256": payload["source_materialization_projection"][
+            "sha256"
+        ],
+    }
+
+
+@_sanitized_api
+def gate_b_root_identity_projection_descriptor_v2(
+    projection: GateBPreApprovalRootIdentityProjectionV2,
+) -> Mapping[str, Any]:
+    """Return the closed descriptor that every v2 trust link must copy exactly."""
+    return _frozen(_projection_descriptor_v2(projection))
+
+
+def _validate_projection_descriptor_v2(
+    value: object,
+    expected: dict[str, Any],
+) -> None:
+    descriptor = _closed(value, set(expected), "v2 projection descriptor")
+    if not _exact_json_equal(descriptor, expected):
+        _fail("v2 projection descriptor mismatch")
+
+
+def _v2_artifact(
+    raw: object,
+    label: str,
+) -> tuple[bytes, dict[str, Any], str]:
+    if type(raw) is not bytes:
+        _fail(f"{label} input must be bytes")
+    owned = bytes(raw)
+    payload = _strict_canonical_object(owned, label)
+    return owned, payload, sha256_bytes(owned)
+
+
+def _validate_v2_approval(
+    value: dict[str, Any],
+    descriptor: dict[str, Any],
+) -> None:
+    _closed(
+        value,
+        {
+            "schema_version",
+            "artifact_type",
+            "approval_record_id",
+            "approved_at_utc",
+            "approver_actor_id",
+            "approver_role",
+            "approval_decision",
+            "projection_descriptor",
+        },
+        "v2 approval record",
+    )
+    if (
+        value["schema_version"] != HUMAN_APPROVAL_RECORD_V3_SCHEMA_VERSION
+        or value["artifact_type"] != "gate_b_human_approval_record"
+        or value["approver_role"] != "human_gate_b_compatibility_approver"
+        or value["approval_decision"] != "APPROVE_COMPATIBILITY_PREFLIGHT_ONLY"
+    ):
+        _fail("v2 approval record identity mismatch")
+    _atom(value["approval_record_id"], "v2 approval record ID")
+    _timestamp(value["approved_at_utc"], "v2 approval timestamp")
+    _atom(value["approver_actor_id"], "v2 approval actor ID")
+    _validate_projection_descriptor_v2(value["projection_descriptor"], descriptor)
+
+
+def _validate_v2_signature(
+    value: dict[str, Any],
+    descriptor: dict[str, Any],
+    *,
+    approval: dict[str, Any],
+    approval_sha256: str,
+) -> None:
+    _closed(
+        value,
+        {
+            "schema_version",
+            "artifact_type",
+            "signature_record_id",
+            "signed_at_utc",
+            "signer_actor_id",
+            "signer_role",
+            "attestation",
+            "approval_record_id",
+            "approval_record_sha256",
+            "projection_descriptor",
+        },
+        "v2 signature record",
+    )
+    if (
+        value["schema_version"] != HUMAN_SIGNATURE_RECORD_V3_SCHEMA_VERSION
+        or value["artifact_type"] != "gate_b_human_signature_record"
+        or value["signer_role"] != "human_gate_b_compatibility_signer"
+        or value["attestation"] != "ATTEST_COMPATIBILITY_PREFLIGHT_ONLY"
+        or value["approval_record_id"] != approval["approval_record_id"]
+        or value["approval_record_sha256"] != approval_sha256
+    ):
+        _fail("v2 signature record identity mismatch")
+    _atom(value["signature_record_id"], "v2 signature record ID")
+    _timestamp(value["signed_at_utc"], "v2 signature timestamp")
+    signer = _atom(value["signer_actor_id"], "v2 signature actor ID")
+    if signer == approval["approver_actor_id"]:
+        _fail("v2 approval and signature actors must differ")
+    _validate_projection_descriptor_v2(value["projection_descriptor"], descriptor)
+
+
+def _validate_v2_readiness(
+    value: dict[str, Any],
+    descriptor: dict[str, Any],
+    *,
+    approval: dict[str, Any],
+    approval_sha256: str,
+    signature_sha256: str,
+) -> None:
+    _closed(
+        value,
+        {
+            "schema_version",
+            "artifact_type",
+            "authorization_id",
+            "authorized_at_utc",
+            "approval_record_id",
+            "approval_record_sha256",
+            "signature_record_sha256",
+            "compatibility_preflight_ready",
+            "gate_b_ready",
+            "projection_descriptor",
+        },
+        "v2 readiness authorization",
+    )
+    if (
+        value["schema_version"] != READINESS_AUTHORIZATION_V3_SCHEMA_VERSION
+        or value["artifact_type"] != "gate_b_readiness_authorization"
+        or value["approval_record_id"] != approval["approval_record_id"]
+        or value["approval_record_sha256"] != approval_sha256
+        or value["signature_record_sha256"] != signature_sha256
+        or value["compatibility_preflight_ready"] is not True
+        or value["gate_b_ready"] is not False
+    ):
+        _fail("v2 readiness authorization identity mismatch")
+    _atom(value["authorization_id"], "v2 readiness authorization ID")
+    _timestamp(value["authorized_at_utc"], "v2 readiness timestamp")
+    _validate_projection_descriptor_v2(value["projection_descriptor"], descriptor)
+
+
+def _validate_v2_anchor(
+    value: dict[str, Any],
+    descriptor: dict[str, Any],
+    *,
+    role: str,
+    root: dict[str, Any],
+    approval_sha256: str,
+    readiness_sha256: str,
+) -> None:
+    _closed(
+        value,
+        {
+            "schema_version",
+            "artifact_type",
+            "root_role",
+            "root_absolute_path",
+            "anchor_id",
+            "created_at_utc",
+            "approval_record_sha256",
+            "readiness_authorization_sha256",
+            "projection_descriptor",
+        },
+        "v2 root anchor",
+    )
+    if (
+        value["schema_version"] != ROOT_ANCHOR_V2_SCHEMA_VERSION
+        or value["artifact_type"] != "gate_b_root_anchor"
+        or value["root_role"] != role
+        or value["root_absolute_path"] != root["absolute_path"]
+        or value["approval_record_sha256"] != approval_sha256
+        or value["readiness_authorization_sha256"] != readiness_sha256
+    ):
+        _fail("v2 root anchor identity mismatch")
+    _atom(value["anchor_id"], "v2 root anchor ID")
+    _timestamp(value["created_at_utc"], "v2 root anchor timestamp")
+    _validate_projection_descriptor_v2(value["projection_descriptor"], descriptor)
+
+
+def _validate_v2_request(
+    value: dict[str, Any],
+    descriptor: dict[str, Any],
+    *,
+    approval_sha256: str,
+    signature_sha256: str,
+    readiness_sha256: str,
+    anchor_hashes: Mapping[str, str],
+) -> dict[str, dict[str, Any]]:
+    _closed(
+        value,
+        {
+            "schema_version",
+            "artifact_type",
+            "requested_at_utc",
+            "operation",
+            "approval_record_sha256",
+            "signature_record_sha256",
+            "readiness_authorization_sha256",
+            "projection_descriptor",
+            "roots",
+        },
+        "v2 loader request",
+    )
+    if (
+        value["schema_version"] != LOADER_REQUEST_V2_SCHEMA_VERSION
+        or value["artifact_type"] != "gate_b_test_loader_request"
+        or value["operation"] != "compatibility_preflight_only"
+        or value["approval_record_sha256"] != approval_sha256
+        or value["signature_record_sha256"] != signature_sha256
+        or value["readiness_authorization_sha256"] != readiness_sha256
+    ):
+        _fail("v2 loader request identity mismatch")
+    _timestamp(value["requested_at_utc"], "v2 loader request timestamp")
+    _validate_projection_descriptor_v2(value["projection_descriptor"], descriptor)
+    roots = _closed(
+        value["roots"],
+        set(PREAPPROVAL_ROOT_ROLE_ORDER),
+        "v2 loader roots",
+    )
+    copied: dict[str, dict[str, Any]] = {}
+    expected_fields = {
+        "absolute_path",
+        "anchor_relative_path",
+        "anchor_sha256",
+        "file_id_hex",
+        "identity_scheme",
+        "root_role",
+        "volume_id_hex",
+    }
+    for role in PREAPPROVAL_ROOT_ROLE_ORDER:
+        root = _closed(roots[role], expected_fields, f"v2 {role} request root")
+        if root["root_role"] != role:
+            _fail("v2 loader root role mismatch")
+        if role == "test_root":
+            if root["anchor_relative_path"] is not None or root["anchor_sha256"] is not None:
+                _fail("v2 Test root anchor fields must be null")
+        elif (
+            root["anchor_relative_path"] != ".gate-b-root-anchor.json"
+            or root["anchor_sha256"] != anchor_hashes[role]
+        ):
+            _fail("v2 loader root anchor hash mismatch")
+        copied[role] = copy.deepcopy(root)
+    return copied
+
+
+@_sanitized_api
+def build_gate_b_v2_compatibility_trust_chain(
+    projection: GateBPreApprovalRootIdentityProjectionV2,
+    *,
+    approval_record_raw: bytes,
+    signature_record_raw: bytes,
+    readiness_authorization_raw: bytes,
+    root_anchor_raws: Mapping[str, bytes],
+    loader_request_raw: bytes,
+) -> GateBV2CompatibilityTrustChain:
+    """Join the closed v2 artifact family without creating or opening anything."""
+    descriptor = _projection_descriptor_v2(projection)
+    approval_raw, approval, approval_hash = _v2_artifact(
+        approval_record_raw,
+        "v2 approval record",
+    )
+    _validate_v2_approval(approval, descriptor)
+    signature_raw, signature, signature_hash = _v2_artifact(
+        signature_record_raw,
+        "v2 signature record",
+    )
+    _validate_v2_signature(
+        signature,
+        descriptor,
+        approval=approval,
+        approval_sha256=approval_hash,
+    )
+    readiness_raw, readiness, readiness_hash = _v2_artifact(
+        readiness_authorization_raw,
+        "v2 readiness authorization",
+    )
+    _validate_v2_readiness(
+        readiness,
+        descriptor,
+        approval=approval,
+        approval_sha256=approval_hash,
+        signature_sha256=signature_hash,
+    )
+    if type(root_anchor_raws) is not dict or set(root_anchor_raws) != {
+        "ledger_base",
+        "quarantine_base",
+    }:
+        _fail("v2 root anchor inputs are not closed-world")
+    anchor_raw_values: dict[str, bytes] = {}
+    anchor_hashes: dict[str, str] = {}
+    projection_roots = {root["root_role"]: root for root in _plain(projection.payload)["roots"]}
+    for role in ("ledger_base", "quarantine_base"):
+        raw, payload, digest = _v2_artifact(root_anchor_raws[role], f"v2 {role} root anchor")
+        anchor_raw_values[role] = raw
+        anchor_hashes[role] = digest
+        _validate_v2_anchor(
+            payload,
+            descriptor,
+            role=role,
+            root=projection_roots[role],
+            approval_sha256=approval_hash,
+            readiness_sha256=readiness_hash,
+        )
+    request_raw, request, request_hash = _v2_artifact(
+        loader_request_raw,
+        "v2 loader request",
+    )
+    roots = _validate_v2_request(
+        request,
+        descriptor,
+        approval_sha256=approval_hash,
+        signature_sha256=signature_hash,
+        readiness_sha256=readiness_hash,
+        anchor_hashes=anchor_hashes,
+    )
+    rebuilt = build_gate_b_preapproval_root_identity_projection_v2(roots)
+    if rebuilt.canonical_bytes != projection.canonical_bytes or rebuilt.sha256 != projection.sha256:
+        _fail("v2 loader roots differ from the approved projection")
+    paths = {role: Path(root["absolute_path"]) for role, root in roots.items()}
+    if len({os.path.normcase(str(path)) for path in paths.values()}) != 3:
+        _fail("v2 loader roots must be lexically distinct")
+    physical = {(root["volume_id_hex"], root["file_id_hex"]) for root in roots.values()}
+    if len(physical) != 3:
+        _fail("v2 loader roots must have distinct physical identities")
+    for left_name, left in paths.items():
+        for right_name, right in paths.items():
+            if left_name != right_name and (left in right.parents or right in left.parents):
+                _fail("v2 loader roots must be non-nested")
+    artifact_hashes = {
+        "approval_record": approval_hash,
+        "signature_record": signature_hash,
+        "readiness_authorization": readiness_hash,
+        "ledger_root_anchor": anchor_hashes["ledger_base"],
+        "quarantine_root_anchor": anchor_hashes["quarantine_base"],
+        "loader_request": request_hash,
+    }
+    artifact_raws = {
+        "approval_record": approval_raw,
+        "signature_record": signature_raw,
+        "readiness_authorization": readiness_raw,
+        "ledger_root_anchor": anchor_raw_values["ledger_base"],
+        "quarantine_root_anchor": anchor_raw_values["quarantine_base"],
+        "loader_request": request_raw,
+    }
+    chain = GateBV2CompatibilityTrustChain(_token=_V2_TRUST_CHAIN_TOKEN)
+    values = {
+        "projection": projection,
+        "descriptor": _frozen(descriptor),
+        "roots": _frozen(roots),
+        "artifact_hashes": _frozen(artifact_hashes),
+        "request_payload": _frozen(request),
+        "_artifact_raws": MappingProxyType(dict(artifact_raws)),
+        "_token": _V2_TRUST_CHAIN_TOKEN,
+    }
+    for name, value in values.items():
+        object.__setattr__(chain, name, value)
+    snapshot = (
+        chain,
+        projection,
+        copy.deepcopy(descriptor),
+        copy.deepcopy(roots),
+        dict(artifact_hashes),
+        dict(artifact_raws),
+        copy.deepcopy(request),
+    )
+    _V2_TRUST_CHAIN_REGISTRY[id(chain)] = snapshot
+    return chain
+
+
+def validate_gate_b_v2_compatibility_trust_chain(
+    chain: GateBV2CompatibilityTrustChain,
+) -> GateBV2CompatibilityTrustChain:
+    """Revalidate nominal type, exact schema bytes, hashes, and loader provenance."""
+    if type(chain) is not GateBV2CompatibilityTrustChain:
+        _fail("v2 compatibility trust-chain nominal type mismatch")
+    registered = _V2_TRUST_CHAIN_REGISTRY.get(id(chain))
+    try:
+        current = (
+            chain,
+            chain.projection,
+            _plain(chain.descriptor),
+            _plain(chain.roots),
+            dict(chain.artifact_hashes),
+            dict(chain._artifact_raws),
+            _plain(chain.request_payload),
+        )
+    except Exception:
+        _fail("v2 compatibility trust-chain provenance mismatch")
+    if (
+        registered is None
+        or registered[0] is not chain
+        or registered[1] is not current[1]
+        or chain._token is not _V2_TRUST_CHAIN_TOKEN
+        or not all(
+            _exact_json_equal(left, right)
+            for left, right in zip(current[2:5], registered[2:5], strict=True)
+        )
+        or current[5] != registered[5]
+        or not _exact_json_equal(current[6], registered[6])
+        or any(sha256_bytes(raw) != current[4][name] for name, raw in current[5].items())
+    ):
+        _fail("v2 compatibility trust-chain provenance mismatch")
+    _validate_v2_projection_provenance(chain.projection)
+    return chain
 
 
 @dataclass(frozen=True, slots=True)

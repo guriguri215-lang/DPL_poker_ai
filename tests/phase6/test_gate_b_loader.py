@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from test_gate_b_contracts import _v2_chain_fixture
 
 import phase6.gate_b_ledger as ledger_module
 import phase6.gate_b_loader as loader_module
@@ -46,6 +47,7 @@ from phase6.gate_b_loader import (
     GateBRetainedArtifactSnapshot,
     GateBRetainedDirectorySnapshot,
     GateBTestInputFailure,
+    PreparedGateBV2CompatibilityPreflight,
     build_gate_b_retained_loader_bundle,
     create_gate_b_retained_artifact,
     load_gate_b_loader_request,
@@ -55,6 +57,7 @@ from phase6.gate_b_loader import (
     prepare_gate_b_test_open,
     read_gate_b_retained_artifact,
     reserve_gate_b_attempt,
+    validate_gate_b_v2_compatibility_preflight,
 )
 
 COMMIT = "a" * 40
@@ -81,6 +84,76 @@ def _root_ref(
         "anchor_sha256": anchor_hash,
         "root_role": role,
     }
+
+
+def _native_v2_directory_identity(path: Path) -> tuple[str, str]:
+    descriptor = ledger_module._open_directory_descriptor(path)
+    try:
+        volume, file_id = ledger_module._windows_v2_identity_from_descriptor(descriptor)
+    finally:
+        os.close(descriptor)
+    return format(volume, "08x"), format(file_id, "016x")
+
+
+@dataclass(frozen=True)
+class _SyntheticV2RetainedRoots:
+    """Source-free native identity fixture that cannot enter the v2 trust chain."""
+
+    paths: dict[str, Path]
+    roots: dict[str, dict[str, object]]
+    anchor_raws: dict[str, bytes]
+
+
+def _v2_retained_fixture(tmp_path: Path) -> _SyntheticV2RetainedRoots:
+    paths = {
+        "ledger_base": tmp_path / "v2-ledger",
+        "quarantine_base": tmp_path / "v2-quarantine",
+        "test_root": tmp_path / "v2-test",
+    }
+    for path in paths.values():
+        path.mkdir()
+    roots = {}
+    for role, path in paths.items():
+        volume, file_id = _native_v2_directory_identity(path)
+        roots[role] = {
+            "absolute_path": str(path),
+            "anchor_relative_path": (None if role == "test_root" else ".gate-b-root-anchor.json"),
+            "anchor_sha256": None,
+            "file_id_hex": file_id,
+            "identity_scheme": "windows-volume-file-id-v1",
+            "root_role": role,
+            "volume_id_hex": volume,
+        }
+    anchor_raws = {}
+    for role in ("ledger_base", "quarantine_base"):
+        anchor_raws[role] = canonical_json_bytes(
+            {"root_role": role, "synthetic_retained_identity_only": True}
+        )
+        (paths[role] / ".gate-b-root-anchor.json").write_bytes(anchor_raws[role])
+    return _SyntheticV2RetainedRoots(paths=paths, roots=roots, anchor_raws=anchor_raws)
+
+
+def _open_synthetic_v2_retained_roots(
+    retained: _SyntheticV2RetainedRoots,
+) -> dict[str, ledger_module.GateBPinnedDirectory]:
+    opened = {}
+    try:
+        for role in ("ledger_base", "quarantine_base", "test_root"):
+            root = retained.roots[role]
+            opened[role] = loader_module.open_gate_b_v2_pinned_directory(
+                root["absolute_path"],
+                serialization_profile="windows-volume8-file16-lowerhex-v1",
+                expected_volume_id_hex=root["volume_id_hex"],
+                expected_file_id_hex=root["file_id_hex"],
+            )
+        loader_module.verify_gate_b_v2_retained_root_topology(opened)
+        return opened
+    except BaseException:
+        for role in ("test_root", "quarantine_base", "ledger_base"):
+            directory = opened.get(role)
+            if directory is not None:
+                directory.close()
+        raise
 
 
 def _failure_map() -> list[dict[str, str]]:
@@ -3117,3 +3190,201 @@ def test_retained_provenance_uses_no_module_global_object_registry() -> None:
     assert "_RETAINED_ARTIFACT_REGISTRY" not in names
     assert "_RETAINED_DIRECTORY_REGISTRY" not in names
     assert "_RETAINED_BUNDLE_REGISTRY" not in names
+
+
+@pytest.mark.skipif(os.name != "nt", reason="v2 profile is Windows-only")
+def test_v2_source_free_retained_identity_and_anchor_bytes_verify_without_create(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retained = _v2_retained_fixture(tmp_path)
+    creates = []
+
+    def forbidden_create(*_args, **_kwargs):
+        creates.append("create")
+        raise AssertionError("v2 preflight reached output creation")
+
+    monkeypatch.setattr(ledger_module.GateBPinnedDirectory, "create_regular", forbidden_create)
+    opened = _open_synthetic_v2_retained_roots(retained)
+    try:
+        for role in ("ledger_base", "quarantine_base", "test_root"):
+            root = retained.roots[role]
+            loader_module.verify_gate_b_v2_pinned_directory(
+                opened[role],
+                serialization_profile="windows-volume8-file16-lowerhex-v1",
+                expected_volume_id_hex=root["volume_id_hex"],
+                expected_file_id_hex=root["file_id_hex"],
+            )
+        loader_module.verify_gate_b_v2_retained_root_topology(opened)
+        for role in ("ledger_base", "quarantine_base"):
+            raw = retained.anchor_raws[role]
+            anchor = opened[role].read_regular(
+                ".gate-b-root-anchor.json",
+                expected_sha256=sha256_bytes(raw),
+                expected_size_bytes=len(raw),
+            )
+            assert anchor.raw == raw
+        assert creates == []
+        assert {
+            role: tuple(path.iterdir())
+            for role, path in retained.paths.items()
+            if role != "test_root"
+        } == {
+            "ledger_base": (retained.paths["ledger_base"] / ".gate-b-root-anchor.json",),
+            "quarantine_base": (retained.paths["quarantine_base"] / ".gate-b-root-anchor.json",),
+        }
+        assert tuple(retained.paths["test_root"].iterdir()) == ()
+    finally:
+        for role in ("test_root", "quarantine_base", "ledger_base"):
+            opened[role].close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="v2 profile is Windows-only")
+@pytest.mark.parametrize("role", ["ledger_base", "quarantine_base", "test_root"])
+def test_v2_source_free_retained_open_rejects_root_identity_substitution(
+    tmp_path: Path,
+    role: str,
+) -> None:
+    retained = _v2_retained_fixture(tmp_path)
+    root = retained.roots[role]
+    with pytest.raises(GateBLedgerError):
+        loader_module.open_gate_b_v2_pinned_directory(
+            root["absolute_path"],
+            serialization_profile="windows-volume8-file16-lowerhex-v1",
+            expected_volume_id_hex=root["volume_id_hex"],
+            expected_file_id_hex="0000000000000001",
+        )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="v2 profile is Windows-only")
+def test_v2_source_free_retained_anchor_substitution_is_preserved_without_create(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retained = _v2_retained_fixture(tmp_path)
+    anchor = retained.paths["ledger_base"] / ".gate-b-root-anchor.json"
+    substituted = b'{"substituted":true}\n'
+    anchor.write_bytes(substituted)
+    before = {
+        role: tuple(sorted(item.name for item in path.iterdir()))
+        for role, path in retained.paths.items()
+    }
+    creates = []
+    monkeypatch.setattr(
+        ledger_module.GateBPinnedDirectory,
+        "create_regular",
+        lambda *_args, **_kwargs: creates.append("create"),
+    )
+    root = retained.roots["ledger_base"]
+    opened = loader_module.open_gate_b_v2_pinned_directory(
+        root["absolute_path"],
+        serialization_profile="windows-volume8-file16-lowerhex-v1",
+        expected_volume_id_hex=root["volume_id_hex"],
+        expected_file_id_hex=root["file_id_hex"],
+    )
+    try:
+        expected = retained.anchor_raws["ledger_base"]
+        with pytest.raises(GateBLedgerError):
+            opened.read_regular(
+                ".gate-b-root-anchor.json",
+                expected_sha256=sha256_bytes(expected),
+                expected_size_bytes=len(expected),
+            )
+    finally:
+        opened.close()
+    assert anchor.read_bytes() == substituted
+    assert creates == []
+    assert {
+        role: tuple(sorted(item.name for item in path.iterdir()))
+        for role, path in retained.paths.items()
+    } == before
+
+
+@pytest.mark.skipif(os.name != "nt", reason="v2 profile is Windows-only")
+def test_v2_source_free_retained_open_closes_handle_on_late_identity_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retained = _v2_retained_fixture(tmp_path)
+    closes = []
+    original_close = ledger_module.GateBPinnedDirectory.close
+
+    def observed_close(self):
+        closes.append(self)
+        return original_close(self)
+
+    monkeypatch.setattr(ledger_module.GateBPinnedDirectory, "close", observed_close)
+    monkeypatch.setattr(
+        ledger_module,
+        "verify_gate_b_v2_pinned_directory",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            GateBLedgerError("synthetic retained identity late failure")
+        ),
+    )
+    root = retained.roots["ledger_base"]
+    with pytest.raises(GateBLedgerError):
+        ledger_module.open_gate_b_v2_pinned_directory(
+            root["absolute_path"],
+            serialization_profile="windows-volume8-file16-lowerhex-v1",
+            expected_volume_id_hex=root["volume_id_hex"],
+            expected_file_id_hex=root["file_id_hex"],
+        )
+    assert len(closes) == 1
+
+
+@pytest.mark.skipif(os.name != "nt", reason="v2 profile is Windows-only")
+def test_v2_source_free_topology_check_performs_no_anchor_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retained = _v2_retained_fixture(tmp_path)
+    reads = []
+    monkeypatch.setattr(
+        ledger_module.GateBPinnedDirectory,
+        "read_regular",
+        lambda *_args, **_kwargs: reads.append("anchor"),
+    )
+    opened = _open_synthetic_v2_retained_roots(retained)
+    try:
+        loader_module.verify_gate_b_v2_retained_root_topology(opened)
+        assert reads == []
+    finally:
+        for role in ("test_root", "quarantine_base", "ledger_base"):
+            opened[role].close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="v2 profile is Windows-only")
+def test_every_legacy_loader_lifecycle_entry_rejects_v2_chain_before_create(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chain = _v2_chain_fixture().chain
+    lifecycle = []
+
+    def forbidden(*_args, **_kwargs):
+        lifecycle.append("called")
+        raise AssertionError("v2 reached legacy create")
+
+    monkeypatch.setattr(loader_module, "GateBLedgerStore", forbidden)
+    monkeypatch.setattr(loader_module, "GateBQuarantine", forbidden)
+    calls = (
+        lambda: load_gate_b_loader_request(chain),
+        lambda: loader_module._reserve_attempt(chain, expected_latest_record_sha256=None),
+        lambda: loader_module._append_started(chain, chain, store=chain),
+        lambda: reserve_gate_b_attempt(chain, expected_latest_record_sha256=None),
+        lambda: prepare_gate_b_test_open(chain, chain),
+        lambda: open_gate_b_test_input(chain, executor=object()),
+    )
+    for call in calls:
+        with pytest.raises(GateBLoaderError):
+            call()
+    assert lifecycle == []
+
+
+@pytest.mark.skipif(os.name != "nt", reason="v2 profile is Windows-only")
+def test_v2_prepared_boundary_rejects_chain_and_unregistered_forgery() -> None:
+    chain = _v2_chain_fixture().chain
+    with pytest.raises(GateBLoaderError):
+        validate_gate_b_v2_compatibility_preflight(chain)
+    forged = object.__new__(PreparedGateBV2CompatibilityPreflight)
+    with pytest.raises(GateBLoaderError):
+        validate_gate_b_v2_compatibility_preflight(forged)
