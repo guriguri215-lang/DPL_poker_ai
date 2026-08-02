@@ -1726,6 +1726,17 @@ def _write_exclusive(path: Path, raw: bytes) -> None:
 
 
 def _verify_root_ref(ref: Mapping[str, Any], expected_role: str) -> Path:
+    # Import at the call boundary to avoid a module cycle.  Only the exact
+    # provenance-registered executable adapter may reuse a published v2 anchor;
+    # ordinary mappings stay on the unchanged v1 contract below.
+    from phase6.gate_b_v2_route import (
+        GateBV2RuntimeRootReference,
+        validate_gate_b_v2_runtime_root_reference,
+    )
+
+    executable_v2 = type(ref) is GateBV2RuntimeRootReference
+    if executable_v2:
+        validate_gate_b_v2_runtime_root_reference(ref, expected_role)
     required = {
         "absolute_path",
         "anchor_relative_path",
@@ -1758,6 +1769,13 @@ def _verify_root_ref(ref: Mapping[str, Any], expected_role: str) -> Path:
         anchor_raw = _read_pinned(path / ".gate-b-root-anchor.json", "writable root anchor")
         if sha256_bytes(anchor_raw) != ref["anchor_sha256"]:
             _fail("writable root anchor bytes changed")
+        if executable_v2:
+            validate_gate_b_v2_runtime_root_reference(
+                ref,
+                expected_role,
+                anchor_raw=anchor_raw,
+            )
+            return path
         anchor = _strict_canonical_object(anchor_raw, "writable root anchor")
         _closed(
             anchor,
@@ -1780,8 +1798,11 @@ def _verify_root_ref(ref: Mapping[str, Any], expected_role: str) -> Path:
         _atom(anchor["anchor_id"], "root anchor ID")
         _sha(anchor["approval_record_sha256"], "anchor approval hash")
         _timestamp(anchor["created_at_utc"], "root anchor")
-    elif ref["anchor_relative_path"] is not None or ref["anchor_sha256"] is not None:
-        _fail("Test root anchor fields must be null")
+    else:
+        if ref["anchor_relative_path"] is not None or ref["anchor_sha256"] is not None:
+            _fail("Test root anchor fields must be null")
+        if executable_v2:
+            validate_gate_b_v2_runtime_root_reference(ref, expected_role, anchor_raw=None)
     return path
 
 

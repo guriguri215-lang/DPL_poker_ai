@@ -65,6 +65,12 @@ from phase6.gate_b_loader import (
     reserve_gate_b_attempt,
     verify_gate_b_execution_environment,
 )
+from phase6.gate_b_v2_route import (
+    GateBV2RouteError,
+    close_gate_b_v2_execution_route,
+    consume_gate_b_v2_execution_route,
+    is_gate_b_v2_execution_route,
+)
 
 READINESS_SPEC_SCHEMA = "phase6-gate-b-readiness-materialization-spec-v1"
 REQUEST_SPEC_SCHEMA = "phase6-gate-b-request-materialization-spec-v1"
@@ -1586,10 +1592,34 @@ def _open_with_callback_classification(
         raise
 
 
+def _execute_gate_b_v2_once(route: object) -> Mapping[str, Any]:
+    """Consume one retained v2 route after its complete pre-write boundary."""
+    primary_error: BaseException | None = None
+    try:
+        try:
+            request, executor = consume_gate_b_v2_execution_route(route)
+        except GateBV2RouteError:
+            _raise_sanitized(GateBPreflightError)
+        reservation = reserve_gate_b_attempt(request, expected_latest_record_sha256=None)
+        prepared = prepare_gate_b_test_open(request, reservation)
+        return _execution_receipt(_open_with_callback_classification(prepared, executor))
+    except BaseException as exc:
+        primary_error = exc
+        raise
+    finally:
+        try:
+            close_gate_b_v2_execution_route(route)
+        except BaseException:
+            if primary_error is None:
+                raise
+
+
 def execute_gate_b_once(
-    spec_reference: GateBPinnedSpecReference,
+    spec_reference: object,
 ) -> Mapping[str, Any]:
     """Execute exactly one prevalidated Gate B attempt and stop at SEALED."""
+    if is_gate_b_v2_execution_route(spec_reference):
+        return _execute_gate_b_v2_once(spec_reference)
     if is_gate_b_v2_compatibility_object(spec_reference):
         _raise_sanitized(GateBPreflightError)
     with ExitStack() as stack:
