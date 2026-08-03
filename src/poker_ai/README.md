@@ -1,15 +1,19 @@
 # poker_ai
 
 Hero-side pipeline: observation, lookup strategy, action-only leak detection,
-SafetyMixer, ActionSelector and the session runner. Phase 2 implements the river MVP
-(ADR-0007): one river decision, wired end to end, before the CFR solver exists.
+SafetyMixer, ActionSelector and the session runner. Phase 2 implemented the river MVP
+(ADR-0007): one river decision wired end to end before the CFR solver was added.
+The packaged quickstart still uses the original stub baseline; solver-produced
+strategies are available separately in `poker_solver` and are not automatically
+wired into `cli/run_session.py`.
 
 ## Task 3 vertical slice
 
 Scenario → stub opponent public action → observation tracking → lookup strategy
 (with `hand_bucket`) → minimal action-only LeakDetector → rule exploit provider →
-SafetyMixer → Decision Provenance Log (JSONL) → schema validation. Node-lock
-exploitation, CFR, showdown-required leaks and the LLM layer are later phases.
+SafetyMixer → Decision Provenance Log (JSONL) → schema validation. This historical
+vertical slice does not automatically use the later node-lock and CFR packages.
+Showdown-required leak detection and an LLM layer remain absent.
 
 - `actions.py` — the river action vocabulary; task 3 realises only facing an all-in
   (`FOLD` / `CALL`), whose terminals are showdown-determined so every EV is exact.
