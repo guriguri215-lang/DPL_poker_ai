@@ -27,9 +27,11 @@ from phase6.gate_b_contracts import (
     QUARANTINE_MANIFEST_SCHEMA_VERSION,
     QUARANTINE_OUTPUT_NAMES,
     ROOT_ANCHOR_SCHEMA_VERSION,
+    V2_OUTPUT_LIMITS,
     ZERO_SHA256,
     GateBBatchManifest,
     GateBReadinessAuthorization,
+    GateBV2ExecutionObject,
     is_gate_b_v2_compatibility_object,
     load_gate_b_release_authorization,
     load_gate_b_retry_authorization,
@@ -1608,6 +1610,24 @@ def open_gate_b_v2_pinned_directory(
     path = Path(absolute_path)
     if not path.is_absolute() or ".." in path.parts or str(path) != str(absolute_path):
         _fail("v2 pinned directory path must be canonical and absolute")
+    text = str(path)
+    normalized = text.replace("/", "\\")
+    if (
+        normalized.startswith("\\\\")
+        or normalized.startswith("\\?\\")
+        or normalized.startswith("\\.\\")
+        or len(normalized) < 3
+        or normalized[1:3] != ":\\"
+        or ":" in normalized[2:]
+    ):
+        _fail("v2 retained directory must be a local drive path without named streams")
+    drive_root = normalized[:3]
+    try:
+        drive_type = int(ctypes.windll.kernel32.GetDriveTypeW(drive_root))
+    except Exception:
+        _fail("v2 retained directory local-volume verification failed")
+    if drive_type != 3:  # DRIVE_FIXED; remote/removable/unknown never proceeds to I/O.
+        _fail("v2 retained directory must be on a fixed local volume")
     named = _verify_directory(path, "v2 retained directory")
     retained_identity = (named.st_dev, named.st_ino)
     chain = _open_windows_pinned_chain(path, retained_identity)
@@ -4149,6 +4169,634 @@ def authorize_gate_b_release(
         record = store.append(payload)
         pinned.verify_identity(request)
         return record
+
+
+# The v2 lifecycle is intentionally separate from GateBLedgerStore and
+# GateBQuarantine.  It accepts retained handles only and has no path-opening
+# fallback.
+_V2_LIFECYCLE_TOKEN = object()
+_V2_LIFECYCLE_REGISTRY: dict[int, tuple[object, ...]] = {}
+_V2_CHILD_DIRECTORY_TOKEN = object()
+_V2_CHILD_DIRECTORY_REGISTRY: dict[int, tuple[object, ...]] = {}
+
+
+class _GateBV2PinnedChildDirectory(GateBPinnedDirectory):
+    """Own one newly created v2 child without reopening it through the v1 path API."""
+
+    __slots__ = (
+        "_retained_parent",
+        "_direct_child_name",
+        "_native_identity",
+        "_ancestor_native_identities",
+        "_expected_parent_children",
+        "_owns_parent",
+        "_v2_child_token",
+    )
+
+    def __init__(
+        self,
+        *,
+        retained_parent: GateBPinnedDirectory | _GateBV2PinnedChildDirectory,
+        direct_child_name: str,
+        stable_path: Path,
+        descriptor: int,
+        expected_identity: tuple[int, int],
+        native_identity: tuple[int, int],
+        ancestor_native_identities: tuple[tuple[int, int], ...],
+        expected_parent_children: tuple[str, ...],
+        owns_parent: bool,
+        _token: object,
+    ) -> None:
+        if _token is not _V2_CHILD_DIRECTORY_TOKEN:
+            _fail("v2 child-directory construction is private")
+        super().__init__(
+            stable_path,
+            stable_path,
+            descriptor,
+            expected_identity,
+            (),
+            _token=_PINNED_ARTIFACT_LOADER_TOKEN,
+        )
+        self._retained_parent = retained_parent
+        self._direct_child_name = direct_child_name
+        self._native_identity = native_identity
+        self._ancestor_native_identities = ancestor_native_identities
+        self._expected_parent_children = expected_parent_children
+        self._owns_parent = owns_parent
+        self._v2_child_token = _token
+
+    def _snapshot(self) -> tuple[object, ...]:
+        return (
+            self,
+            self._retained_parent,
+            self._direct_child_name,
+            self._stable_path,
+            self._descriptor,
+            self._expected_identity,
+            self._native_identity,
+            self._ancestor_native_identities,
+            self._expected_parent_children,
+            self._owns_parent,
+            self._v2_child_token,
+        )
+
+    def _verify_identity_unwrapped(self) -> None:
+        self._ensure_open()
+        if (
+            type(self) is not _GateBV2PinnedChildDirectory
+            or self._v2_child_token is not _V2_CHILD_DIRECTORY_TOKEN
+            or _V2_CHILD_DIRECTORY_REGISTRY.get(id(self)) != self._snapshot()
+            or os.name != "nt"
+        ):
+            _fail("v2 child-directory provenance mismatch")
+        parent = self._retained_parent
+        if type(parent) not in {GateBPinnedDirectory, _GateBV2PinnedChildDirectory}:
+            _fail("v2 child-directory retained parent mismatch")
+        parent.verify_identity()
+        parent_final = _windows_final_path_from_descriptor(parent._descriptor)
+        if parent_final.casefold() != str(parent._stable_path).casefold():
+            _fail("v2 child-directory retained parent path changed")
+        parent_ancestors = (
+            (*parent._ancestor_native_identities, parent._native_identity)
+            if type(parent) is _GateBV2PinnedChildDirectory
+            else (_windows_v2_identity_from_descriptor(parent._descriptor),)
+        )
+        if parent_ancestors != self._ancestor_native_identities:
+            _fail("v2 child-directory retained ancestry changed")
+        metadata = _directory_pinned_metadata(
+            os.fstat(self._descriptor), "v2 retained child directory"
+        )
+        if (metadata.st_dev, metadata.st_ino) != self._expected_identity:
+            _fail("v2 retained child-directory identity changed")
+        native_identity = _windows_v2_identity_from_descriptor(self._descriptor)
+        if (
+            native_identity != self._native_identity
+            or native_identity in self._ancestor_native_identities
+        ):
+            _fail("v2 retained child-directory native identity changed")
+        final_path = _windows_final_path_from_descriptor(self._descriptor)
+        expected_path = parent_final.rstrip("\\") + "\\" + self._direct_child_name
+        if (
+            final_path.casefold() != str(self._stable_path).casefold()
+            or final_path.casefold() != expected_path.casefold()
+        ):
+            _fail("v2 retained child-directory topology changed")
+        named = _directory_pinned_metadata(
+            _lstat(self._stable_path), "v2 named retained child directory"
+        )
+        if (named.st_dev, named.st_ino) != self._expected_identity:
+            _fail("v2 retained child-directory name is an alias")
+        if _windows_stream_names(self._stable_path) != ("::$DATA",):
+            _fail("v2 retained child-directory has an alternate data stream")
+        if parent.direct_child_names() != self._expected_parent_children:
+            _fail("v2 retained child-directory parent topology changed")
+        parent.verify_identity()
+
+    @_sanitized_api
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        first_error: BaseException | None = None
+        try:
+            os.close(self._descriptor)
+        except BaseException as exc:
+            first_error = exc
+        if self._owns_parent:
+            try:
+                self._retained_parent.close()
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise GateBLedgerError("v2 child-directory close failed") from first_error
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class GateBV2AttemptReservation(GateBV2ExecutionObject):
+    test_batch_sha256: str
+    attempt_ordinal: int
+    reserved_record_sha256: str
+    state: str
+    _token: object = field(repr=False, compare=False)
+
+    def __new__(cls, *, _token: object | None = None) -> GateBV2AttemptReservation:
+        if _token is not _V2_LIFECYCLE_TOKEN:
+            raise TypeError("v2 reservation construction is private")
+        return object.__new__(cls)
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class GateBV2LedgerStore(GateBV2ExecutionObject):
+    _directory: GateBPinnedDirectory = field(repr=False, compare=False)
+    _namespace: _GateBV2PinnedChildDirectory | None = field(repr=False, compare=False)
+    _records: tuple[tuple[str, bytes, str], ...] = field(repr=False, compare=False)
+    _binding_sha256: str = field(repr=False, compare=False)
+    _test_batch_sha256: str = field(repr=False, compare=False)
+    _token: object = field(repr=False, compare=False)
+
+    def __new__(cls, *, _token: object | None = None) -> GateBV2LedgerStore:
+        if _token is not _V2_LIFECYCLE_TOKEN:
+            raise TypeError("v2 ledger-store construction is private")
+        return object.__new__(cls)
+
+
+def _new_gate_b_v2_attempt_reservation(
+    *, test_batch_sha256: str, reserved_record_sha256: str
+) -> GateBV2AttemptReservation:
+    reservation = GateBV2AttemptReservation(_token=_V2_LIFECYCLE_TOKEN)
+    values = (test_batch_sha256, 1, reserved_record_sha256, "RESERVED", _V2_LIFECYCLE_TOKEN)
+    for name, value in zip(
+        ("test_batch_sha256", "attempt_ordinal", "reserved_record_sha256", "state", "_token"),
+        values,
+        strict=True,
+    ):
+        object.__setattr__(reservation, name, value)
+    _V2_LIFECYCLE_REGISTRY[id(reservation)] = (reservation, *values)
+    return reservation
+
+
+def _validate_gate_b_v2_attempt_reservation(
+    reservation: GateBV2AttemptReservation,
+) -> GateBV2AttemptReservation:
+    if type(reservation) is not GateBV2AttemptReservation:
+        _fail("v2 reservation nominal type mismatch")
+    current = (
+        reservation,
+        reservation.test_batch_sha256,
+        reservation.attempt_ordinal,
+        reservation.reserved_record_sha256,
+        reservation.state,
+        reservation._token,
+    )
+    if (
+        _V2_LIFECYCLE_REGISTRY.get(id(reservation)) != current
+        or reservation._token is not _V2_LIFECYCLE_TOKEN
+        or reservation.attempt_ordinal != 1
+        or reservation.state != "RESERVED"
+    ):
+        _fail("v2 reservation provenance mismatch")
+    return reservation
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class GateBV2Quarantine(GateBV2ExecutionObject):
+    _directory: GateBPinnedDirectory = field(repr=False, compare=False)
+    _namespace: _GateBV2PinnedChildDirectory | None = field(repr=False, compare=False)
+    _binding_sha256: str = field(repr=False, compare=False)
+    _test_batch_sha256: str = field(repr=False, compare=False)
+    _token: object = field(repr=False, compare=False)
+
+    def __new__(cls, *, _token: object | None = None) -> GateBV2Quarantine:
+        if _token is not _V2_LIFECYCLE_TOKEN:
+            raise TypeError("v2 quarantine construction is private")
+        return object.__new__(cls)
+
+
+def _new_gate_b_v2_ledger_store(
+    directory: GateBPinnedDirectory, *, binding_sha256: str, test_batch_sha256: str
+) -> GateBV2LedgerStore:
+    if type(directory) is not GateBPinnedDirectory:
+        _fail("v2 ledger store requires one retained directory")
+    _sha(binding_sha256, "v2 binding hash")
+    _sha(test_batch_sha256, "v2 batch hash")
+    store = GateBV2LedgerStore(_token=_V2_LIFECYCLE_TOKEN)
+    values = (
+        directory,
+        None,
+        (),
+        binding_sha256,
+        test_batch_sha256,
+        _V2_LIFECYCLE_TOKEN,
+    )
+    for name, value in zip(
+        (
+            "_directory",
+            "_namespace",
+            "_records",
+            "_binding_sha256",
+            "_test_batch_sha256",
+            "_token",
+        ),
+        values,
+        strict=True,
+    ):
+        object.__setattr__(store, name, value)
+    _V2_LIFECYCLE_REGISTRY[id(store)] = (store, *values)
+    return store
+
+
+def _new_gate_b_v2_quarantine(
+    directory: GateBPinnedDirectory, *, binding_sha256: str, test_batch_sha256: str
+) -> GateBV2Quarantine:
+    if type(directory) is not GateBPinnedDirectory:
+        _fail("v2 quarantine requires one retained directory")
+    quarantine = GateBV2Quarantine(_token=_V2_LIFECYCLE_TOKEN)
+    values = (directory, None, binding_sha256, test_batch_sha256, _V2_LIFECYCLE_TOKEN)
+    for name, value in zip(
+        (
+            "_directory",
+            "_namespace",
+            "_binding_sha256",
+            "_test_batch_sha256",
+            "_token",
+        ),
+        values,
+        strict=True,
+    ):
+        object.__setattr__(quarantine, name, value)
+    _V2_LIFECYCLE_REGISTRY[id(quarantine)] = (
+        quarantine,
+        directory,
+        None,
+        None,
+        binding_sha256,
+        test_batch_sha256,
+        _V2_LIFECYCLE_TOKEN,
+    )
+    return quarantine
+
+
+def _validate_gate_b_v2_lifecycle_object(value: object, expected: type[Any]) -> None:
+    if type(value) is not expected:
+        _fail("v2 lifecycle nominal type mismatch")
+    registered = _V2_LIFECYCLE_REGISTRY.get(id(value))
+    try:
+        current = (
+            value,
+            value._directory,
+            value._namespace,
+            value._records if expected is GateBV2LedgerStore else None,
+            value._binding_sha256,
+            value._test_batch_sha256,
+            value._token,
+        )
+    except Exception:
+        _fail("v2 lifecycle provenance mismatch")
+    if registered != current or current[-1] is not _V2_LIFECYCLE_TOKEN:
+        _fail("v2 lifecycle provenance mismatch")
+    value._directory.verify_identity()
+
+
+def _refresh_gate_b_v2_lifecycle_registry(value: object) -> None:
+    _V2_LIFECYCLE_REGISTRY[id(value)] = (
+        value,
+        value._directory,
+        value._namespace,
+        value._records if type(value) is GateBV2LedgerStore else None,
+        value._binding_sha256,
+        value._test_batch_sha256,
+        value._token,
+    )
+
+
+def _create_gate_b_v2_child_directory(
+    parent: GateBPinnedDirectory | _GateBV2PinnedChildDirectory,
+    direct_child_name: str,
+    *,
+    take_parent_ownership: bool = False,
+) -> _GateBV2PinnedChildDirectory:
+    if type(parent) not in {GateBPinnedDirectory, _GateBV2PinnedChildDirectory}:
+        _fail("v2 child-directory parent nominal type mismatch")
+    if os.name != "nt":
+        _fail("v2 child-directory retention requires Windows")
+    name = _pinned_child_name(direct_child_name)
+    parent.verify_identity()
+    before = parent.direct_child_names()
+    if name in before:
+        _fail("v2 write namespace already exists")
+    parent_final = _windows_final_path_from_descriptor(parent._descriptor)
+    if parent_final.casefold() != str(parent._stable_path).casefold():
+        _fail("v2 child-directory parent path changed before create")
+    ancestor_native_identities = (
+        (*parent._ancestor_native_identities, parent._native_identity)
+        if type(parent) is _GateBV2PinnedChildDirectory
+        else (_windows_v2_identity_from_descriptor(parent._descriptor),)
+    )
+    path = Path(parent_final) / name
+    try:
+        os.mkdir(path)
+    except OSError as exc:
+        raise GateBLedgerError("v2 write namespace creation failed") from exc
+    parent.verify_identity()
+    after = tuple(sorted((*before, name)))
+    if parent.direct_child_names() != after:
+        _fail("v2 write namespace topology changed during create")
+    named = _directory_pinned_metadata(_lstat(path), "v2 created child directory")
+    if _windows_stream_names(path) != ("::$DATA",):
+        _fail("v2 created child directory has an alternate data stream")
+    descriptor: int | None = None
+    child: _GateBV2PinnedChildDirectory | None = None
+    try:
+        descriptor = _windows_create_file_descriptor(
+            path,
+            access=0,
+            creation=3,
+            share=3,
+            directory=True,
+        )
+        retained = _directory_pinned_metadata(
+            os.fstat(descriptor), "v2 created retained child directory"
+        )
+        expected_identity = (retained.st_dev, retained.st_ino)
+        if expected_identity != (named.st_dev, named.st_ino):
+            _fail("v2 created child-directory identity changed before retention")
+        native_identity = _windows_v2_identity_from_descriptor(descriptor)
+        if native_identity in ancestor_native_identities:
+            _fail("v2 created child-directory aliases a retained ancestor")
+        final_path = _windows_final_path_from_descriptor(descriptor)
+        expected_path = parent_final.rstrip("\\") + "\\" + name
+        if final_path.casefold() != expected_path.casefold():
+            _fail("v2 created child-directory is not a direct retained child")
+        _windows_reject_network_volume(_windows_volume_guid_root(final_path))
+        child = _GateBV2PinnedChildDirectory(
+            retained_parent=parent,
+            direct_child_name=name,
+            stable_path=Path(final_path),
+            descriptor=descriptor,
+            expected_identity=expected_identity,
+            native_identity=native_identity,
+            ancestor_native_identities=ancestor_native_identities,
+            expected_parent_children=after,
+            owns_parent=take_parent_ownership,
+            _token=_V2_CHILD_DIRECTORY_TOKEN,
+        )
+        descriptor = None
+        _V2_CHILD_DIRECTORY_REGISTRY[id(child)] = child._snapshot()
+        child.verify_identity()
+        return child
+    except BaseException:
+        if child is not None:
+            with suppress(Exception):
+                child.close()
+        elif descriptor is not None:
+            with suppress(OSError):
+                os.close(descriptor)
+        raise
+
+
+def _gate_b_v2_ledger_namespace(
+    store: GateBV2LedgerStore,
+) -> _GateBV2PinnedChildDirectory:
+    if store._namespace is None:
+        namespace = _create_gate_b_v2_child_directory(
+            store._directory,
+            store._test_batch_sha256,
+        )
+        object.__setattr__(store, "_namespace", namespace)
+        _refresh_gate_b_v2_lifecycle_registry(store)
+    store._namespace.verify_identity()
+    return store._namespace
+
+
+def _gate_b_v2_quarantine_namespace(
+    quarantine: GateBV2Quarantine,
+) -> _GateBV2PinnedChildDirectory:
+    if quarantine._namespace is None:
+        batch_directory = _create_gate_b_v2_child_directory(
+            quarantine._directory,
+            quarantine._test_batch_sha256,
+        )
+        try:
+            namespace = _create_gate_b_v2_child_directory(
+                batch_directory,
+                "attempt-000001",
+                take_parent_ownership=True,
+            )
+        except BaseException:
+            batch_directory.close()
+            raise
+        object.__setattr__(quarantine, "_namespace", namespace)
+        _refresh_gate_b_v2_lifecycle_registry(quarantine)
+    quarantine._namespace.verify_identity()
+    return quarantine._namespace
+
+
+def _close_gate_b_v2_lifecycle_object(value: object) -> None:
+    if type(value) not in {GateBV2LedgerStore, GateBV2Quarantine}:
+        _fail("v2 lifecycle close nominal mismatch")
+    namespace = getattr(value, "_namespace", None)
+    if namespace is not None:
+        namespace.close()
+        object.__setattr__(value, "_namespace", None)
+        _refresh_gate_b_v2_lifecycle_registry(value)
+
+
+def _assert_gate_b_v2_disposable_write_target(directory: GateBPinnedDirectory) -> None:
+    """Deny controlled_evaluation and its exact production roots before create."""
+    directory.verify_identity()
+    candidate = Path(directory._path)
+    workspace = Path(__file__).resolve().parents[3]
+    deny_common = workspace / "controlled_evaluation"
+    deny_names = (
+        "gate_b_test_v1_input",
+        "gate_b_test_v1_ledger",
+        "gate_b_test_v1_quarantine",
+        "gate_b_test_v2_input",
+        "gate_b_test_v2_ledger",
+        "gate_b_test_v2_quarantine",
+    )
+    candidate_text = os.path.normcase(os.path.abspath(str(candidate)))
+    deny_paths = (deny_common, *(deny_common / name for name in deny_names))
+    for denied in deny_paths:
+        denied_text = os.path.normcase(os.path.abspath(str(denied)))
+        if candidate_text == denied_text or candidate_text.startswith(denied_text + os.sep):
+            _fail("v2 disposable authority intersects a production deny root")
+    candidate_identities: set[tuple[int, int]] = set()
+    current = candidate
+    while True:
+        metadata = os.stat(current, follow_symlinks=False)
+        if stat.S_ISLNK(metadata.st_mode) or bool(
+            getattr(metadata, "st_file_attributes", 0)
+            & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        ):
+            _fail("v2 disposable authority contains a reparse ancestor")
+        candidate_identities.add((metadata.st_dev, metadata.st_ino))
+        if current.parent == current:
+            break
+        current = current.parent
+    for denied in deny_paths:
+        if denied.exists():
+            metadata = os.stat(denied, follow_symlinks=False)
+            if (metadata.st_dev, metadata.st_ino) in candidate_identities:
+                _fail("v2 disposable authority physically aliases a production deny root")
+
+
+def _append_gate_b_v2_state(
+    store: GateBV2LedgerStore,
+    *,
+    ordinal: int,
+    from_state: str | None,
+    to_state: str,
+    previous_sha256: str | None,
+    quarantine_manifest_sha256: str | None,
+) -> str:
+    _validate_gate_b_v2_lifecycle_object(store, GateBV2LedgerStore)
+    _assert_gate_b_v2_disposable_write_target(store._directory)
+    if ordinal not in {1, 2, 3} or to_state not in {
+        "RESERVED",
+        "STARTED",
+        "SEALED",
+        "FAILED_CLOSED",
+    }:
+        _fail("v2 ledger transition mismatch")
+    records = store._records
+    expected_transition = (
+        (1, None, "RESERVED", None)
+        if not records
+        else (
+            len(records) + 1,
+            records[-1][0],
+            (
+                {"STARTED", "FAILED_CLOSED"}
+                if records[-1][0] == "RESERVED"
+                else {"SEALED", "FAILED_CLOSED"}
+            ),
+            records[-1][2],
+        )
+    )
+    if (
+        ordinal != expected_transition[0]
+        or from_state != expected_transition[1]
+        or (
+            to_state != expected_transition[2]
+            if type(expected_transition[2]) is str
+            else to_state not in expected_transition[2]
+        )
+        or previous_sha256 != expected_transition[3]
+        or (
+            quarantine_manifest_sha256 is not None
+            if to_state in {"RESERVED", "STARTED"}
+            else not isinstance(quarantine_manifest_sha256, str)
+            or _SHA_RE.fullmatch(quarantine_manifest_sha256) is None
+        )
+    ):
+        _fail("v2 ledger state-chain mismatch")
+    namespace = _gate_b_v2_ledger_namespace(store)
+    _assert_gate_b_v2_disposable_write_target(namespace)
+    expected_names = {f"record-{index:06d}.json" for index in range(1, len(records) + 1)}
+    if set(namespace.direct_child_names()) != expected_names:
+        _fail("v2 ledger namespace topology mismatch")
+    for index, (_state, prior_raw, prior_sha) in enumerate(records, start=1):
+        retained = namespace.read_regular(
+            f"record-{index:06d}.json",
+            expected_sha256=prior_sha,
+            expected_size_bytes=len(prior_raw),
+        )
+        if retained.raw != prior_raw:
+            _fail("v2 ledger retained record bytes changed")
+    payload = {
+        "schema_version": ATTEMPT_LEDGER_RECORD_SCHEMA_VERSION,
+        "test_batch_hash": store._test_batch_sha256,
+        "attempt_ordinal": 1,
+        "record_ordinal": ordinal,
+        "from_state": from_state,
+        "to_state": to_state,
+        "previous_record_sha256": previous_sha256,
+        "execution_binding_sha256": store._binding_sha256,
+        "quarantine_manifest_sha256": quarantine_manifest_sha256,
+    }
+    raw = canonical_json_bytes(payload)
+    name = f"record-{ordinal:06d}.json"
+    created = namespace.create_regular(name, raw)
+    object.__setattr__(
+        store,
+        "_records",
+        (*records, (to_state, raw, created.sha256)),
+    )
+    _refresh_gate_b_v2_lifecycle_registry(store)
+    return created.sha256
+
+
+def _create_gate_b_v2_quarantine_manifest(
+    quarantine: GateBV2Quarantine,
+    *,
+    status: str,
+    started_record_sha256: str | None,
+    output_raws: Mapping[str, bytes] | None = None,
+) -> str:
+    _validate_gate_b_v2_lifecycle_object(quarantine, GateBV2Quarantine)
+    _assert_gate_b_v2_disposable_write_target(quarantine._directory)
+    namespace = _gate_b_v2_quarantine_namespace(quarantine)
+    _assert_gate_b_v2_disposable_write_target(namespace)
+    if status not in {"sealed", "failed_closed"}:
+        _fail("v2 quarantine status mismatch")
+    outputs = (
+        {name: b"" for name in _WRITABLE_OUTPUTS}
+        if output_raws is None
+        else dict(output_raws)
+    )
+    if set(outputs) != set(_WRITABLE_OUTPUTS) or any(
+        type(raw) is not bytes or len(raw) > V2_OUTPUT_LIMITS[name]
+        for name, raw in outputs.items()
+    ):
+        _fail("v2 quarantine output set or bound mismatch")
+    artifacts = []
+    for name in _WRITABLE_OUTPUTS:
+        raw = outputs[name]
+        artifact = namespace.create_regular(_OUTPUT_PATHS[name], raw)
+        artifacts.append(
+            {
+                "name": name,
+                "relative_path": _OUTPUT_PATHS[name],
+                "sha256": artifact.sha256,
+                "size_bytes": artifact.size_bytes,
+            }
+        )
+    payload = {
+        "schema_version": QUARANTINE_MANIFEST_SCHEMA_VERSION,
+        "artifact_type": "gate_b_test_v2_quarantine_manifest",
+        "test_batch_hash": quarantine._test_batch_sha256,
+        "attempt_ordinal": 1,
+        "execution_binding_sha256": quarantine._binding_sha256,
+        "status": status,
+        "started_record_sha256": started_record_sha256,
+        "sealed_at_utc": _now_utc(),
+        "artifacts": artifacts,
+    }
+    raw = canonical_json_bytes(payload)
+    namespace.create_regular("quarantine-manifest.json", raw)
+    return sha256_bytes(raw)
 
 
 @_sanitized_api

@@ -3333,6 +3333,221 @@ def _build_frames(
     return _FramedSource(frames)
 
 
+@dataclass(frozen=True, slots=True)
+class _InputBatchView:
+    batch: GateBBatchManifest
+
+
+@dataclass(slots=True, init=False)
+class _InputPreparation:
+    view: _InputBatchView
+    components: dict[str, _PinnedInput]
+    primary_raw: bytes
+    comparators: list[tuple[dict[str, Any], _PinnedInput]]
+    ablations: list[tuple[dict[str, Any], _PinnedInput]]
+    opponent_refs: list[dict[str, Any]]
+    handles: list[_PinnedInput]
+    first_payload: _PinnedInput
+    test_root_path: Path
+    test_root_descriptor: int
+    _consumed: bool
+    _token: object
+
+
+_V2_INPUT_TOKEN = object()
+_V2_INPUT_REGISTRY: dict[int, tuple[object, ...]] = {}
+
+
+def _input_preparation_snapshot(prepared: _InputPreparation) -> tuple[object, ...]:
+    return (
+        prepared,
+        prepared.view,
+        prepared.components,
+        prepared.primary_raw,
+        prepared.comparators,
+        prepared.ablations,
+        prepared.opponent_refs,
+        prepared.handles,
+        prepared.first_payload,
+        prepared.test_root_path,
+        prepared.test_root_descriptor,
+        prepared._consumed,
+        prepared._token,
+    )
+
+
+def _prepare_gate_b_v2_input_source(
+    batch: GateBBatchManifest,
+    test_root: GateBPinnedDirectory,
+) -> _InputPreparation:
+    """Verify nonpayload inputs and OS-open only the first unread Test payload."""
+    if type(batch) is not GateBBatchManifest or type(test_root) is not GateBPinnedDirectory:
+        raise GateBTestInputFailure("v2 Test input preparation nominal mismatch")
+    test_root.verify_identity()
+    root = Path(test_root._path)
+    root_descriptor = test_root._descriptor
+    view = _InputBatchView(batch)
+    components: dict[str, _PinnedInput] = {}
+    payloads: dict[str, dict[str, Any]] = {}
+    relative_paths: set[str] = set()
+    identities: set[tuple[int, int]] = set()
+    handles: list[_PinnedInput] = []
+    first_payload: _PinnedInput | None = None
+    try:
+        for name in COMPONENT_NAMES:
+            ref = batch.payload["components"][name]
+            if ref["relative_path"] in relative_paths:
+                raise GateBTestInputFailure("component relative path alias detected")
+            handle, payload, _raw = _component_payload(
+                view,
+                name,
+                root,
+                root_descriptor,
+            )
+            if handle.identity in identities:
+                handle.close()
+                raise GateBTestInputFailure("component physical identity alias detected")
+            handles.append(handle)
+            relative_paths.add(ref["relative_path"])
+            identities.add(handle.identity)
+            components[name] = handle
+            payloads[name] = payload
+        primary_raw = _validate_selected_lock(view, payloads["selected_config_lock"])
+        _primary, comparators, ablations = _validate_execution_index(
+            view,
+            payloads["execution_config_index"],
+            primary_raw,
+        )
+        opponent_refs = _validate_opponent_index(view, payloads["opponent_payload_index"])
+        opened_groups = []
+        for refs in (comparators, ablations):
+            opened = []
+            for ref in refs:
+                if ref["relative_path"] in relative_paths:
+                    raise GateBTestInputFailure("indexed config relative path alias detected")
+                handle = _PinnedInput.open_unread_at(
+                    root_descriptor,
+                    root,
+                    ref["relative_path"],
+                )
+                handles.append(handle)
+                raw = handle.verify(
+                    expected_size=ref["size_bytes"],
+                    expected_sha256=ref["sha256"],
+                    canonical=True,
+                )
+                payload = _strict_canonical_object(raw, "indexed config")
+                if payload.get("schema_version") != ref["schema_version"]:
+                    raise GateBTestInputFailure("indexed config schema mismatch")
+                if handle.identity in identities:
+                    raise GateBTestInputFailure("indexed config physical alias detected")
+                identities.add(handle.identity)
+                relative_paths.add(ref["relative_path"])
+                opened.append((ref, handle))
+            opened_groups.append(opened)
+        for opponent in opponent_refs:
+            if opponent["relative_path"] in relative_paths:
+                raise GateBTestInputFailure("opponent payload path aliases nonpayload input")
+            relative_paths.add(opponent["relative_path"])
+        first_payload = _PinnedInput.open_first_unverified_at(
+            root_descriptor,
+            root,
+            opponent_refs[0]["relative_path"],
+        )
+        prepared = object.__new__(_InputPreparation)
+        values = (
+            view,
+            components,
+            primary_raw,
+            opened_groups[0],
+            opened_groups[1],
+            opponent_refs,
+            handles,
+            first_payload,
+            root,
+            root_descriptor,
+            False,
+            _V2_INPUT_TOKEN,
+        )
+        for field_name, value in zip(
+            (
+                "view",
+                "components",
+                "primary_raw",
+                "comparators",
+                "ablations",
+                "opponent_refs",
+                "handles",
+                "first_payload",
+                "test_root_path",
+                "test_root_descriptor",
+                "_consumed",
+                "_token",
+            ),
+            values,
+            strict=True,
+        ):
+            object.__setattr__(prepared, field_name, value)
+        _V2_INPUT_REGISTRY[id(prepared)] = _input_preparation_snapshot(prepared)
+        return prepared
+    except BaseException:
+        _close_input_handles(handles, first_payload)
+        raise
+
+
+def _activate_gate_b_v2_input_source(prepared: _InputPreparation) -> _FramedSource:
+    """Verify Test payload bytes only after the caller has durably appended STARTED."""
+    if (
+        type(prepared) is not _InputPreparation
+        or prepared._token is not _V2_INPUT_TOKEN
+        or prepared._consumed
+        or _V2_INPUT_REGISTRY.get(id(prepared)) != _input_preparation_snapshot(prepared)
+    ):
+        raise GateBTestInputFailure("v2 Test input preparation provenance mismatch")
+    prepared._consumed = True
+    _V2_INPUT_REGISTRY[id(prepared)] = _input_preparation_snapshot(prepared)
+    payloads: list[tuple[dict[str, Any], _PinnedInput]] = []
+    known_identities = {handle.identity for handle in prepared.handles}
+    try:
+        for index, ref in enumerate(prepared.opponent_refs):
+            if index == 0:
+                handle = prepared.first_payload
+                handle.pin_identity()
+            else:
+                handle = _PinnedInput.open_unread_at(
+                    prepared.test_root_descriptor,
+                    prepared.test_root_path,
+                    ref["relative_path"],
+                )
+                prepared.handles.append(handle)
+            handle.verify(
+                expected_size=ref["size_bytes"],
+                expected_sha256=ref["sha256"],
+                canonical=False,
+            )
+            if handle.identity in known_identities:
+                raise GateBTestInputFailure("opponent payload physical alias detected")
+            known_identities.add(handle.identity)
+            payloads.append((ref, handle))
+        return _build_frames(
+            prepared.view,
+            prepared.components,
+            prepared.primary_raw,
+            prepared.comparators,
+            prepared.ablations,
+            payloads,
+        )
+    except BaseException:
+        _close_input_handles(prepared.handles, prepared.first_payload)
+        raise
+
+
+def _close_gate_b_v2_input_source(prepared: _InputPreparation) -> None:
+    if type(prepared) is not _InputPreparation or prepared._token is not _V2_INPUT_TOKEN:
+        raise GateBTestInputFailure("v2 Test input preparation provenance mismatch")
+    _close_input_handles(prepared.handles, prepared.first_payload)
+
+
 def _complete_failure(
     request: GateBLoaderRequest,
     quarantine: GateBQuarantine,

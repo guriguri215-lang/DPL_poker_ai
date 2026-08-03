@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import os
+import platform
 import re
+import stat
+import subprocess
 import sys
 from collections.abc import Mapping, Sequence
-from contextlib import ExitStack
+from contextlib import ExitStack, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
@@ -22,10 +26,29 @@ from phase6.contracts import (
     sha256_bytes,
 )
 from phase6.gate_b_contracts import (
+    GateBBatchManifest,
     GateBContractError,
+    GateBExecutionContext,
     GateBV2CompatibilityObject,
     GateBV2CompatibilityTrustChain,
+    GateBV2ExecutionBinding,
+    GateBV2ExecutionContext,
+    GateBV2ExecutionLoaderRequest,
+    GateBV2ExecutionObject,
+    GateBV2ExecutionTrustChain,
+    ROOT_IDENTITY_SERIALIZATION_PROFILE_V2,
+    V2_COMMON_PARENT_CHILDREN,
+    V2_OUTPUT_LIMITS,
+    V2_SCIENCE_COMMIT,
+    V2_SOURCE_CONTEXT,
+    _load_gate_b_v2_one_shot_spec_payload,
+    _validate_gate_b_v2_execution_trust_chain,
+    build_gate_b_preapproval_root_identity_projection_v2,
+    build_gate_b_v2_compatibility_trust_chain,
+    build_gate_b_v2_execution_trust_chain,
     is_gate_b_v2_compatibility_object,
+    load_gate_b_batch_manifest_bytes,
+    load_gate_b_execution_context_bytes,
     load_gate_b_human_approval_record_bytes,
     load_gate_b_human_signature_record_bytes,
     load_gate_b_readiness_authorization_bytes,
@@ -38,9 +61,24 @@ from phase6.gate_b_executor import (
     GateBDeadlineExceeded,
     GateBExecutorError,
     GateBProductionExecutor,
+    _validate_gate_b_v2_executor,
 )
 from phase6.gate_b_ledger import (
+    GateBPinnedArtifact,
+    GateBPinnedDirectory,
+    GateBV2AttemptReservation,
+    GateBV2LedgerStore,
+    GateBV2Quarantine,
     GateBLedgerError,
+    _append_gate_b_v2_state,
+    _close_gate_b_v2_lifecycle_object,
+    _create_gate_b_v2_quarantine_manifest,
+    _new_gate_b_v2_attempt_reservation,
+    _new_gate_b_v2_ledger_store,
+    _new_gate_b_v2_quarantine,
+    _validate_gate_b_v2_attempt_reservation,
+    open_gate_b_v2_pinned_directory,
+    verify_gate_b_v2_pinned_directory,
 )
 from phase6.gate_b_loader import (
     GateBExecutorFailure,
@@ -48,11 +86,16 @@ from phase6.gate_b_loader import (
     GateBLoaderError,
     GateBLoaderRequest,
     GateBOutputsCapability,
+    GateBPartialEvidenceError,
     GateBRetainedArtifactSnapshot,
     GateBRetainedDirectorySnapshot,
     GateBRetainedLoaderBundle,
+    GateBTestInputFailure,
     PreparedGateBV2CompatibilityPreflight,
+    _activate_gate_b_v2_input_source,
     _clear_gate_b_retained_calibration_roles,
+    _close_gate_b_v2_input_source,
+    _prepare_gate_b_v2_input_source,
     _register_gate_b_retained_calibration_roles,
     build_gate_b_retained_loader_bundle,
     create_gate_b_retained_artifact,
@@ -1877,3 +1920,1451 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _emit_failure(operation, "gate_b_interrupted", 130)
     except Exception:
         return _emit_failure(operation, "gate_b_internal_failure", 1)
+
+
+_V2_ROUTE_TOKEN = object()
+_V2_ROUTE_REGISTRY: dict[int, tuple[object, ...]] = {}
+_V2_WRITE_TOKEN = object()
+_V2_WRITE_REGISTRY: dict[int, tuple[object, ...]] = {}
+_V2_OPEN_TOKEN = object()
+_V2_OPEN_REGISTRY: dict[int, tuple[object, ...]] = {}
+
+
+def _v2_open_fail(message: str) -> None:
+    error = GateBLoaderError(message)
+    error.__cause__ = None
+    error.__context__ = None
+    error.__traceback__ = None
+    raise error
+
+
+@dataclass(slots=True, init=False)
+class PreparedGateBV2TestOpen(GateBV2ExecutionObject):
+    reservation: GateBV2AttemptReservation = field(repr=False)
+    ledger_store: GateBV2LedgerStore = field(repr=False)
+    quarantine: GateBV2Quarantine = field(repr=False)
+    route: PreparedGateBV2OneShotExecution | None = field(repr=False)
+    _consumed: bool = field(default=False, repr=False)
+    _closed: bool = field(default=False, repr=False)
+    _token: object = field(repr=False)
+
+    def __new__(cls, *, _token: object | None = None) -> PreparedGateBV2TestOpen:
+        if _token is not _V2_OPEN_TOKEN:
+            raise TypeError("v2 prepared open construction is private")
+        return object.__new__(cls)
+
+    def close(self) -> None:
+        if not self._closed:
+            self._closed = True
+
+    def __enter__(self) -> PreparedGateBV2TestOpen:
+        if self._closed:
+            _v2_open_fail("v2 prepared open is closed")
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback) -> None:
+        self.close()
+
+
+def _prepare_gate_b_v2_test_open(
+    reservation: GateBV2AttemptReservation,
+    *,
+    ledger_store: GateBV2LedgerStore,
+    quarantine: GateBV2Quarantine,
+    route: PreparedGateBV2OneShotExecution | None = None,
+) -> PreparedGateBV2TestOpen:
+    """Prepare retained v2 stores after RESERVED without a further durable write."""
+    validated_reservation = _validate_gate_b_v2_attempt_reservation(reservation)
+    if (
+        type(ledger_store) is not GateBV2LedgerStore
+        or type(quarantine) is not GateBV2Quarantine
+        or (route is not None and type(route) is not PreparedGateBV2OneShotExecution)
+    ):
+        _v2_open_fail("v2 prepared-open nominal mismatch")
+    prepared = PreparedGateBV2TestOpen(_token=_V2_OPEN_TOKEN)
+    values = (
+        validated_reservation,
+        ledger_store,
+        quarantine,
+        route,
+        False,
+        False,
+        _V2_OPEN_TOKEN,
+    )
+    for name, value in zip(
+        (
+            "reservation",
+            "ledger_store",
+            "quarantine",
+            "route",
+            "_consumed",
+            "_closed",
+            "_token",
+        ),
+        values,
+        strict=True,
+    ):
+        object.__setattr__(prepared, name, value)
+    _V2_OPEN_REGISTRY[id(prepared)] = (
+        prepared,
+        validated_reservation,
+        ledger_store,
+        quarantine,
+        route,
+        _V2_OPEN_TOKEN,
+    )
+    return prepared
+
+
+def _validate_prepared_gate_b_v2_test_open(
+    prepared: PreparedGateBV2TestOpen,
+) -> PreparedGateBV2TestOpen:
+    if type(prepared) is not PreparedGateBV2TestOpen:
+        _v2_open_fail("v2 prepared-open nominal mismatch")
+    registered = _V2_OPEN_REGISTRY.get(id(prepared))
+    if (
+        registered
+        != (
+            prepared,
+            prepared.reservation,
+            prepared.ledger_store,
+            prepared.quarantine,
+            prepared.route,
+            prepared._token,
+        )
+        or prepared._token is not _V2_OPEN_TOKEN
+    ):
+        _v2_open_fail("v2 prepared-open provenance mismatch")
+    _validate_gate_b_v2_attempt_reservation(prepared.reservation)
+    return prepared
+
+
+def _record_gate_b_v2_failed_closed(
+    prepared: PreparedGateBV2TestOpen,
+    *,
+    started_record_sha256: str | None,
+    output_raws: Mapping[str, bytes] | None = None,
+) -> None:
+    manifest_sha = _create_gate_b_v2_quarantine_manifest(
+        prepared.quarantine,
+        status="failed_closed",
+        started_record_sha256=started_record_sha256,
+        output_raws=output_raws,
+    )
+    _append_gate_b_v2_state(
+        prepared.ledger_store,
+        ordinal=2 if started_record_sha256 is None else 3,
+        from_state="RESERVED" if started_record_sha256 is None else "STARTED",
+        to_state="FAILED_CLOSED",
+        previous_sha256=(
+            prepared.reservation.reserved_record_sha256
+            if started_record_sha256 is None
+            else started_record_sha256
+        ),
+        quarantine_manifest_sha256=manifest_sha,
+    )
+
+
+class _GateBV2InputCapability:
+    __slots__ = ("_source", "_active", "_eof_seen")
+
+    def __init__(self, source: object) -> None:
+        self._source = source
+        self._active = True
+        self._eof_seen = False
+
+    @property
+    def eof_seen(self) -> bool:
+        return self._eof_seen
+
+    def read_chunk(self, max_bytes: int) -> bytes:
+        if (
+            not self._active
+            or type(max_bytes) is not int
+            or not 1 <= max_bytes <= 1048576
+        ):
+            raise GateBTestInputFailure("v2 input capability rejected the read")
+        chunk = self._source.read(max_bytes)
+        if type(chunk) is not bytes or len(chunk) > max_bytes:
+            raise GateBTestInputFailure("v2 input capability returned invalid bytes")
+        if not chunk:
+            self._eof_seen = True
+            self._active = False
+        return chunk
+
+    def close(self) -> None:
+        self._active = False
+
+
+class _GateBV2OutputsCapability:
+    __slots__ = ("_raws", "_active", "_total")
+
+    def __init__(self) -> None:
+        self._raws = {
+            name: bytearray()
+            for name in V2_OUTPUT_LIMITS
+            if name != "aggregate_executor_writable"
+        }
+        self._active = True
+        self._total = 0
+
+    def write_chunk(self, name: str, data: bytes) -> None:
+        if (
+            not self._active
+            or name not in self._raws
+            or type(data) is not bytes
+            or not 1 <= len(data) <= 1048576
+            or len(self._raws[name]) + len(data) > V2_OUTPUT_LIMITS[name]
+            or self._total + len(data) > V2_OUTPUT_LIMITS["aggregate_executor_writable"]
+        ):
+            raise GateBExecutorFailure("v2 output capability rejected the write")
+        self._raws[name].extend(data)
+        self._total += len(data)
+
+    def freeze(self) -> dict[str, bytes]:
+        self._active = False
+        return {name: bytes(raw) for name, raw in self._raws.items()}
+
+
+def _open_gate_b_v2_test_input(
+    prepared: PreparedGateBV2TestOpen,
+    *,
+    executor: object,
+) -> tuple[str, str, str]:
+    """Perform the isolated v2 STARTED-to-SEALED lifecycle exactly once."""
+    validated = _validate_prepared_gate_b_v2_test_open(prepared)
+    if validated._closed or validated._consumed:
+        _v2_open_fail("v2 prepared open is closed or consumed")
+    try:
+        validated_executor = _validate_gate_b_v2_executor(
+            executor,
+            execution_binding_sha256=validated.ledger_store._binding_sha256,
+        )
+    except ValueError:
+        _v2_open_fail("v2 open requires the separate v2 executor factory")
+    validated._consumed = True
+    started_sha: str | None = None
+    input_preparation = None
+    output_capability: _GateBV2OutputsCapability | None = None
+    output_raws: Mapping[str, bytes] | None = None
+    try:
+        try:
+            if validated.route is not None:
+                route = validated.route
+                _validate_prepared_v2(route)
+                input_preparation = _prepare_gate_b_v2_input_source(
+                    route.batch_manifest,
+                    route.compatibility_preflight._directories["test_root"],
+                )
+            started_sha = _append_gate_b_v2_state(
+                validated.ledger_store,
+                ordinal=2,
+                from_state="RESERVED",
+                to_state="STARTED",
+                previous_sha256=validated.reservation.reserved_record_sha256,
+                quarantine_manifest_sha256=None,
+            )
+        except GateBPartialEvidenceError:
+            raise
+        except BaseException as exc:
+            try:
+                _record_gate_b_v2_failed_closed(
+                    validated,
+                    started_record_sha256=None,
+                    output_raws=output_raws,
+                )
+            except BaseException as durability_error:
+                raise GateBPartialEvidenceError(
+                    "v2 post-reserve durability is unknown"
+                ) from durability_error
+            if isinstance(exc, KeyboardInterrupt):
+                raise
+            if isinstance(exc, (GateBLedgerError, GateBLoaderError)):
+                raise exc
+            raise GateBLoaderError("v2 STARTED transition failed closed") from exc
+        try:
+            if input_preparation is not None:
+                source = _activate_gate_b_v2_input_source(input_preparation)
+                input_capability = _GateBV2InputCapability(source)
+                output_capability = _GateBV2OutputsCapability()
+                callback_error: BaseException | None = None
+                callback_result: object = None
+                try:
+                    callback_result = validated_executor.execute(
+                        input_capability,
+                        output_capability,
+                    )
+                except BaseException as exc:
+                    callback_error = exc
+                finally:
+                    input_capability.close()
+                    output_raws = output_capability.freeze()
+                if (
+                    callback_error is not None
+                    or callback_result is not None
+                    or not input_capability.eof_seen
+                ):
+                    if callback_error is not None:
+                        raise callback_error
+                    raise GateBExecutorFailure(
+                        "v2 executor callback failed closed"
+                    )
+                _close_gate_b_v2_input_source(input_preparation)
+            manifest_sha = _create_gate_b_v2_quarantine_manifest(
+                validated.quarantine,
+                status="sealed",
+                started_record_sha256=started_sha,
+                output_raws=output_raws,
+            )
+            sealed_sha = _append_gate_b_v2_state(
+                validated.ledger_store,
+                ordinal=3,
+                from_state="STARTED",
+                to_state="SEALED",
+                previous_sha256=started_sha,
+                quarantine_manifest_sha256=manifest_sha,
+            )
+            return started_sha, sealed_sha, manifest_sha
+        except GateBPartialEvidenceError:
+            raise
+        except BaseException as exc:
+            try:
+                _record_gate_b_v2_failed_closed(
+                    validated,
+                    started_record_sha256=started_sha,
+                    output_raws=(
+                        output_capability.freeze()
+                        if output_capability is not None and output_raws is None
+                        else output_raws
+                    ),
+                )
+            except BaseException as durability_error:
+                raise GateBPartialEvidenceError(
+                    "v2 post-STARTED durability is unknown"
+                ) from durability_error
+            if isinstance(exc, KeyboardInterrupt):
+                raise
+            if isinstance(exc, (GateBDeadlineExceeded, GateBExecutorError, GateBLedgerError)):
+                raise exc
+            if isinstance(exc, GateBLoaderError):
+                raise exc
+            raise GateBLoaderError("v2 Test input failed closed") from exc
+    finally:
+        if input_preparation is not None:
+            with suppress(Exception):
+                _close_gate_b_v2_input_source(input_preparation)
+        validated.close()
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class GateBV2PinnedSpecReference(GateBV2ExecutionObject):
+    parent_absolute_path: Path
+    parent_identity_scheme: str
+    parent_serialization_profile: str
+    parent_volume_id_hex: str
+    parent_file_id_hex: str
+    direct_child_name: str
+    expected_sha256: str
+    expected_size_bytes: int
+    _token: object = field(repr=False, compare=False)
+
+    def __new__(cls, *, _token: object | None = None) -> GateBV2PinnedSpecReference:
+        if _token is not _V2_ROUTE_TOKEN:
+            raise TypeError("v2 pinned spec reference construction is private")
+        return object.__new__(cls)
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class _GateBV2OneShotExecutionSpec(GateBV2ExecutionObject):
+    payload: Mapping[str, Any]
+    canonical_bytes: bytes
+    sha256: str
+    _token: object = field(repr=False, compare=False)
+
+    def __new__(cls, *, _token: object | None = None) -> _GateBV2OneShotExecutionSpec:
+        if _token is not _V2_ROUTE_TOKEN:
+            raise TypeError("v2 one-shot spec construction is private")
+        return object.__new__(cls)
+
+
+def _v2_spec_snapshot(spec: _GateBV2OneShotExecutionSpec) -> tuple[object, ...]:
+    return (
+        spec,
+        canonical_json_bytes(_plain(spec.payload)),
+        spec.canonical_bytes,
+        spec.sha256,
+        spec._token,
+    )
+
+
+@dataclass(slots=True, init=False)
+class PreparedGateBV2OneShotExecution(GateBV2ExecutionObject):
+    spec: _GateBV2OneShotExecutionSpec = field(repr=False)
+    trust_chain: GateBV2ExecutionTrustChain = field(repr=False)
+    compatibility_preflight: PreparedGateBV2CompatibilityPreflight = field(repr=False)
+    bootstrap_parent: GateBPinnedDirectory = field(repr=False)
+    common_parent: GateBPinnedDirectory = field(repr=False)
+    artifact_parents: tuple[GateBPinnedDirectory, ...] = field(repr=False)
+    artifact_raws: Mapping[str, bytes] = field(repr=False)
+    batch_manifest: Any = field(repr=False)
+    executor: GateBProductionExecutor = field(repr=False)
+    ledger_store: GateBV2LedgerStore = field(repr=False)
+    quarantine: GateBV2Quarantine = field(repr=False)
+    _consumed: bool = field(default=False, repr=False)
+    _closed: bool = field(default=False, repr=False)
+    _token: object = field(repr=False)
+
+    def __new__(cls, *, _token: object | None = None) -> PreparedGateBV2OneShotExecution:
+        if _token is not _V2_ROUTE_TOKEN:
+            raise TypeError("v2 prepared one-shot construction is private")
+        return object.__new__(cls)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        first_error: BaseException | None = None
+        for lifecycle_object in (self.quarantine, self.ledger_store):
+            try:
+                _close_gate_b_v2_lifecycle_object(lifecycle_object)
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+        try:
+            self.compatibility_preflight.close()
+        except BaseException as exc:
+            if first_error is None:
+                first_error = exc
+        for parent in reversed(self.artifact_parents):
+            try:
+                parent.close()
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+        for parent in (self.common_parent, self.bootstrap_parent):
+            try:
+                parent.close()
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+        self._closed = True
+        if first_error is not None:
+            raise GateBPreflightError("v2 retained close failed closed") from None
+
+    def __enter__(self) -> PreparedGateBV2OneShotExecution:
+        if self._closed:
+            raise GateBPreflightError("v2 prepared one-shot is closed")
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback) -> None:
+        self.close()
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class GateBV2ExecutionReceipt(GateBV2ExecutionObject):
+    payload: Mapping[str, Any]
+    canonical_bytes: bytes
+    sha256: str
+    _token: object = field(repr=False, compare=False)
+
+    def __new__(cls, *, _token: object | None = None) -> GateBV2ExecutionReceipt:
+        if _token is not _V2_ROUTE_TOKEN:
+            raise TypeError("v2 execution receipt construction is private")
+        return object.__new__(cls)
+
+
+def _v2_receipt_payload(value: object) -> dict[str, Any]:
+    payload = _closed(
+        value,
+        {
+            "schema_version",
+            "operation",
+            "status",
+            "attempt_ordinal",
+            "state",
+            "projection_sha256",
+            "execution_binding_sha256",
+            "loader_request_sha256",
+            "execution_context_sha256",
+            "sealed_record_sha256",
+            "quarantine_manifest_sha256",
+        },
+        "v2 execution receipt",
+    )
+    if (
+        payload["schema_version"] != "phase6-gate-b-cli-execution-receipt-v2"
+        or payload["operation"] != "execute-once-v2"
+        or payload["status"] != "sealed"
+        or payload["attempt_ordinal"] != 1
+        or type(payload["attempt_ordinal"]) is not int
+        or payload["state"] != "SEALED"
+    ):
+        raise ValueError("v2 execution receipt identity mismatch")
+    for name in (
+        "projection_sha256",
+        "execution_binding_sha256",
+        "loader_request_sha256",
+        "execution_context_sha256",
+        "sealed_record_sha256",
+        "quarantine_manifest_sha256",
+    ):
+        _sha(payload[name], f"v2 receipt {name}")
+    return payload
+
+
+def _validate_gate_b_v2_execution_receipt(
+    receipt: GateBV2ExecutionReceipt,
+) -> GateBV2ExecutionReceipt:
+    if type(receipt) is not GateBV2ExecutionReceipt:
+        raise ValueError("v2 execution receipt nominal mismatch")
+    current = (
+        receipt,
+        canonical_json_bytes(_plain(receipt.payload)),
+        receipt.canonical_bytes,
+        receipt.sha256,
+        receipt._token,
+    )
+    if (
+        _V2_ROUTE_REGISTRY.get(id(receipt)) != current
+        or receipt._token is not _V2_ROUTE_TOKEN
+        or canonical_json_bytes(_v2_receipt_payload(_plain(receipt.payload)))
+        != receipt.canonical_bytes
+        or sha256_bytes(receipt.canonical_bytes) != receipt.sha256
+    ):
+        raise ValueError("v2 execution receipt provenance mismatch")
+    return receipt
+
+
+@dataclass(slots=True, init=False)
+class _GateBV2WriteTransition(GateBV2ExecutionObject):
+    prepared: PreparedGateBV2OneShotExecution = field(repr=False)
+    _consumed: bool = field(default=False, repr=False)
+    _token: object = field(repr=False)
+
+    def __new__(cls, *, _token: object | None = None) -> _GateBV2WriteTransition:
+        if _token is not _V2_WRITE_TOKEN:
+            raise TypeError("v2 write transition construction is private")
+        return object.__new__(cls)
+
+
+def _v2_write_snapshot(transition: _GateBV2WriteTransition) -> tuple[object, ...]:
+    return (
+        transition,
+        transition.prepared,
+        transition._token,
+    )
+
+
+def _v2_reference_snapshot(reference: GateBV2PinnedSpecReference) -> tuple[object, ...]:
+    return (
+        reference,
+        reference.parent_absolute_path,
+        reference.parent_identity_scheme,
+        reference.parent_serialization_profile,
+        reference.parent_volume_id_hex,
+        reference.parent_file_id_hex,
+        reference.direct_child_name,
+        reference.expected_sha256,
+        reference.expected_size_bytes,
+        reference._token,
+    )
+
+
+def _v2_fixed_local_drive_type(drive_root: str) -> int:
+    return int(ctypes.windll.kernel32.GetDriveTypeW(drive_root))
+
+
+def _v2_local_path_syntax(path: Path) -> None:
+    text = str(path).replace("/", "\\")
+    if (
+        not path.is_absolute()
+        or ".." in path.parts
+        or text.startswith("\\\\")
+        or text.startswith("\\?\\")
+        or text.startswith("\\.\\")
+        or len(text) < 3
+        or text[1:3] != ":\\"
+        or ":" in text[2:]
+    ):
+        raise GateBSpecError("v2 spec parent must be a canonical local-drive path")
+    try:
+        drive_type = _v2_fixed_local_drive_type(text[:3])
+    except Exception:
+        raise GateBSpecError("v2 spec parent local-volume check failed") from None
+    if drive_type != 3:
+        raise GateBSpecError("v2 spec parent must be on a fixed local volume")
+
+
+def _v2_validate_embedded_local_paths(payload: Mapping[str, Any]) -> None:
+    paths = {
+        payload["common_parent"]["absolute_path"],
+        *(root["absolute_path"] for root in payload["roots"].values()),
+        *(pin["parent_absolute_path"] for pin in payload["pinned_inputs"].values()),
+    }
+    calibration = payload["execution_binding"]["calibration_bundle_reference"]
+    paths.add(calibration["root_manifest"]["parent_absolute_path"])
+    paths.update(row["parent_absolute_path"] for row in calibration["artifacts"])
+    for path_text in sorted(paths, key=os.path.normcase):
+        _v2_local_path_syntax(Path(path_text))
+
+
+def _v2_read_environment_file(
+    path: Path, *, expected_sha256: str, expected_size_bytes: int | None = None
+) -> bytes:
+    before = os.lstat(path)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_nlink != 1
+        or bool(
+            getattr(before, "st_file_attributes", 0)
+            & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        )
+    ):
+        raise GateBPreflightError("v2 environment file topology mismatch")
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+    try:
+        opened = os.fstat(descriptor)
+        chunks = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        raw = b"".join(chunks)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    named = os.lstat(path)
+    if (
+        (opened.st_dev, opened.st_ino, opened.st_size)
+        != (before.st_dev, before.st_ino, before.st_size)
+        or (after.st_dev, after.st_ino, after.st_size)
+        != (before.st_dev, before.st_ino, before.st_size)
+        or (named.st_dev, named.st_ino, named.st_size)
+        != (before.st_dev, before.st_ino, before.st_size)
+        or (expected_size_bytes is not None and len(raw) != expected_size_bytes)
+        or sha256_bytes(raw) != expected_sha256
+    ):
+        raise GateBPreflightError("v2 environment file identity or hash mismatch")
+    return raw
+
+
+def _v2_git_read(repository_root: Path, *arguments: str) -> str:
+    completed = subprocess.run(
+        ("git", "-C", str(repository_root), *arguments),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+        timeout=30,
+        text=True,
+        encoding="utf-8",
+    )
+    if completed.returncode != 0:
+        raise GateBPreflightError("v2 repository evidence is unavailable")
+    return completed.stdout.strip()
+
+
+def _verify_gate_b_v2_execution_environment(
+    context: GateBV2ExecutionContext,
+) -> None:
+    payload = _plain(context.payload)
+    repository_ref = payload["repository_root"]
+    repository_root = Path(repository_ref["absolute_path"])
+    metadata = os.lstat(repository_root)
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or bool(
+            getattr(metadata, "st_file_attributes", 0)
+            & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        )
+        or repository_ref["volume_id_hex"] != f"{metadata.st_dev:08x}"
+        or repository_ref["file_id_hex"] != f"{metadata.st_ino:016x}"
+    ):
+        raise GateBPreflightError("v2 repository root identity mismatch")
+    if (
+        _v2_git_read(repository_root, "rev-parse", "HEAD")
+        != payload["execution_route_commit"]
+        or _v2_git_read(
+            repository_root,
+            "cat-file",
+            "-t",
+            f"{payload['science_commit']}^{{commit}}",
+        )
+        != "commit"
+    ):
+        raise GateBPreflightError("v2 two-commit repository join mismatch")
+    for module in payload["active_route_modules"]:
+        relative = module["repository_relative_path"]
+        if (
+            not isinstance(relative, str)
+            or "\\" in relative
+            or Path(relative).is_absolute()
+            or ".." in Path(relative).parts
+        ):
+            raise GateBPreflightError("v2 route module path mismatch")
+        _v2_read_environment_file(
+            repository_root / Path(relative),
+            expected_sha256=module["sha256"],
+        )
+    runtime = {
+        "python_implementation": platform.python_implementation(),
+        "python_version": platform.python_version(),
+        "python_compiler": platform.python_compiler(),
+        "platform": sys.platform,
+        "system": platform.system(),
+        "release": platform.release(),
+        "version": platform.version(),
+        "machine": platform.machine(),
+    }
+    if runtime != payload["runtime_fingerprint"]:
+        raise GateBPreflightError("v2 runtime fingerprint mismatch")
+    dependency = payload["dependency_lock"]
+    dependency_path = Path(dependency["absolute_path"])
+    if dependency_path.parent != repository_root:
+        raise GateBPreflightError("v2 dependency lock must be a repository direct child")
+    _v2_read_environment_file(
+        dependency_path,
+        expected_sha256=dependency["sha256"],
+        expected_size_bytes=dependency["size_bytes"],
+    )
+
+
+def _verify_gate_b_v2_science_join(
+    batch: GateBBatchManifest,
+    source_context: GateBExecutionContext,
+    binding_payload: Mapping[str, Any],
+    execution_context_payload: Mapping[str, Any],
+) -> None:
+    """Rejoin immutable science evidence without consulting production paths."""
+    if type(batch) is not GateBBatchManifest or type(source_context) is not GateBExecutionContext:
+        raise ValueError("v2 science evidence nominal mismatch")
+    binding = _plain(binding_payload)
+    route_context = _plain(execution_context_payload)
+    source = _plain(source_context.payload)
+    batch_payload = _plain(batch.payload)
+    if (
+        binding["source_execution_context"] != dict(V2_SOURCE_CONTEXT)
+        or route_context["source_execution_context"] != dict(V2_SOURCE_CONTEXT)
+        or source_context.sha256 != V2_SOURCE_CONTEXT["sha256"]
+        or len(source_context._raw) != V2_SOURCE_CONTEXT["size_bytes"]
+        or batch.sha256 != binding["test_batch_sha256"]
+        or route_context["test_batch_sha256"] != batch.sha256
+        or binding["science_commit"] != V2_SCIENCE_COMMIT
+        or route_context["science_commit"] != V2_SCIENCE_COMMIT
+        or binding["execution_route_commit"] != route_context["execution_route_commit"]
+        or source["expected_implementation_commit"] != V2_SCIENCE_COMMIT
+        or batch_payload["git"]["commit_oid"] != V2_SCIENCE_COMMIT
+    ):
+        raise ValueError("v2 batch, context, and two-commit join mismatch")
+    batch_runtime = batch_payload["runtime"]
+    source_runtime = source["runtime_fingerprint"]
+    runtime_projection = {
+        "python_implementation": source_runtime["python_implementation"],
+        "python_version": source_runtime["python_version"],
+        "machine": source_runtime["machine"],
+        "os_name": source_runtime["system"],
+        "os_release": source_runtime["release"],
+    }
+    if any(batch_runtime[name] != value for name, value in runtime_projection.items()):
+        raise ValueError("v2 batch and source-context runtime projection mismatch")
+    batch_lock = batch_runtime["dependency_lock"]
+    source_lock = source["dependency_lock"]
+    if (
+        batch_lock["sha256"] != source_lock["sha256"]
+        or batch_lock["size_bytes"] != source_lock["size_bytes"]
+    ):
+        raise ValueError("v2 batch and source-context dependency-lock mismatch")
+
+
+def build_gate_b_v2_pinned_spec_reference(
+    *,
+    parent_absolute_path: Path,
+    parent_identity_scheme: str,
+    parent_serialization_profile: str,
+    parent_volume_id_hex: str,
+    parent_file_id_hex: str,
+    direct_child_name: str,
+    expected_sha256: str,
+    expected_size_bytes: int,
+) -> GateBV2PinnedSpecReference:
+    """Build the schema-selected v2 bootstrap reference without I/O."""
+    try:
+        if not isinstance(parent_absolute_path, Path):
+            raise ValueError
+        _v2_local_path_syntax(parent_absolute_path)
+        if (
+            parent_identity_scheme != "windows-volume-file-id-v1"
+            or parent_serialization_profile != ROOT_IDENTITY_SERIALIZATION_PROFILE_V2
+            or re.fullmatch(r"[0-9a-f]{8}", parent_volume_id_hex) is None
+            or int(parent_volume_id_hex, 16) == 0
+            or re.fullmatch(r"[0-9a-f]{16}", parent_file_id_hex) is None
+            or int(parent_file_id_hex, 16) == 0
+            or _CHILD_RE.fullmatch(direct_child_name) is None
+            or ":" in direct_child_name
+            or _SHA_RE.fullmatch(expected_sha256) is None
+            or type(expected_size_bytes) is not int
+            or expected_size_bytes <= 0
+        ):
+            raise ValueError
+        reference = GateBV2PinnedSpecReference(_token=_V2_ROUTE_TOKEN)
+        values = (
+            parent_absolute_path,
+            parent_identity_scheme,
+            parent_serialization_profile,
+            parent_volume_id_hex,
+            parent_file_id_hex,
+            direct_child_name,
+            expected_sha256,
+            expected_size_bytes,
+            _V2_ROUTE_TOKEN,
+        )
+        for name, value in zip(
+            (
+                "parent_absolute_path",
+                "parent_identity_scheme",
+                "parent_serialization_profile",
+                "parent_volume_id_hex",
+                "parent_file_id_hex",
+                "direct_child_name",
+                "expected_sha256",
+                "expected_size_bytes",
+                "_token",
+            ),
+            values,
+            strict=True,
+        ):
+            object.__setattr__(reference, name, value)
+        _V2_ROUTE_REGISTRY[id(reference)] = _v2_reference_snapshot(reference)
+        return reference
+    except GateBSpecError:
+        raise
+    except Exception:
+        _raise_sanitized(GateBSpecError)
+
+
+def _validate_v2_reference(reference: GateBV2PinnedSpecReference) -> None:
+    if type(reference) is not GateBV2PinnedSpecReference:
+        _raise_sanitized(GateBSpecError)
+    if _V2_ROUTE_REGISTRY.get(id(reference)) != _v2_reference_snapshot(reference):
+        _raise_sanitized(GateBSpecError)
+
+
+def _pin_identity(pin: Mapping[str, Any]) -> tuple[str, str]:
+    return pin["parent_volume_id_hex"], pin["parent_file_id_hex"]
+
+
+def _open_v2_parent(pin: Mapping[str, Any]) -> GateBPinnedDirectory:
+    return open_gate_b_v2_pinned_directory(
+        pin["parent_absolute_path"],
+        serialization_profile=pin["parent_serialization_profile"],
+        expected_volume_id_hex=pin["parent_volume_id_hex"],
+        expected_file_id_hex=pin["parent_file_id_hex"],
+    )
+
+
+def _read_v2_pin(
+    parent: GateBPinnedDirectory, pin: Mapping[str, Any]
+) -> GateBPinnedArtifact:
+    return parent.read_regular(
+        pin["direct_child_name"],
+        expected_sha256=pin["expected_sha256"],
+        expected_size_bytes=pin["expected_size_bytes"],
+    )
+
+
+def _v2_join_request_to_spec(
+    spec_payload: Mapping[str, Any], trust: GateBV2ExecutionTrustChain
+) -> None:
+    request = _plain(trust.loader_request.payload)
+    binding = _plain(trust.binding.payload)
+    pins = spec_payload["pinned_inputs"]
+    reference_pins = {
+        "batch_manifest": "batch_manifest",
+        "source_execution_context": "source_execution_context",
+        "execution_context": "execution_context",
+        "compatibility_approval_record": "compatibility_approval_record",
+        "compatibility_signature_record": "compatibility_signature_record",
+        "compatibility_readiness_authorization": "compatibility_readiness_authorization",
+        "ledger_root_anchor": "ledger_root_anchor",
+        "quarantine_root_anchor": "quarantine_root_anchor",
+        "compatibility_loader_request": "compatibility_loader_request",
+        "compatibility_readiness_materialization_spec": (
+            "compatibility_readiness_materialization_spec"
+        ),
+        "compatibility_request_materialization_spec": (
+            "compatibility_request_materialization_spec"
+        ),
+        "execution_approval_record": "execution_approval_record",
+        "execution_signature_record": "execution_signature_record",
+        "execution_readiness_authorization": "execution_readiness_authorization",
+    }
+    request_references = {
+        "batch_manifest": request["batch_manifest"],
+        "source_execution_context": request["source_execution_context"],
+        "execution_context": request["execution_context"],
+        "compatibility_approval_record": request["compatibility_artifacts"][
+            "approval_record"
+        ],
+        "compatibility_signature_record": request["compatibility_artifacts"][
+            "signature_record"
+        ],
+        "compatibility_readiness_authorization": request["compatibility_artifacts"][
+            "readiness_authorization"
+        ],
+        "ledger_root_anchor": request["compatibility_artifacts"]["ledger_root_anchor"],
+        "quarantine_root_anchor": request["compatibility_artifacts"][
+            "quarantine_root_anchor"
+        ],
+        "compatibility_loader_request": request["compatibility_artifacts"][
+            "loader_request"
+        ],
+        "compatibility_readiness_materialization_spec": request[
+            "compatibility_materialization_specs"
+        ]["readiness_materialization_spec"],
+        "compatibility_request_materialization_spec": request[
+            "compatibility_materialization_specs"
+        ]["request_materialization_spec"],
+        "execution_approval_record": request["execution_approval_record"],
+        "execution_signature_record": request["execution_signature_record"],
+        "execution_readiness_authorization": request[
+            "execution_readiness_authorization"
+        ],
+    }
+    for request_name, pin_name in reference_pins.items():
+        pin = pins[pin_name]
+        expected_path = str(Path(pin["parent_absolute_path"]) / pin["direct_child_name"])
+        reference = request_references[request_name]
+        if (
+            reference["absolute_path"] != expected_path
+            or reference["sha256"] != pin["expected_sha256"]
+        ):
+            raise ValueError("v2 request and one-shot pinned reference mismatch")
+    expected_hashes = {
+        "batch_manifest": binding["test_batch_sha256"],
+        "source_execution_context": binding["source_execution_context"]["sha256"],
+        "execution_context": binding["execution_context_v2_sha256"],
+        "compatibility_approval_record": binding["compatibility_artifact_sha256s"][
+            "approval_record"
+        ],
+        "compatibility_signature_record": binding["compatibility_artifact_sha256s"][
+            "signature_record"
+        ],
+        "compatibility_readiness_authorization": binding[
+            "compatibility_artifact_sha256s"
+        ]["readiness_authorization"],
+        "ledger_root_anchor": binding["root_anchor_sha256s"]["ledger_base"],
+        "quarantine_root_anchor": binding["root_anchor_sha256s"]["quarantine_base"],
+        "compatibility_loader_request": binding["compatibility_artifact_sha256s"][
+            "loader_request"
+        ],
+        "compatibility_readiness_materialization_spec": binding[
+            "compatibility_materialization_spec_sha256s"
+        ]["readiness_materialization_spec"],
+        "compatibility_request_materialization_spec": binding[
+            "compatibility_materialization_spec_sha256s"
+        ]["request_materialization_spec"],
+        "execution_approval_record": trust.artifact_hashes["approval_record"],
+        "execution_signature_record": trust.artifact_hashes["signature_record"],
+        "execution_readiness_authorization": trust.artifact_hashes[
+            "readiness_authorization"
+        ],
+        "execution_loader_request": trust.loader_request.sha256,
+        "calibration_bundle": trust.artifact_hashes["calibration_bundle_reference"],
+    }
+    if any(
+        pins[name]["expected_sha256"] != digest for name, digest in expected_hashes.items()
+    ):
+        raise ValueError("v2 one-shot pinned hash join mismatch")
+    for role, request_root in request["roots"].items():
+        spec_root = spec_payload["roots"][role]
+        if any(request_root[key] != spec_root[key] for key in spec_root):
+            raise ValueError("v2 loader request and one-shot root mismatch")
+
+
+def _prepared_v2_snapshot(prepared: PreparedGateBV2OneShotExecution) -> tuple[object, ...]:
+    return (
+        prepared,
+        prepared.spec,
+        prepared.trust_chain,
+        prepared.compatibility_preflight,
+        prepared.bootstrap_parent,
+        prepared.common_parent,
+        prepared.artifact_parents,
+        tuple((name, prepared.artifact_raws[name]) for name in sorted(prepared.artifact_raws)),
+        prepared.batch_manifest,
+        prepared.executor,
+        prepared.ledger_store,
+        prepared.quarantine,
+        prepared._token,
+    )
+
+
+def _validate_prepared_v2(prepared: PreparedGateBV2OneShotExecution) -> None:
+    if type(prepared) is not PreparedGateBV2OneShotExecution:
+        _raise_sanitized(GateBPreflightError)
+    if (
+        _V2_ROUTE_REGISTRY.get(id(prepared)) != _prepared_v2_snapshot(prepared)
+        or prepared._token is not _V2_ROUTE_TOKEN
+        or prepared._closed
+    ):
+        _raise_sanitized(GateBPreflightError)
+    _validate_gate_b_v2_execution_trust_chain(prepared.trust_chain)
+    if _V2_ROUTE_REGISTRY.get(id(prepared.spec)) != _v2_spec_snapshot(prepared.spec):
+        _raise_sanitized(GateBPreflightError)
+    prepared.bootstrap_parent.verify_identity()
+    prepared.common_parent.verify_identity()
+    for parent in prepared.artifact_parents:
+        parent.verify_identity()
+    prepared.compatibility_preflight.verify_identity()
+    if prepared.common_parent.direct_child_names() != V2_COMMON_PARENT_CHILDREN:
+        _raise_sanitized(GateBPreflightError)
+    for name, raw in prepared.artifact_raws.items():
+        if type(raw) is not bytes or not name:
+            _raise_sanitized(GateBPreflightError)
+
+
+def prepare_gate_b_v2_one_shot(
+    spec_reference: GateBV2PinnedSpecReference,
+) -> PreparedGateBV2OneShotExecution:
+    """Acquire and verify the complete v2 route without any durable write."""
+    _validate_v2_reference(spec_reference)
+    bootstrap: GateBPinnedDirectory | None = None
+    common: GateBPinnedDirectory | None = None
+    remaining: list[GateBPinnedDirectory] = []
+    compatibility_preflight: PreparedGateBV2CompatibilityPreflight | None = None
+    try:
+        bootstrap = open_gate_b_v2_pinned_directory(
+            spec_reference.parent_absolute_path,
+            serialization_profile=spec_reference.parent_serialization_profile,
+            expected_volume_id_hex=spec_reference.parent_volume_id_hex,
+            expected_file_id_hex=spec_reference.parent_file_id_hex,
+        )
+        spec_raw = bootstrap.read_regular(
+            spec_reference.direct_child_name,
+            expected_sha256=spec_reference.expected_sha256,
+            expected_size_bytes=spec_reference.expected_size_bytes,
+        ).raw
+        payload = _load_gate_b_v2_one_shot_spec_payload(spec_raw, spec_reference.expected_sha256)
+        _v2_validate_embedded_local_paths(payload)
+        spec = _GateBV2OneShotExecutionSpec(_token=_V2_ROUTE_TOKEN)
+        for name, value in (
+            ("payload", MappingProxyType(payload)),
+            ("canonical_bytes", spec_raw),
+            ("sha256", spec_reference.expected_sha256),
+            ("_token", _V2_ROUTE_TOKEN),
+        ):
+            object.__setattr__(spec, name, value)
+        _V2_ROUTE_REGISTRY[id(spec)] = _v2_spec_snapshot(spec)
+        common_ref = payload["common_parent"]
+        common = open_gate_b_v2_pinned_directory(
+            common_ref["absolute_path"],
+            serialization_profile=common_ref["serialization_profile"],
+            expected_volume_id_hex=common_ref["volume_id_hex"],
+            expected_file_id_hex=common_ref["file_id_hex"],
+        )
+        if common.direct_child_names() != V2_COMMON_PARENT_CHILDREN:
+            raise ValueError("v2 common parent does not have exact six siblings")
+        pins: dict[str, Mapping[str, Any]] = dict(payload["pinned_inputs"])
+        calibration = payload["execution_binding"]["calibration_bundle_reference"]
+        nested_pins: dict[str, Mapping[str, Any]] = {
+            "calibration_root_manifest": calibration["root_manifest"],
+            **{
+                f"calibration:{row['relative_path']}": {
+                    key: row[key]
+                    for key in (
+                        "parent_absolute_path",
+                        "parent_identity_scheme",
+                        "parent_serialization_profile",
+                        "parent_volume_id_hex",
+                        "parent_file_id_hex",
+                        "direct_child_name",
+                        "expected_sha256",
+                        "expected_size_bytes",
+                    )
+                }
+                for row in calibration["artifacts"]
+            },
+        }
+        all_pins = {**pins, **nested_pins}
+        parent_specs: dict[str, Mapping[str, Any]] = {}
+        for pin in all_pins.values():
+            key = os.path.normcase(pin["parent_absolute_path"])
+            previous = parent_specs.get(key)
+            if previous is not None and _pin_identity(previous) != _pin_identity(pin):
+                raise ValueError("v2 parent identity substitution")
+            parent_specs[key] = pin
+        bootstrap_key = os.path.normcase(str(spec_reference.parent_absolute_path))
+        common_key = os.path.normcase(common_ref["absolute_path"])
+        root_ids = {
+            (root["volume_id_hex"], root["file_id_hex"]) for root in payload["roots"].values()
+        }
+        handles: dict[str, GateBPinnedDirectory] = {bootstrap_key: bootstrap}
+        identities = {
+            (spec_reference.parent_volume_id_hex, spec_reference.parent_file_id_hex),
+            (common_ref["volume_id_hex"], common_ref["file_id_hex"]),
+        }
+        if len(identities) != 2 or identities & root_ids:
+            raise ValueError("v2 bootstrap/common/root alias")
+        for key in sorted(parent_specs):
+            pin = parent_specs[key]
+            identity = _pin_identity(pin)
+            if key == bootstrap_key:
+                if identity != (
+                    spec_reference.parent_volume_id_hex,
+                    spec_reference.parent_file_id_hex,
+                ):
+                    raise ValueError("v2 bootstrap parent alias")
+                continue
+            if key == common_key or identity in identities or identity in root_ids:
+                raise ValueError("v2 non-root parent aliases common/root/parent")
+            parent = _open_v2_parent(pin)
+            handles[key] = parent
+            remaining.append(parent)
+            identities.add(identity)
+        retained_artifacts = {
+            name: _read_v2_pin(handles[os.path.normcase(pin["parent_absolute_path"])], pin)
+            for name, pin in all_pins.items()
+        }
+        artifact_identities = [
+            artifact.physical_identity for artifact in retained_artifacts.values()
+        ]
+        if len(set(artifact_identities)) != len(artifact_identities):
+            raise ValueError("v2 retained artifacts have duplicate physical identities")
+        raws = {name: artifact.raw for name, artifact in retained_artifacts.items()}
+        compatibility_request = _strict_canonical_object(
+            raws["compatibility_loader_request"], "v2 compatibility loader request"
+        )
+        projection = build_gate_b_preapproval_root_identity_projection_v2(
+            compatibility_request["roots"]
+        )
+        compatibility_chain = build_gate_b_v2_compatibility_trust_chain(
+            projection,
+            approval_record_raw=raws["compatibility_approval_record"],
+            signature_record_raw=raws["compatibility_signature_record"],
+            readiness_authorization_raw=raws["compatibility_readiness_authorization"],
+            root_anchor_raws={
+                "ledger_base": raws["ledger_root_anchor"],
+                "quarantine_base": raws["quarantine_root_anchor"],
+            },
+            loader_request_raw=raws["compatibility_loader_request"],
+        )
+        trust = build_gate_b_v2_execution_trust_chain(
+            compatibility_chain,
+            readiness_materialization_spec_raw=raws["compatibility_readiness_materialization_spec"],
+            request_materialization_spec_raw=raws["compatibility_request_materialization_spec"],
+            execution_context_raw=raws["execution_context"],
+            expected_execution_context_sha256=pins["execution_context"]["expected_sha256"],
+            execution_context_reference_path=Path(pins["execution_context"]["parent_absolute_path"])
+            / pins["execution_context"]["direct_child_name"],
+            approval_record_raw=raws["execution_approval_record"],
+            signature_record_raw=raws["execution_signature_record"],
+            readiness_authorization_raw=raws["execution_readiness_authorization"],
+            loader_request_raw=raws["execution_loader_request"],
+            calibration_bundle_reference_raw=raws["calibration_bundle"],
+            expected_calibration_bundle_reference_sha256=pins["calibration_bundle"][
+                "expected_sha256"
+            ],
+            calibration_bundle_reference_path=Path(
+                pins["calibration_bundle"]["parent_absolute_path"]
+            )
+            / pins["calibration_bundle"]["direct_child_name"],
+        )
+        context_payload = _plain(trust.execution_context.payload)
+        _v2_local_path_syntax(Path(context_payload["repository_root"]["absolute_path"]))
+        _v2_local_path_syntax(Path(context_payload["dependency_lock"]["absolute_path"]))
+        _verify_gate_b_v2_execution_environment(trust.execution_context)
+        _v2_join_request_to_spec(payload, trust)
+        if canonical_json_bytes(payload["execution_binding"]) != trust.binding.canonical_bytes:
+            raise ValueError("v2 spec and trust-chain binding mismatch")
+        source_context = load_gate_b_execution_context_bytes(
+            raws["source_execution_context"],
+            expected_sha256=pins["source_execution_context"]["expected_sha256"],
+            reference_path=Path(pins["source_execution_context"]["parent_absolute_path"])
+            / pins["source_execution_context"]["direct_child_name"],
+        )
+        batch = load_gate_b_batch_manifest_bytes(
+            raws["batch_manifest"],
+            expected_sha256=pins["batch_manifest"]["expected_sha256"],
+            reference_path=Path(pins["batch_manifest"]["parent_absolute_path"])
+            / pins["batch_manifest"]["direct_child_name"],
+        )
+        _verify_gate_b_v2_science_join(
+            batch,
+            source_context,
+            trust.binding.payload,
+            trust.execution_context.payload,
+        )
+        calibration_artifacts = tuple(
+            CanonicalPhase6ContractArtifact(
+                relative_path=row["relative_path"],
+                raw=raws[f"calibration:{row['relative_path']}"],
+                expected_sha256=row["expected_sha256"],
+            )
+            for row in calibration["artifacts"]
+        )
+        evidence = load_phase6_contract_bundle_evidence_from_canonical_artifacts(
+            raws["calibration_root_manifest"],
+            expected_sha256=calibration["root_manifest"]["expected_sha256"],
+            artifacts=calibration_artifacts,
+        )
+        executor = GateBProductionExecutor._from_v2_request(
+            trust.loader_request,
+            phase6_contract_bundle_evidence=evidence,
+            batch_manifest=_plain(batch.payload),
+            execution_context_sha256=trust.execution_context.sha256,
+            execution_binding_sha256=trust.binding.sha256,
+        )
+        compatibility_preflight = prepare_gate_b_v2_compatibility_preflight(compatibility_chain)
+        ledger_store = _new_gate_b_v2_ledger_store(
+            compatibility_preflight._directories["ledger_base"],
+            binding_sha256=trust.binding.sha256,
+            test_batch_sha256=payload["execution_binding"]["test_batch_sha256"],
+        )
+        quarantine = _new_gate_b_v2_quarantine(
+            compatibility_preflight._directories["quarantine_base"],
+            binding_sha256=trust.binding.sha256,
+            test_batch_sha256=payload["execution_binding"]["test_batch_sha256"],
+        )
+        prepared = PreparedGateBV2OneShotExecution(_token=_V2_ROUTE_TOKEN)
+        values = (
+            spec,
+            trust,
+            compatibility_preflight,
+            bootstrap,
+            common,
+            tuple(remaining),
+            MappingProxyType(dict(raws)),
+            batch,
+            executor,
+            ledger_store,
+            quarantine,
+            False,
+            False,
+            _V2_ROUTE_TOKEN,
+        )
+        for name, value in zip(
+            (
+                "spec",
+                "trust_chain",
+                "compatibility_preflight",
+                "bootstrap_parent",
+                "common_parent",
+                "artifact_parents",
+                "artifact_raws",
+                "batch_manifest",
+                "executor",
+                "ledger_store",
+                "quarantine",
+                "_consumed",
+                "_closed",
+                "_token",
+            ),
+            values,
+            strict=True,
+        ):
+            object.__setattr__(prepared, name, value)
+        _V2_ROUTE_REGISTRY[id(prepared)] = _prepared_v2_snapshot(prepared)
+        return prepared
+    except (GateBSpecError, GateBPreflightError):
+        raise
+    except BaseException:
+        _raise_sanitized(GateBPreflightError)
+    finally:
+        if "prepared" not in locals():
+            if compatibility_preflight is not None:
+                with suppress(Exception):
+                    compatibility_preflight.close()
+            for parent in reversed(remaining):
+                with suppress(Exception):
+                    parent.close()
+            if common is not None:
+                with suppress(Exception):
+                    common.close()
+            if bootstrap is not None:
+                with suppress(Exception):
+                    bootstrap.close()
+
+
+def _final_revalidate_gate_b_v2(prepared: PreparedGateBV2OneShotExecution) -> None:
+    _validate_prepared_v2(prepared)
+    _verify_gate_b_v2_execution_environment(prepared.trust_chain.execution_context)
+    payload = prepared.spec.payload
+    pins = payload["pinned_inputs"]
+    calibration = payload["execution_binding"]["calibration_bundle_reference"]
+    all_pins = {
+        **dict(pins),
+        "calibration_root_manifest": calibration["root_manifest"],
+        **{
+            f"calibration:{row['relative_path']}": row for row in calibration["artifacts"]
+        },
+    }
+    retained_parents = {
+        os.path.normcase(str(parent._path)): parent
+        for parent in (prepared.bootstrap_parent, *prepared.artifact_parents)
+    }
+    if len(retained_parents) != 1 + len(prepared.artifact_parents):
+        _raise_sanitized(GateBPreflightError)
+    for name, pin in all_pins.items():
+        raw = prepared.artifact_raws[name]
+        parent = retained_parents.get(os.path.normcase(pin["parent_absolute_path"]))
+        if parent is None:
+            _raise_sanitized(GateBPreflightError)
+        retained = _read_v2_pin(parent, pin)
+        if (
+            retained.raw != raw
+            or retained.size_bytes != pin["expected_size_bytes"]
+            or retained.sha256 != pin["expected_sha256"]
+        ):
+            _raise_sanitized(GateBPreflightError)
+    calibration_pins = {
+        "calibration_root_manifest": calibration["root_manifest"],
+        **{
+            f"calibration:{row['relative_path']}": row for row in calibration["artifacts"]
+        },
+    }
+    for name, pin in calibration_pins.items():
+        raw = prepared.artifact_raws[name]
+        if len(raw) != pin["expected_size_bytes"] or sha256_bytes(raw) != pin["expected_sha256"]:
+            _raise_sanitized(GateBPreflightError)
+    source_pin = pins["source_execution_context"]
+    batch_pin = pins["batch_manifest"]
+    try:
+        source_context = load_gate_b_execution_context_bytes(
+            prepared.artifact_raws["source_execution_context"],
+            expected_sha256=source_pin["expected_sha256"],
+            reference_path=Path(source_pin["parent_absolute_path"])
+            / source_pin["direct_child_name"],
+        )
+        batch = load_gate_b_batch_manifest_bytes(
+            prepared.artifact_raws["batch_manifest"],
+            expected_sha256=batch_pin["expected_sha256"],
+            reference_path=Path(batch_pin["parent_absolute_path"])
+            / batch_pin["direct_child_name"],
+        )
+        _verify_gate_b_v2_science_join(
+            batch,
+            source_context,
+            prepared.trust_chain.binding.payload,
+            prepared.trust_chain.execution_context.payload,
+        )
+        calibration_artifacts = tuple(
+            CanonicalPhase6ContractArtifact(
+                relative_path=row["relative_path"],
+                raw=prepared.artifact_raws[f"calibration:{row['relative_path']}"],
+                expected_sha256=row["expected_sha256"],
+            )
+            for row in calibration["artifacts"]
+        )
+        load_phase6_contract_bundle_evidence_from_canonical_artifacts(
+            prepared.artifact_raws["calibration_root_manifest"],
+            expected_sha256=calibration["root_manifest"]["expected_sha256"],
+            artifacts=calibration_artifacts,
+        )
+        _validate_gate_b_v2_executor(
+            prepared.executor,
+            execution_binding_sha256=prepared.trust_chain.binding.sha256,
+        )
+    except (GateBContractError, KeyError, TypeError, ValueError):
+        _raise_sanitized(GateBPreflightError)
+
+
+def _reserve_gate_b_v2_attempt(
+    transition: _GateBV2WriteTransition,
+) -> GateBV2AttemptReservation:
+    """Consume the sole private capability and perform the first RESERVED write."""
+    if (
+        type(transition) is not _GateBV2WriteTransition
+        or transition._token is not _V2_WRITE_TOKEN
+        or transition._consumed
+        or _V2_WRITE_REGISTRY.get(id(transition)) != _v2_write_snapshot(transition)
+    ):
+        _raise_sanitized(GateBPreflightError)
+    transition._consumed = True
+    prepared = transition.prepared
+    reserved_sha = _append_gate_b_v2_state(
+        prepared.ledger_store,
+        ordinal=1,
+        from_state=None,
+        to_state="RESERVED",
+        previous_sha256=None,
+        quarantine_manifest_sha256=None,
+    )
+    return _new_gate_b_v2_attempt_reservation(
+        test_batch_sha256=prepared.trust_chain.binding.payload["test_batch_sha256"],
+        reserved_record_sha256=reserved_sha,
+    )
+
+
+def _execute_prepared_gate_b_v2_once(
+    prepared: PreparedGateBV2OneShotExecution,
+) -> GateBV2ExecutionReceipt:
+    _validate_prepared_v2(prepared)
+    if prepared._consumed:
+        _raise_sanitized(GateBPreflightError)
+    prepared._consumed = True
+    _final_revalidate_gate_b_v2(prepared)
+    transition = _GateBV2WriteTransition(_token=_V2_WRITE_TOKEN)
+    transition.prepared = prepared
+    transition._consumed = False
+    transition._token = _V2_WRITE_TOKEN
+    _V2_WRITE_REGISTRY[id(transition)] = _v2_write_snapshot(transition)
+    reservation = _reserve_gate_b_v2_attempt(transition)
+    opened = _prepare_gate_b_v2_test_open(
+        reservation,
+        ledger_store=prepared.ledger_store,
+        quarantine=prepared.quarantine,
+        route=prepared,
+    )
+    _started, sealed, manifest = _open_gate_b_v2_test_input(
+        opened,
+        executor=prepared.executor,
+    )
+    payload_data = _v2_receipt_payload(
+        {
+            "schema_version": "phase6-gate-b-cli-execution-receipt-v2",
+            "operation": "execute-once-v2",
+            "status": "sealed",
+            "attempt_ordinal": 1,
+            "state": "SEALED",
+            "projection_sha256": prepared.trust_chain.compatibility_chain.projection.sha256,
+            "execution_binding_sha256": prepared.trust_chain.binding.sha256,
+            "loader_request_sha256": prepared.trust_chain.loader_request.sha256,
+            "execution_context_sha256": prepared.trust_chain.execution_context.sha256,
+            "sealed_record_sha256": sealed,
+            "quarantine_manifest_sha256": manifest,
+        }
+    )
+    payload = MappingProxyType(payload_data)
+    raw = canonical_json_bytes(payload_data)
+    receipt = GateBV2ExecutionReceipt(_token=_V2_ROUTE_TOKEN)
+    object.__setattr__(receipt, "payload", payload)
+    object.__setattr__(receipt, "canonical_bytes", raw)
+    object.__setattr__(receipt, "sha256", sha256_bytes(raw))
+    object.__setattr__(receipt, "_token", _V2_ROUTE_TOKEN)
+    _V2_ROUTE_REGISTRY[id(receipt)] = (
+        receipt,
+        raw,
+        raw,
+        sha256_bytes(raw),
+        _V2_ROUTE_TOKEN,
+    )
+    return receipt
+
+
+def execute_gate_b_v2_once(
+    spec_reference: GateBV2PinnedSpecReference,
+) -> GateBV2ExecutionReceipt:
+    """Execute one v2 attempt through the separate closed route and stop at SEALED."""
+    prepared = prepare_gate_b_v2_one_shot(spec_reference)
+    primary: BaseException | None = None
+    try:
+        return _execute_prepared_gate_b_v2_once(prepared)
+    except BaseException as exc:
+        primary = exc
+        raise
+    finally:
+        try:
+            prepared.close()
+        except BaseException:
+            if primary is None:
+                raise

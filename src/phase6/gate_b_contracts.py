@@ -2786,3 +2786,1064 @@ def _root_identity_payload(path: Path | str) -> dict[str, str]:
         "identity_scheme": scheme,
         "volume_id_hex": format(metadata.st_dev, "x"),
     }
+
+
+# Gate B v2 execution family.  This family is deliberately nominally below the
+# compatibility marker so every unchanged v1 rejection continues to match it.
+V2_EXECUTION_BINDING_SCHEMA_VERSION = "phase6-gate-b-v2-execution-binding-v1"
+EXECUTION_CONTEXT_V2_SCHEMA_VERSION = "phase6-gate-b-execution-context-v2"
+CALIBRATION_REFERENCE_V2_SCHEMA_VERSION = "phase6-gate-b-calibration-bundle-reference-v2"
+HUMAN_APPROVAL_RECORD_V4_SCHEMA_VERSION = "phase6-gate-b-human-approval-record-v4"
+HUMAN_SIGNATURE_RECORD_V4_SCHEMA_VERSION = "phase6-gate-b-human-signature-record-v4"
+READINESS_AUTHORIZATION_V4_SCHEMA_VERSION = "phase6-gate-b-readiness-authorization-v4"
+LOADER_REQUEST_V3_SCHEMA_VERSION = "phase6-gate-b-test-loader-request-v3"
+ONE_SHOT_SPEC_V2_SCHEMA_VERSION = "phase6-gate-b-one-shot-execution-spec-v2"
+CLI_EXECUTION_RECEIPT_V2_SCHEMA_VERSION = "phase6-gate-b-cli-execution-receipt-v2"
+V2_CLI_ERROR_SCHEMA_VERSION = "phase6-gate-b-v2-cli-error-v1"
+
+V2_SCIENCE_COMMIT = "d031dcb268cee2073afa3089ebaebed8961551bf"
+V2_SOURCE_CONTEXT = MappingProxyType(
+    {
+        "schema_version": EXECUTION_CONTEXT_SCHEMA_VERSION,
+        "size_bytes": 1678,
+        "sha256": "c235c53b42ce19e1bcf40cc8926eeb004bb62520af8ee9666ea17cd343f1ba43",
+    }
+)
+V2_COMMON_PARENT_CHILDREN = (
+    "gate_b_test_v1_input",
+    "gate_b_test_v1_ledger",
+    "gate_b_test_v1_quarantine",
+    "gate_b_test_v2_input",
+    "gate_b_test_v2_ledger",
+    "gate_b_test_v2_quarantine",
+)
+V2_ROUTE_MODULES = (
+    ("phase6.contracts", "src/phase6/contracts.py"),
+    ("phase6.gate_b_contracts", "src/phase6/gate_b_contracts.py"),
+    ("phase6.gate_b_executor", "src/phase6/gate_b_executor.py"),
+    ("phase6.gate_b_ledger", "src/phase6/gate_b_ledger.py"),
+    ("phase6.gate_b_loader", "src/phase6/gate_b_loader.py"),
+    ("phase6.gate_b_orchestrator", "src/phase6/gate_b_orchestrator.py"),
+    ("phase6.gate_b_v2_cli", "src/phase6/gate_b_v2_cli.py"),
+)
+V2_OUTPUT_LIMITS = MappingProxyType(
+    {
+        "stdout": 0,
+        "stderr": 0,
+        "progress": 4194304,
+        "metrics": 1048576,
+        "log": 4194304,
+        "result": 33554432,
+        "aggregate_executor_writable": 42991616,
+    }
+)
+
+_V2_EXECUTION_TOKEN = object()
+_V2_EXECUTION_REGISTRY: dict[int, tuple[object, ...]] = {}
+_V2_ARTIFACT_HASH_KEYS = {
+    "approval_record",
+    "signature_record",
+    "readiness_authorization",
+    "ledger_root_anchor",
+    "quarantine_root_anchor",
+    "loader_request",
+}
+_V2_SPEC_HASH_KEYS = {
+    "readiness_materialization_spec",
+    "request_materialization_spec",
+}
+_V2_PIN_FIELDS = {
+    "parent_absolute_path",
+    "parent_identity_scheme",
+    "parent_serialization_profile",
+    "parent_volume_id_hex",
+    "parent_file_id_hex",
+    "direct_child_name",
+    "expected_sha256",
+    "expected_size_bytes",
+}
+_V2_ROOT_REF_FIELDS = {
+    "absolute_path",
+    "identity_scheme",
+    "serialization_profile",
+    "volume_id_hex",
+    "file_id_hex",
+}
+
+
+class GateBV2ExecutionObject(GateBV2CompatibilityObject):
+    """Nominal base for the operational v2 family; never accepted by v1."""
+
+    __slots__ = ()
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class GateBV2ExecutionBinding(GateBV2ExecutionObject):
+    payload: Mapping[str, Any]
+    canonical_bytes: bytes
+    sha256: str
+    _token: object = field(repr=False, compare=False)
+
+    def __new__(cls, *, _token: object | None = None) -> GateBV2ExecutionBinding:
+        if _token is not _V2_EXECUTION_TOKEN:
+            raise TypeError("v2 execution binding construction is private")
+        return object.__new__(cls)
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class GateBV2ExecutionContext(GateBV2ExecutionObject):
+    payload: Mapping[str, Any]
+    canonical_bytes: bytes
+    sha256: str
+    reference_path: Path
+    _token: object = field(repr=False, compare=False)
+
+    def __new__(cls, *, _token: object | None = None) -> GateBV2ExecutionContext:
+        if _token is not _V2_EXECUTION_TOKEN:
+            raise TypeError("v2 execution context construction is private")
+        return object.__new__(cls)
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class GateBV2ExecutionLoaderRequest(GateBV2ExecutionObject):
+    payload: Mapping[str, Any]
+    canonical_bytes: bytes
+    sha256: str
+    _token: object = field(repr=False, compare=False)
+
+    def __new__(cls, *, _token: object | None = None) -> GateBV2ExecutionLoaderRequest:
+        if _token is not _V2_EXECUTION_TOKEN:
+            raise TypeError("v2 loader request construction is private")
+        return object.__new__(cls)
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class GateBV2ExecutionTrustChain(GateBV2ExecutionObject):
+    compatibility_chain: GateBV2CompatibilityTrustChain
+    binding: GateBV2ExecutionBinding
+    execution_context: GateBV2ExecutionContext
+    loader_request: GateBV2ExecutionLoaderRequest
+    artifact_hashes: Mapping[str, str]
+    _raws: Mapping[str, bytes] = field(repr=False, compare=False)
+    _token: object = field(repr=False, compare=False)
+
+    def __new__(cls, *, _token: object | None = None) -> GateBV2ExecutionTrustChain:
+        if _token is not _V2_EXECUTION_TOKEN:
+            raise TypeError("v2 execution trust-chain construction is private")
+        return object.__new__(cls)
+
+
+def _v2_path_text(value: object, label: str) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or any(unicodedata.category(character) in {"Cc", "Cf"} for character in value)
+    ):
+        _fail(f"{label} path mismatch")
+    path = Path(value)
+    if not path.is_absolute() or ".." in path.parts or str(path) != value:
+        _fail(f"{label} must be canonical and absolute")
+    return value
+
+
+def _v2_oid(value: object, label: str) -> str:
+    if type(value) is not str or _OID_RE.fullmatch(value) is None:
+        _fail(f"{label} must be lowercase Git OID")
+    return value
+
+
+def _v2_source_context(value: object) -> dict[str, Any]:
+    source = _closed(value, set(V2_SOURCE_CONTEXT), "v2 source execution context")
+    if not _exact_json_equal(source, dict(V2_SOURCE_CONTEXT)):
+        _fail("v2 source execution context mismatch")
+    return source
+
+
+def _v2_root_reference(value: object, label: str) -> dict[str, Any]:
+    root = _closed(value, _V2_ROOT_REF_FIELDS, label)
+    _v2_path_text(root["absolute_path"], label)
+    if (
+        root["identity_scheme"] != "windows-volume-file-id-v1"
+        or root["serialization_profile"] != ROOT_IDENTITY_SERIALIZATION_PROFILE_V2
+    ):
+        _fail(f"{label} identity profile mismatch")
+    _fixed_width_v2_identity(root["volume_id_hex"], label, width=8)
+    _fixed_width_v2_identity(root["file_id_hex"], label, width=16)
+    return root
+
+
+def _v2_pin(value: object, label: str) -> dict[str, Any]:
+    pin = _closed(value, _V2_PIN_FIELDS, label)
+    _v2_path_text(pin["parent_absolute_path"], label)
+    if (
+        pin["parent_identity_scheme"] != "windows-volume-file-id-v1"
+        or pin["parent_serialization_profile"] != ROOT_IDENTITY_SERIALIZATION_PROFILE_V2
+    ):
+        _fail(f"{label} parent identity profile mismatch")
+    _fixed_width_v2_identity(pin["parent_volume_id_hex"], label, width=8)
+    _fixed_width_v2_identity(pin["parent_file_id_hex"], label, width=16)
+    if (
+        type(pin["direct_child_name"]) is not str
+        or not pin["direct_child_name"]
+        or Path(pin["direct_child_name"]).name != pin["direct_child_name"]
+        or any(character in pin["direct_child_name"] for character in ("/", "\\", ":"))
+    ):
+        _fail(f"{label} direct-child name mismatch")
+    _sha(pin["expected_sha256"], f"{label} hash")
+    _integer(pin["expected_size_bytes"], f"{label} size", minimum=1)
+    return pin
+
+
+def _v2_calibration_reference(value: object) -> dict[str, Any]:
+    reference = _closed(
+        value,
+        {"schema_version", "artifact_type", "root_manifest", "artifacts"},
+        "v2 calibration reference",
+    )
+    if (
+        reference["schema_version"] != CALIBRATION_REFERENCE_V2_SCHEMA_VERSION
+        or reference["artifact_type"] != "gate_b_calibration_bundle_reference"
+    ):
+        _fail("v2 calibration reference identity mismatch")
+    _v2_pin(reference["root_manifest"], "v2 calibration root manifest")
+    artifacts = reference["artifacts"]
+    if type(artifacts) is not list or not artifacts:
+        _fail("v2 calibration artifacts must be a nonempty list")
+    paths: list[str] = []
+    for row in artifacts:
+        parsed = _closed(row, _V2_PIN_FIELDS | {"relative_path"}, "v2 calibration row")
+        relative = parsed["relative_path"]
+        if (
+            type(relative) is not str
+            or not relative
+            or PurePosixPath(relative).is_absolute()
+            or ".." in PurePosixPath(relative).parts
+            or str(PurePosixPath(relative)) != relative
+        ):
+            _fail("v2 calibration relative path mismatch")
+        _v2_pin({key: parsed[key] for key in _V2_PIN_FIELDS}, "v2 calibration artifact")
+        paths.append(relative)
+    if paths != sorted(set(paths)):
+        _fail("v2 calibration artifacts must be sorted and unique")
+    return reference
+
+
+def _v2_binding_payload(value: object) -> dict[str, Any]:
+    fields = {
+        "schema_version",
+        "projection_descriptor",
+        "compatibility_artifact_sha256s",
+        "compatibility_materialization_spec_sha256s",
+        "root_anchor_sha256s",
+        "source_execution_context",
+        "test_batch_sha256",
+        "science_commit",
+        "execution_route_commit",
+        "execution_context_v2_sha256",
+        "calibration_bundle_reference",
+        "common_parent_topology",
+        "expected_attempt_ordinal",
+        "expected_latest_record_sha256",
+        "operation_timeout_seconds",
+        "process_timeout_seconds",
+        "output_limits",
+    }
+    binding = _closed(value, fields, "v2 execution binding")
+    if binding["schema_version"] != V2_EXECUTION_BINDING_SCHEMA_VERSION:
+        _fail("v2 execution binding schema mismatch")
+    descriptor = binding["projection_descriptor"]
+    if type(descriptor) is not dict or not descriptor:
+        _fail("v2 execution projection descriptor mismatch")
+    artifacts = _closed(
+        binding["compatibility_artifact_sha256s"],
+        _V2_ARTIFACT_HASH_KEYS,
+        "v2 compatibility artifact hashes",
+    )
+    specs = _closed(
+        binding["compatibility_materialization_spec_sha256s"],
+        _V2_SPEC_HASH_KEYS,
+        "v2 compatibility spec hashes",
+    )
+    anchors = _closed(
+        binding["root_anchor_sha256s"],
+        {"ledger_base", "quarantine_base"},
+        "v2 root anchor hashes",
+    )
+    for name, digest in (*artifacts.items(), *specs.items(), *anchors.items()):
+        _sha(digest, f"v2 {name} hash")
+    if (
+        anchors["ledger_base"] != artifacts["ledger_root_anchor"]
+        or anchors["quarantine_base"] != artifacts["quarantine_root_anchor"]
+    ):
+        _fail("v2 root anchor hash join mismatch")
+    _v2_source_context(binding["source_execution_context"])
+    _sha(binding["test_batch_sha256"], "v2 Test batch hash")
+    if _v2_oid(binding["science_commit"], "v2 science commit") != V2_SCIENCE_COMMIT:
+        _fail("v2 science commit mismatch")
+    route_commit = _v2_oid(binding["execution_route_commit"], "v2 route commit")
+    if route_commit == V2_SCIENCE_COMMIT:
+        _fail("v2 science and route commits must differ")
+    _sha(binding["execution_context_v2_sha256"], "v2 execution context hash")
+    _v2_calibration_reference(binding["calibration_bundle_reference"])
+    topology = _closed(
+        binding["common_parent_topology"],
+        _V2_ROOT_REF_FIELDS | {"expected_direct_children"},
+        "v2 common-parent topology",
+    )
+    _v2_root_reference(
+        {key: topology[key] for key in _V2_ROOT_REF_FIELDS},
+        "v2 common parent",
+    )
+    if topology["expected_direct_children"] != list(V2_COMMON_PARENT_CHILDREN):
+        _fail("v2 common-parent children mismatch")
+    if (
+        binding["expected_attempt_ordinal"] != 1
+        or type(binding["expected_attempt_ordinal"]) is not int
+        or binding["expected_latest_record_sha256"] is not None
+        or binding["operation_timeout_seconds"] != 7200
+        or type(binding["operation_timeout_seconds"]) is not int
+        or binding["process_timeout_seconds"] != 7500
+        or type(binding["process_timeout_seconds"]) is not int
+        or not _exact_json_equal(binding["output_limits"], dict(V2_OUTPUT_LIMITS))
+    ):
+        _fail("v2 initial-attempt limits mismatch")
+    return binding
+
+
+def _v2_register_artifact(
+    cls: type[GateBV2ExecutionObject], raw: bytes, payload: dict[str, Any], **extra: Any
+) -> GateBV2ExecutionObject:
+    instance = cls(_token=_V2_EXECUTION_TOKEN)
+    owned = bytes(raw)
+    digest = sha256_bytes(owned)
+    values = {
+        "payload": _frozen(copy.deepcopy(payload)),
+        "canonical_bytes": owned,
+        "sha256": digest,
+        "_token": _V2_EXECUTION_TOKEN,
+        **extra,
+    }
+    for name, item in values.items():
+        object.__setattr__(instance, name, item)
+    _V2_EXECUTION_REGISTRY[id(instance)] = (
+        instance,
+        cls,
+        copy.deepcopy(payload),
+        owned,
+        digest,
+        _V2_EXECUTION_TOKEN,
+        tuple(extra.items()),
+    )
+    return instance
+
+
+def _validate_v2_registered(value: object, cls: type[Any]) -> dict[str, Any]:
+    if type(value) is not cls:
+        _fail("v2 execution nominal type mismatch")
+    registered = _V2_EXECUTION_REGISTRY.get(id(value))
+    try:
+        payload = _plain(value.payload)
+        registered_extra = registered[6] if registered else ()
+        current_extra = tuple(
+            (name, object.__getattribute__(value, name)) for name, _item in registered_extra
+        )
+        current = (
+            value,
+            cls,
+            copy.deepcopy(payload),
+            value.canonical_bytes,
+            value.sha256,
+            object.__getattribute__(value, "_token"),
+            current_extra,
+        )
+    except Exception:
+        _fail("v2 execution provenance mismatch")
+    if (
+        registered is None
+        or registered != current
+        or canonical_json_bytes(payload) != value.canonical_bytes
+        or sha256_bytes(value.canonical_bytes) != value.sha256
+        or current[5] is not _V2_EXECUTION_TOKEN
+    ):
+        _fail("v2 execution provenance mismatch")
+    return payload
+
+
+def _load_v2_raw(raw: bytes, expected_sha256: str, label: str) -> dict[str, Any]:
+    if type(raw) is not bytes or _sha(expected_sha256, label) != sha256_bytes(raw):
+        _fail(f"{label} stored-byte hash mismatch")
+    return _strict_canonical_object(raw, label)
+
+
+@_sanitized_api
+def load_gate_b_v2_execution_context_bytes(
+    raw: bytes, *, expected_sha256: str, reference_path: Path
+) -> GateBV2ExecutionContext:
+    """Strict-load the retained route context without opening its path."""
+    if not isinstance(reference_path, Path) or not reference_path.is_absolute():
+        _fail("v2 execution context reference path mismatch")
+    payload = _load_v2_raw(raw, expected_sha256, "v2 execution context")
+    fields = {
+        "schema_version",
+        "artifact_type",
+        "created_at_utc",
+        "projection_descriptor",
+        "source_execution_context",
+        "test_batch_sha256",
+        "science_commit",
+        "execution_route_commit",
+        "repository_root",
+        "active_route_modules",
+        "runtime_fingerprint",
+        "dependency_lock",
+    }
+    _closed(payload, fields, "v2 execution context")
+    if (
+        payload["schema_version"] != EXECUTION_CONTEXT_V2_SCHEMA_VERSION
+        or payload["artifact_type"] != "gate_b_execution_context"
+    ):
+        _fail("v2 execution context identity mismatch")
+    _timestamp(payload["created_at_utc"], "v2 execution context timestamp")
+    if type(payload["projection_descriptor"]) is not dict:
+        _fail("v2 context projection descriptor mismatch")
+    _v2_source_context(payload["source_execution_context"])
+    _sha(payload["test_batch_sha256"], "v2 context batch hash")
+    if _v2_oid(payload["science_commit"], "v2 context science commit") != V2_SCIENCE_COMMIT:
+        _fail("v2 context science commit mismatch")
+    if _v2_oid(payload["execution_route_commit"], "v2 context route commit") == V2_SCIENCE_COMMIT:
+        _fail("v2 context commit roles collapsed")
+    _v2_root_reference(payload["repository_root"], "v2 repository root")
+    modules = payload["active_route_modules"]
+    if type(modules) is not list or len(modules) != len(V2_ROUTE_MODULES):
+        _fail("v2 active route modules mismatch")
+    for row, expected in zip(modules, V2_ROUTE_MODULES, strict=True):
+        parsed = _closed(
+            row,
+            {"module_name", "repository_relative_path", "sha256"},
+            "v2 route module",
+        )
+        if (parsed["module_name"], parsed["repository_relative_path"]) != expected:
+            _fail("v2 route module ordering mismatch")
+        _sha(parsed["sha256"], "v2 route module hash")
+    runtime = _closed(
+        payload["runtime_fingerprint"],
+        {
+            "python_implementation",
+            "python_version",
+            "python_compiler",
+            "platform",
+            "system",
+            "release",
+            "version",
+            "machine",
+        },
+        "v2 runtime fingerprint",
+    )
+    if any(type(item) is not str for item in runtime.values()):
+        _fail("v2 runtime fingerprint values mismatch")
+    dependency = _closed(
+        payload["dependency_lock"],
+        {"absolute_path", "sha256", "size_bytes"},
+        "v2 dependency lock",
+    )
+    _v2_path_text(dependency["absolute_path"], "v2 dependency lock")
+    _sha(dependency["sha256"], "v2 dependency lock hash")
+    _integer(dependency["size_bytes"], "v2 dependency lock size", minimum=1)
+    return _v2_register_artifact(
+        GateBV2ExecutionContext, raw, payload, reference_path=reference_path
+    )  # type: ignore[return-value]
+
+
+def _load_v2_binding(value: object) -> GateBV2ExecutionBinding:
+    payload = _v2_binding_payload(value)
+    raw = canonical_json_bytes(payload)
+    return _v2_register_artifact(  # type: ignore[return-value]
+        GateBV2ExecutionBinding, raw, payload
+    )
+
+
+def _v2_request_reference(value: object, label: str) -> dict[str, Any]:
+    ref = _closed(value, {"absolute_path", "sha256"}, label)
+    _v2_path_text(ref["absolute_path"], label)
+    _sha(ref["sha256"], f"{label} hash")
+    return ref
+
+
+def _validate_v2_operational_artifact(
+    payload: dict[str, Any], kind: str, binding: dict[str, Any], hashes: dict[str, str]
+) -> None:
+    if kind == "approval_record":
+        fields = {
+            "schema_version",
+            "artifact_type",
+            "approval_record_id",
+            "approved_at_utc",
+            "approver_actor_id",
+            "approver_role",
+            "approval_decision",
+            "approval_scope",
+            "execution_binding",
+            "authorized_runner_actor_id",
+            "authorized_runner_role",
+            "authorized_ledger_manager_actor_id",
+            "authorized_ledger_manager_role",
+            "designated_release_approver_id",
+            "designated_release_approver_role",
+            "designated_retry_approver_id",
+            "designated_retry_approver_role",
+            "release_authorized",
+            "retry_authorized",
+        }
+        _closed(payload, fields, "v2 execution approval")
+        if (
+            payload["schema_version"] != HUMAN_APPROVAL_RECORD_V4_SCHEMA_VERSION
+            or payload["artifact_type"] != "gate_b_human_approval_record"
+            or payload["approver_role"] != "human_gate_b_v2_execution_approver"
+            or payload["approval_decision"] != "APPROVE_INITIAL_GATE_B_V2_EXECUTION"
+            or payload["approval_scope"] != "initial_attempt_only"
+            or payload["authorized_runner_role"] != "test_runner"
+            or payload["authorized_ledger_manager_role"] != "ledger_manager"
+            or payload["designated_release_approver_role"] != "release_approver"
+            or payload["designated_retry_approver_role"] != "retry_approver"
+            or payload["release_authorized"] is not False
+            or payload["retry_authorized"] is not False
+        ):
+            _fail("v2 execution approval identity mismatch")
+        _timestamp(payload["approved_at_utc"], "v2 execution approval timestamp")
+        for field_name in (
+            "approval_record_id",
+            "approver_actor_id",
+            "authorized_runner_actor_id",
+            "authorized_ledger_manager_actor_id",
+            "designated_release_approver_id",
+            "designated_retry_approver_id",
+        ):
+            _atom(payload[field_name], f"v2 approval {field_name}")
+    elif kind == "signature_record":
+        fields = {
+            "schema_version",
+            "artifact_type",
+            "signature_record_id",
+            "signed_at_utc",
+            "signer_actor_id",
+            "signer_role",
+            "signature_method",
+            "attestation",
+            "approval_record_id",
+            "approval_record_sha256",
+            "execution_binding",
+        }
+        _closed(payload, fields, "v2 execution signature")
+        if (
+            payload["schema_version"] != HUMAN_SIGNATURE_RECORD_V4_SCHEMA_VERSION
+            or payload["artifact_type"] != "gate_b_human_signature_record"
+            or payload["signer_role"] != "human_gate_b_v2_execution_attestor"
+            or payload["signature_method"] != "human-governance-attestation-v1"
+            or payload["attestation"] != "ATTEST_EXACT_GATE_B_V2_EXECUTION_APPROVAL"
+            or payload["approval_record_sha256"] != hashes["approval_record"]
+        ):
+            _fail("v2 execution signature identity mismatch")
+        _timestamp(payload["signed_at_utc"], "v2 execution signature timestamp")
+        for field_name in (
+            "signature_record_id",
+            "signer_actor_id",
+            "approval_record_id",
+        ):
+            _atom(payload[field_name], f"v2 signature {field_name}")
+    elif kind == "readiness_authorization":
+        fields = {
+            "schema_version",
+            "artifact_type",
+            "authorization_id",
+            "authorized_at_utc",
+            "approval_record_id",
+            "approval_record_sha256",
+            "signature_record_sha256",
+            "gate_b_ready",
+            "execution_binding",
+            "authorized_runner_actor_id",
+            "authorized_runner_role",
+            "authorized_ledger_manager_actor_id",
+            "authorized_ledger_manager_role",
+            "designated_release_approver_id",
+            "designated_release_approver_role",
+            "designated_retry_approver_id",
+            "designated_retry_approver_role",
+            "ledger_namespace_derivation",
+            "quarantine_namespace_derivation",
+        }
+        _closed(payload, fields, "v2 execution readiness")
+        if (
+            payload["schema_version"] != READINESS_AUTHORIZATION_V4_SCHEMA_VERSION
+            or payload["artifact_type"] != "gate_b_readiness_authorization"
+            or payload["approval_record_sha256"] != hashes["approval_record"]
+            or payload["signature_record_sha256"] != hashes["signature_record"]
+            or payload["gate_b_ready"] is not True
+            or payload["authorized_runner_role"] != "test_runner"
+            or payload["authorized_ledger_manager_role"] != "ledger_manager"
+            or payload["designated_release_approver_role"] != "release_approver"
+            or payload["designated_retry_approver_role"] != "retry_approver"
+            or payload["ledger_namespace_derivation"] != "ledger_base/<test_batch_hash>"
+            or payload["quarantine_namespace_derivation"]
+            != "quarantine_base/<test_batch_hash>/attempt-<ordinal:06d>"
+        ):
+            _fail("v2 execution readiness identity mismatch")
+        _timestamp(payload["authorized_at_utc"], "v2 execution readiness timestamp")
+        for field_name in (
+            "authorization_id",
+            "approval_record_id",
+            "authorized_runner_actor_id",
+            "authorized_ledger_manager_actor_id",
+            "designated_release_approver_id",
+            "designated_retry_approver_id",
+        ):
+            _atom(payload[field_name], f"v2 readiness {field_name}")
+    else:
+        _fail("unknown v2 operational artifact")
+    if not _exact_json_equal(payload["execution_binding"], binding):
+        _fail("v2 execution binding copy mismatch")
+
+
+def _load_v2_loader_request(
+    raw: bytes, expected_sha256: str, binding: dict[str, Any], hashes: dict[str, str]
+) -> GateBV2ExecutionLoaderRequest:
+    payload = _load_v2_raw(raw, expected_sha256, "v2 execution loader request")
+    fields = {
+        "schema_version",
+        "artifact_type",
+        "requested_at_utc",
+        "operation",
+        "execution_binding",
+        "batch_manifest",
+        "source_execution_context",
+        "execution_context",
+        "compatibility_artifacts",
+        "compatibility_materialization_specs",
+        "execution_approval_record",
+        "execution_signature_record",
+        "execution_readiness_authorization",
+        "roots",
+        "common_parent_topology",
+        "actor",
+        "attempt_ordinal",
+    }
+    _closed(payload, fields, "v2 execution loader request")
+    if (
+        payload["schema_version"] != LOADER_REQUEST_V3_SCHEMA_VERSION
+        or payload["artifact_type"] != "gate_b_test_loader_request"
+        or payload["operation"] != "execute_once_v2"
+        or payload["attempt_ordinal"] != 1
+        or type(payload["attempt_ordinal"]) is not int
+        or not _exact_json_equal(payload["execution_binding"], binding)
+    ):
+        _fail("v2 execution loader request identity mismatch")
+    _timestamp(payload["requested_at_utc"], "v2 execution request timestamp")
+    for name in ("batch_manifest", "source_execution_context", "execution_context"):
+        _v2_request_reference(payload[name], f"v2 request {name}")
+    compatibility = _closed(
+        payload["compatibility_artifacts"],
+        _V2_ARTIFACT_HASH_KEYS,
+        "v2 request compatibility artifacts",
+    )
+    specs = _closed(
+        payload["compatibility_materialization_specs"],
+        _V2_SPEC_HASH_KEYS,
+        "v2 request compatibility specs",
+    )
+    for name, ref in (*compatibility.items(), *specs.items()):
+        _v2_request_reference(ref, f"v2 request {name}")
+        expected = binding["compatibility_artifact_sha256s"].get(name) or binding[
+            "compatibility_materialization_spec_sha256s"
+        ].get(name)
+        if ref["sha256"] != expected:
+            _fail("v2 request retained-reference hash mismatch")
+    for name, expected in (
+        ("execution_approval_record", hashes["approval_record"]),
+        ("execution_signature_record", hashes["signature_record"]),
+        ("execution_readiness_authorization", hashes["readiness_authorization"]),
+    ):
+        ref = _v2_request_reference(payload[name], f"v2 request {name}")
+        if ref["sha256"] != expected:
+            _fail("v2 request operational hash mismatch")
+    roots = _closed(
+        payload["roots"], {"test_root", "ledger_base", "quarantine_base"}, "v2 request roots"
+    )
+    for role, root in roots.items():
+        parsed = _closed(
+            root,
+            _V2_ROOT_REF_FIELDS | {"root_role", "anchor_relative_path", "anchor_sha256"},
+            "v2 loader-request root",
+        )
+        if parsed["root_role"] != role:
+            _fail("v2 loader-request root role mismatch")
+        _v2_root_reference({key: parsed[key] for key in _V2_ROOT_REF_FIELDS}, "v2 request root")
+        if role == "test_root":
+            if parsed["anchor_relative_path"] is not None or parsed["anchor_sha256"] is not None:
+                _fail("v2 Test root anchor fields must be null")
+        else:
+            if parsed["anchor_relative_path"] != ".gate-b-root-anchor.json":
+                _fail("v2 writable root anchor path mismatch")
+            expected = binding["root_anchor_sha256s"][role]
+            if parsed["anchor_sha256"] != expected:
+                _fail("v2 writable root anchor hash mismatch")
+    if not _exact_json_equal(
+        payload["common_parent_topology"], binding["common_parent_topology"]
+    ):
+        _fail("v2 request common-parent topology mismatch")
+    actor = _closed(payload["actor"], {"actor_id", "actor_role"}, "v2 request actor")
+    if actor["actor_role"] != "test_runner":
+        _fail("v2 request actor role mismatch")
+    return _v2_register_artifact(  # type: ignore[return-value]
+        GateBV2ExecutionLoaderRequest, raw, payload
+    )
+
+
+@_sanitized_api
+def build_gate_b_v2_execution_trust_chain(
+    compatibility_chain: GateBV2CompatibilityTrustChain,
+    *,
+    readiness_materialization_spec_raw: bytes,
+    request_materialization_spec_raw: bytes,
+    execution_context_raw: bytes,
+    expected_execution_context_sha256: str,
+    execution_context_reference_path: Path,
+    approval_record_raw: bytes,
+    signature_record_raw: bytes,
+    readiness_authorization_raw: bytes,
+    loader_request_raw: bytes,
+    calibration_bundle_reference_raw: bytes,
+    expected_calibration_bundle_reference_sha256: str,
+    calibration_bundle_reference_path: Path,
+) -> GateBV2ExecutionTrustChain:
+    """Build the complete nominal operational chain from exact stored bytes."""
+    compatibility = validate_gate_b_v2_compatibility_trust_chain(compatibility_chain)
+    descriptor = _plain(compatibility.descriptor)
+    compatibility_hashes = dict(compatibility.artifact_hashes)
+    readiness_spec = _strict_canonical_object(
+        readiness_materialization_spec_raw, "v2 readiness materialization spec"
+    )
+    request_spec = _strict_canonical_object(
+        request_materialization_spec_raw, "v2 request materialization spec"
+    )
+    if (
+        readiness_spec.get("schema_version") != "phase6-gate-b-readiness-materialization-spec-v2"
+        or request_spec.get("schema_version") != "phase6-gate-b-request-materialization-spec-v2"
+    ):
+        _fail("v2 compatibility materialization spec schema mismatch")
+    _closed(
+        readiness_spec,
+        {
+            "schema_version",
+            "artifact_type",
+            "projection_descriptor",
+            "approval_record_sha256",
+            "signature_record_sha256",
+            "readiness_authorization_sha256",
+        },
+        "v2 readiness materialization spec",
+    )
+    _closed(
+        request_spec,
+        {
+            "schema_version",
+            "artifact_type",
+            "projection_descriptor",
+            "approval_record_sha256",
+            "signature_record_sha256",
+            "readiness_authorization_sha256",
+            "root_anchor_sha256s",
+            "loader_request_sha256",
+        },
+        "v2 request materialization spec",
+    )
+    request_anchors = _closed(
+        request_spec["root_anchor_sha256s"],
+        {"ledger_base", "quarantine_base"},
+        "v2 request materialization anchor hashes",
+    )
+    if (
+        readiness_spec["artifact_type"] != "gate_b_readiness_materialization_spec"
+        or request_spec["artifact_type"] != "gate_b_request_materialization_spec"
+        or not _exact_json_equal(readiness_spec["projection_descriptor"], descriptor)
+        or not _exact_json_equal(request_spec["projection_descriptor"], descriptor)
+        or readiness_spec["approval_record_sha256"] != compatibility_hashes["approval_record"]
+        or readiness_spec["signature_record_sha256"] != compatibility_hashes["signature_record"]
+        or readiness_spec["readiness_authorization_sha256"]
+        != compatibility_hashes["readiness_authorization"]
+        or request_spec["approval_record_sha256"] != compatibility_hashes["approval_record"]
+        or request_spec["signature_record_sha256"] != compatibility_hashes["signature_record"]
+        or request_spec["readiness_authorization_sha256"]
+        != compatibility_hashes["readiness_authorization"]
+        or request_anchors["ledger_base"] != compatibility_hashes["ledger_root_anchor"]
+        or request_anchors["quarantine_base"] != compatibility_hashes["quarantine_root_anchor"]
+        or request_spec["loader_request_sha256"] != compatibility_hashes["loader_request"]
+    ):
+        _fail("v2 compatibility materialization spec join mismatch")
+    context = load_gate_b_v2_execution_context_bytes(
+        execution_context_raw,
+        expected_sha256=expected_execution_context_sha256,
+        reference_path=execution_context_reference_path,
+    )
+    context_payload = _validate_v2_registered(context, GateBV2ExecutionContext)
+    raw_payloads = {
+        "approval_record": _strict_canonical_object(approval_record_raw, "v2 execution approval"),
+        "signature_record": _strict_canonical_object(
+            signature_record_raw, "v2 execution signature"
+        ),
+        "readiness_authorization": _strict_canonical_object(
+            readiness_authorization_raw, "v2 execution readiness"
+        ),
+    }
+    hashes = {
+        name: sha256_bytes(raw)
+        for name, raw in (
+            ("approval_record", approval_record_raw),
+            ("signature_record", signature_record_raw),
+            ("readiness_authorization", readiness_authorization_raw),
+            ("loader_request", loader_request_raw),
+            ("calibration_bundle_reference", calibration_bundle_reference_raw),
+            ("readiness_materialization_spec", readiness_materialization_spec_raw),
+            ("request_materialization_spec", request_materialization_spec_raw),
+        )
+    }
+    binding_payload = _v2_binding_payload(raw_payloads["approval_record"].get("execution_binding"))
+    binding = _load_v2_binding(binding_payload)
+    if (
+        not _exact_json_equal(binding_payload["projection_descriptor"], descriptor)
+        or not _exact_json_equal(
+            binding_payload["compatibility_artifact_sha256s"], compatibility_hashes
+        )
+        or binding_payload["compatibility_materialization_spec_sha256s"]
+        != {
+            "readiness_materialization_spec": hashes["readiness_materialization_spec"],
+            "request_materialization_spec": hashes["request_materialization_spec"],
+        }
+        or binding_payload["execution_context_v2_sha256"] != context.sha256
+        or context_payload["projection_descriptor"] != descriptor
+        or context_payload["test_batch_sha256"] != binding_payload["test_batch_sha256"]
+        or context_payload["science_commit"] != binding_payload["science_commit"]
+        or context_payload["execution_route_commit"] != binding_payload["execution_route_commit"]
+    ):
+        _fail("v2 context, projection, or compatibility join mismatch")
+    calibration_payload = _load_v2_raw(
+        calibration_bundle_reference_raw,
+        expected_calibration_bundle_reference_sha256,
+        "v2 calibration bundle reference",
+    )
+    _v2_calibration_reference(calibration_payload)
+    if (
+        not _exact_json_equal(calibration_payload, binding_payload["calibration_bundle_reference"])
+        or not isinstance(calibration_bundle_reference_path, Path)
+        or not calibration_bundle_reference_path.is_absolute()
+    ):
+        _fail("v2 calibration bundle reference join mismatch")
+    for name in ("approval_record", "signature_record", "readiness_authorization"):
+        _validate_v2_operational_artifact(raw_payloads[name], name, binding_payload, hashes)
+    approval_payload = raw_payloads["approval_record"]
+    signature_payload = raw_payloads["signature_record"]
+    readiness_payload = raw_payloads["readiness_authorization"]
+    actor_fields = (
+        "authorized_runner_actor_id",
+        "authorized_runner_role",
+        "authorized_ledger_manager_actor_id",
+        "authorized_ledger_manager_role",
+        "designated_release_approver_id",
+        "designated_release_approver_role",
+        "designated_retry_approver_id",
+        "designated_retry_approver_role",
+    )
+    if (
+        signature_payload["approval_record_id"] != approval_payload["approval_record_id"]
+        or readiness_payload["approval_record_id"] != approval_payload["approval_record_id"]
+        or any(readiness_payload[field] != approval_payload[field] for field in actor_fields)
+    ):
+        _fail("v2 operational human-chain join mismatch")
+    for field in (
+        "approval_record_id",
+        "approver_actor_id",
+        "authorized_runner_actor_id",
+        "authorized_ledger_manager_actor_id",
+        "designated_release_approver_id",
+        "designated_retry_approver_id",
+    ):
+        _atom(approval_payload[field], f"v2 approval {field}")
+    _atom(signature_payload["signature_record_id"], "v2 signature record ID")
+    _atom(signature_payload["signer_actor_id"], "v2 signer actor ID")
+    _atom(readiness_payload["authorization_id"], "v2 readiness authorization ID")
+    actors = [
+        approval_payload["approver_actor_id"],
+        signature_payload["signer_actor_id"],
+        approval_payload["authorized_runner_actor_id"],
+        approval_payload["authorized_ledger_manager_actor_id"],
+        approval_payload["designated_release_approver_id"],
+        approval_payload["designated_retry_approver_id"],
+    ]
+    if len(set(actors)) != len(actors):
+        _fail("v2 operational actor IDs must be pairwise distinct")
+    request = _load_v2_loader_request(
+        loader_request_raw, hashes["loader_request"], binding_payload, hashes
+    )
+    request_payload = _validate_v2_registered(request, GateBV2ExecutionLoaderRequest)
+    if (
+        request_payload["actor"]["actor_id"]
+        != raw_payloads["readiness_authorization"]["authorized_runner_actor_id"]
+    ):
+        _fail("v2 request runner actor mismatch")
+    chain = GateBV2ExecutionTrustChain(_token=_V2_EXECUTION_TOKEN)
+    raw_map = {
+        "readiness_materialization_spec": bytes(readiness_materialization_spec_raw),
+        "request_materialization_spec": bytes(request_materialization_spec_raw),
+        "execution_context": bytes(execution_context_raw),
+        "approval_record": bytes(approval_record_raw),
+        "signature_record": bytes(signature_record_raw),
+        "readiness_authorization": bytes(readiness_authorization_raw),
+        "loader_request": bytes(loader_request_raw),
+        "calibration_bundle_reference": bytes(calibration_bundle_reference_raw),
+    }
+    values = {
+        "compatibility_chain": compatibility,
+        "binding": binding,
+        "execution_context": context,
+        "loader_request": request,
+        "artifact_hashes": MappingProxyType(dict(hashes)),
+        "_raws": MappingProxyType(raw_map),
+        "_token": _V2_EXECUTION_TOKEN,
+    }
+    for name, item in values.items():
+        object.__setattr__(chain, name, item)
+    _V2_EXECUTION_REGISTRY[id(chain)] = (
+        chain,
+        GateBV2ExecutionTrustChain,
+        binding.sha256,
+        context.sha256,
+        request.sha256,
+        canonical_json_bytes(hashes),
+        compatibility,
+        tuple((name, raw_map[name]) for name in sorted(raw_map)),
+        _V2_EXECUTION_TOKEN,
+    )
+    return chain
+
+
+def _validate_gate_b_v2_execution_trust_chain(
+    chain: GateBV2ExecutionTrustChain,
+) -> GateBV2ExecutionTrustChain:
+    if type(chain) is not GateBV2ExecutionTrustChain:
+        _fail("v2 execution trust-chain nominal type mismatch")
+    registered = _V2_EXECUTION_REGISTRY.get(id(chain))
+    try:
+        current = (
+            chain,
+            GateBV2ExecutionTrustChain,
+            chain.binding.sha256,
+            chain.execution_context.sha256,
+            chain.loader_request.sha256,
+            canonical_json_bytes(_plain(chain.artifact_hashes)),
+            chain.compatibility_chain,
+            tuple((name, chain._raws[name]) for name in sorted(chain._raws)),
+            chain._token,
+        )
+    except Exception:
+        _fail("v2 execution trust-chain provenance mismatch")
+    if registered != current or current[-1] is not _V2_EXECUTION_TOKEN:
+        _fail("v2 execution trust-chain provenance mismatch")
+    validate_gate_b_v2_compatibility_trust_chain(chain.compatibility_chain)
+    _validate_v2_registered(chain.binding, GateBV2ExecutionBinding)
+    _validate_v2_registered(chain.execution_context, GateBV2ExecutionContext)
+    _validate_v2_registered(chain.loader_request, GateBV2ExecutionLoaderRequest)
+    return chain
+
+
+def _load_gate_b_v2_one_shot_spec_payload(raw: bytes, expected_sha256: str) -> dict[str, Any]:
+    payload = _load_v2_raw(raw, expected_sha256, "v2 one-shot execution spec")
+    _closed(
+        payload,
+        {
+            "schema_version",
+            "artifact_type",
+            "execution_binding",
+            "pinned_inputs",
+            "roots",
+            "common_parent",
+            "expected_latest_record_sha256",
+            "operation_timeout_seconds",
+            "process_timeout_seconds",
+            "output_limits",
+        },
+        "v2 one-shot execution spec",
+    )
+    if (
+        payload["schema_version"] != ONE_SHOT_SPEC_V2_SCHEMA_VERSION
+        or payload["artifact_type"] != "gate_b_one_shot_execution_spec"
+    ):
+        _fail("v2 one-shot execution spec identity mismatch")
+    binding = _v2_binding_payload(payload["execution_binding"])
+    pins = _closed(
+        payload["pinned_inputs"],
+        {
+            "batch_manifest",
+            "source_execution_context",
+            "execution_context",
+            "compatibility_approval_record",
+            "compatibility_signature_record",
+            "compatibility_readiness_authorization",
+            "ledger_root_anchor",
+            "quarantine_root_anchor",
+            "compatibility_loader_request",
+            "compatibility_readiness_materialization_spec",
+            "compatibility_request_materialization_spec",
+            "execution_approval_record",
+            "execution_signature_record",
+            "execution_readiness_authorization",
+            "execution_loader_request",
+            "calibration_bundle",
+        },
+        "v2 one-shot pinned inputs",
+    )
+    for name, pin in pins.items():
+        _v2_pin(pin, f"v2 one-shot {name}")
+    roots = _closed(
+        payload["roots"], {"test_root", "ledger_base", "quarantine_base"}, "v2 one-shot roots"
+    )
+    expected_root_names = {
+        "test_root": "gate_b_test_v2_input",
+        "ledger_base": "gate_b_test_v2_ledger",
+        "quarantine_base": "gate_b_test_v2_quarantine",
+    }
+    root_identities: set[tuple[str, str]] = set()
+    for role, root in roots.items():
+        parsed = _v2_root_reference(root, f"v2 one-shot {role}")
+        if (
+            Path(parsed["absolute_path"]).parent
+            != Path(binding["common_parent_topology"]["absolute_path"])
+            or Path(parsed["absolute_path"]).name != expected_root_names[role]
+        ):
+            _fail("v2 root is not a direct child of common parent")
+        root_identities.add((parsed["volume_id_hex"], parsed["file_id_hex"]))
+    common = _v2_root_reference(payload["common_parent"], "v2 one-shot common parent")
+    if not _exact_json_equal(
+        common,
+        {key: binding["common_parent_topology"][key] for key in _V2_ROOT_REF_FIELDS},
+    ):
+        _fail("v2 one-shot common-parent join mismatch")
+    if (
+        len(root_identities) != 3
+        or (common["volume_id_hex"], common["file_id_hex"]) in root_identities
+    ):
+        _fail("v2 roots/common parent must have distinct physical identities")
+    if (
+        payload["expected_latest_record_sha256"] is not None
+        or payload["operation_timeout_seconds"] != 7200
+        or type(payload["operation_timeout_seconds"]) is not int
+        or payload["process_timeout_seconds"] != 7500
+        or type(payload["process_timeout_seconds"]) is not int
+        or not _exact_json_equal(payload["output_limits"], dict(V2_OUTPUT_LIMITS))
+    ):
+        _fail("v2 one-shot initial-attempt limits mismatch")
+    physical_pins = [
+        (pin["parent_volume_id_hex"], pin["parent_file_id_hex"], pin["direct_child_name"])
+        for pin in pins.values()
+    ]
+    if len(set(physical_pins)) != len(physical_pins):
+        _fail("v2 one-shot duplicate physical artifact")
+    return payload

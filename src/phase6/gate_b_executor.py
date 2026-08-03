@@ -17,7 +17,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields, is_dataclass
 from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 from types import MappingProxyType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from opponents.ground_truth import extract_independent_action_rates, extract_true_leaks
 from opponents.model import OpponentModelConfig
@@ -47,6 +47,9 @@ from poker_solver.best_response import best_response_strategy
 from poker_solver.game import Chance, Decision, Game
 from poker_solver.nodelock import apply_node_locks, river_infoset_reach_weights
 from poker_solver.strategy import StrategyProfile
+
+if TYPE_CHECKING:
+    from phase6.gate_b_contracts import GateBV2ExecutionLoaderRequest
 
 EXECUTOR_PROGRESS_SCHEMA = "phase6-gate-b-executor-progress-entry-v1"
 EXECUTOR_LOG_SCHEMA = "phase6-gate-b-executor-log-entry-v1"
@@ -111,6 +114,8 @@ _COMPONENT_ORDER = (
     "validation_selection_report",
 )
 _CONSTRUCTION_TOKEN = object()
+_V2_EXECUTOR_TOKEN = object()
+_V2_EXECUTOR_REGISTRY: dict[int, tuple[object, ...]] = {}
 _UINT256 = 1 << 256
 
 
@@ -1627,6 +1632,40 @@ def _metric_projection(aggregate: Mapping[str, object]) -> tuple[object, object,
     return calibration["brier"], calibration["ece"], gto_fpr
 
 
+def _gate_b_v2_executor_snapshot(
+    executor: GateBProductionExecutor,
+    execution_binding_sha256: str,
+) -> tuple[object, ...]:
+    return (
+        executor,
+        execution_binding_sha256,
+        executor._executor_id,
+        executor._executor_sha256,
+        executor._batch_hash,
+        executor._execution_context_sha256,
+        canonical_json_bytes(executor._manifest),
+        executor._operation_timeout_seconds,
+        executor._phase6_contract_bundle_evidence,
+        _V2_EXECUTOR_TOKEN,
+    )
+
+
+def _validate_gate_b_v2_executor(
+    executor: object, *, execution_binding_sha256: str
+) -> GateBProductionExecutor:
+    """Revalidate the separate v2 factory provenance without changing v1 instances."""
+    if type(executor) is not GateBProductionExecutor:
+        raise ValueError("v2 executor provenance mismatch")
+    try:
+        validate_phase6_contract_bundle_evidence(executor._phase6_contract_bundle_evidence)
+        current = _gate_b_v2_executor_snapshot(executor, execution_binding_sha256)
+    except Exception:
+        raise ValueError("v2 executor provenance mismatch") from None
+    if _V2_EXECUTOR_REGISTRY.get(id(executor)) != current:
+        raise ValueError("v2 executor provenance mismatch")
+    return executor
+
+
 class GateBProductionExecutor:
     """Immutable concrete implementation of the accepted executor protocol."""
 
@@ -1714,6 +1753,56 @@ class GateBProductionExecutor:
             operation_timeout_seconds=operation_timeout_seconds,
             phase6_contract_bundle_evidence=phase6_contract_bundle_evidence,
         )
+
+    @classmethod
+    def _from_v2_request(
+        cls,
+        request: GateBV2ExecutionLoaderRequest,
+        *,
+        phase6_contract_bundle_evidence: ValidatedPhase6ContractBundleEvidence,
+        batch_manifest: Mapping[str, Any],
+        execution_context_sha256: str,
+        execution_binding_sha256: str,
+        operation_timeout_seconds: int = 7200,
+    ) -> GateBProductionExecutor:
+        """Construct only from the nominal v2 request; v1 from_request is unchanged."""
+        from phase6.gate_b_contracts import (
+            GateBV2ExecutionLoaderRequest as ExactV2Request,
+            _validate_v2_registered,
+        )
+
+        validate_phase6_contract_bundle_evidence(phase6_contract_bundle_evidence)
+        if type(request) is not ExactV2Request:
+            raise TypeError("v2 executor factory requires exact nominal request")
+        payload = _validate_v2_registered(request, ExactV2Request)
+        if (
+            type(batch_manifest) is not dict
+            or sha256_bytes(canonical_json_bytes(batch_manifest))
+            != payload["execution_binding"]["test_batch_sha256"]
+            or execution_context_sha256
+            != payload["execution_binding"]["execution_context_v2_sha256"]
+            or execution_binding_sha256
+            != sha256_bytes(canonical_json_bytes(payload["execution_binding"]))
+            or operation_timeout_seconds != 7200
+            or type(operation_timeout_seconds) is not int
+        ):
+            raise ValueError("v2 executor trust anchor mismatch")
+        sampler = batch_manifest["components"]["execution_sampler"]
+        executor = cls(
+            _CONSTRUCTION_TOKEN,
+            executor_id=sampler["schema_version"],
+            executor_sha256=_sha(sampler["sha256"]),
+            batch_hash=payload["execution_binding"]["test_batch_sha256"],
+            execution_context_sha256=execution_context_sha256,
+            manifest=batch_manifest,
+            operation_timeout_seconds=operation_timeout_seconds,
+            phase6_contract_bundle_evidence=phase6_contract_bundle_evidence,
+        )
+        _V2_EXECUTOR_REGISTRY[id(executor)] = _gate_b_v2_executor_snapshot(
+            executor,
+            execution_binding_sha256,
+        )
+        return executor
 
     def _evaluate_test_calibration(
         self,
