@@ -41,6 +41,7 @@ from phase6.gate_b_executor import (
 )
 from phase6.gate_b_ledger import (
     GateBLedgerError,
+    GateBLedgerStore,
 )
 from phase6.gate_b_loader import (
     GateBExecutorFailure,
@@ -66,10 +67,15 @@ from phase6.gate_b_loader import (
     verify_gate_b_execution_environment,
 )
 from phase6.gate_b_v2_route import (
+    GateBV2PinnedSpecReference,
     GateBV2RouteError,
+    PreparedGateBV2ExecutionRoute,
     close_gate_b_v2_execution_route,
     consume_gate_b_v2_execution_route,
     is_gate_b_v2_execution_route,
+    prepare_gate_b_v2_execution_route_from_reference,
+    validate_gate_b_v2_pinned_spec_reference,
+    validate_prepared_gate_b_v2_execution_route,
 )
 
 READINESS_SPEC_SCHEMA = "phase6-gate-b-readiness-materialization-spec-v1"
@@ -78,6 +84,7 @@ ONE_SHOT_SPEC_SCHEMA = "phase6-gate-b-one-shot-execution-spec-v1"
 CALIBRATION_REFERENCE_SCHEMA = "phase6-gate-b-calibration-bundle-reference-v1"
 READINESS_SPEC_V2_SCHEMA = "phase6-gate-b-readiness-materialization-spec-v2"
 REQUEST_SPEC_V2_SCHEMA = "phase6-gate-b-request-materialization-spec-v2"
+V2_EXECUTION_RECEIPT_SCHEMA = "phase6-gate-b-cli-execution-receipt-v2"
 
 _SHA_RE = re.compile(r"[0-9a-f]{64}\Z")
 _HEX_RE = re.compile(r"(?:0|[1-9a-f][0-9a-f]*)\Z")
@@ -1592,7 +1599,92 @@ def _open_with_callback_classification(
         raise
 
 
-def _execute_gate_b_v2_once(route: object) -> Mapping[str, Any]:
+def _validate_gate_b_v2_execution_receipt(value: object) -> Mapping[str, Any]:
+    fields = {
+        "schema_version",
+        "operation",
+        "status",
+        "attempt_ordinal",
+        "state",
+        "projection_sha256",
+        "execution_binding_sha256",
+        "loader_request_sha256",
+        "execution_context_sha256",
+        "sealed_record_sha256",
+        "quarantine_manifest_sha256",
+    }
+    if type(value) is not dict or set(value) != fields:
+        raise ValueError("v2 execution receipt fields mismatch")
+    if (
+        value["schema_version"] != V2_EXECUTION_RECEIPT_SCHEMA
+        or value["operation"] != "execute-once-v2"
+        or value["status"] != "sealed"
+        or type(value["attempt_ordinal"]) is not int
+        or value["attempt_ordinal"] != 1
+        or value["state"] != "SEALED"
+    ):
+        raise ValueError("v2 execution receipt identity mismatch")
+    for name in fields - {"schema_version", "operation", "status", "attempt_ordinal", "state"}:
+        _sha(value[name], f"v2 receipt {name}")
+    return MappingProxyType(dict(value))
+
+
+def _gate_b_v2_receipt_bindings(route: object, request: GateBLoaderRequest) -> dict[str, str]:
+    if type(route) is PreparedGateBV2ExecutionRoute:
+        prepared = validate_prepared_gate_b_v2_execution_route(route)
+        plan = prepared.plan
+        return {
+            "projection_sha256": plan.projection.sha256,
+            "execution_binding_sha256": plan.execution_binding_sha256,
+            "loader_request_sha256": plan.request.request_sha256,
+            "execution_context_sha256": plan.request.execution_context.sha256,
+        }
+    roots_hash = sha256_bytes(canonical_json_bytes(_plain(request.roots)))
+    binding_hash = sha256_bytes(
+        canonical_json_bytes(
+            {
+                "projection_sha256": roots_hash,
+                "loader_request_sha256": request.request_sha256,
+                "execution_context_sha256": request.execution_context.sha256,
+                "batch_manifest_sha256": request.batch.sha256,
+            }
+        )
+    )
+    return {
+        "projection_sha256": roots_hash,
+        "execution_binding_sha256": binding_hash,
+        "loader_request_sha256": request.request_sha256,
+        "execution_context_sha256": request.execution_context.sha256,
+    }
+
+
+def _gate_b_v2_execution_receipt(
+    route: object,
+    request: GateBLoaderRequest,
+    receipt: Any,
+) -> Mapping[str, Any]:
+    if receipt.state != "SEALED" or receipt.attempt_ordinal != 1:
+        raise ValueError("v2 one-shot receipt is not the exact initial SEALED state")
+    chain = GateBLedgerStore(request).load_chain()
+    if not chain or chain[-1].record_sha256 != receipt.sealed_record_sha256:
+        raise ValueError("v2 sealed ledger receipt mismatch")
+    manifest_hash = chain[-1].payload["quarantine_manifest_sha256"]
+    bindings = _gate_b_v2_receipt_bindings(route, request)
+    return _validate_gate_b_v2_execution_receipt(
+        {
+            "schema_version": V2_EXECUTION_RECEIPT_SCHEMA,
+            "operation": "execute-once-v2",
+            "status": "sealed",
+            "attempt_ordinal": 1,
+            "state": "SEALED",
+            **bindings,
+            "sealed_record_sha256": receipt.sealed_record_sha256,
+            "quarantine_manifest_sha256": manifest_hash,
+        }
+    )
+
+
+def _execute_prepared_gate_b_v2_once(route: object) -> Mapping[str, Any]:
     """Consume one retained v2 route after its complete pre-write boundary."""
     primary_error: BaseException | None = None
     try:
@@ -1602,7 +1694,8 @@ def _execute_gate_b_v2_once(route: object) -> Mapping[str, Any]:
             _raise_sanitized(GateBPreflightError)
         reservation = reserve_gate_b_attempt(request, expected_latest_record_sha256=None)
         prepared = prepare_gate_b_test_open(request, reservation)
-        return _execution_receipt(_open_with_callback_classification(prepared, executor))
+        receipt = _open_with_callback_classification(prepared, executor)
+        return _gate_b_v2_execution_receipt(route, request, receipt)
     except BaseException as exc:
         primary_error = exc
         raise
@@ -1614,14 +1707,31 @@ def _execute_gate_b_v2_once(route: object) -> Mapping[str, Any]:
                 raise
 
 
+def execute_gate_b_v2_once(
+    spec_reference: GateBV2PinnedSpecReference,
+) -> Mapping[str, Any]:
+    """Execute one closed v2 bootstrap through the exact retained-route lifecycle."""
+    if is_gate_b_v2_execution_route(spec_reference):
+        return _execute_prepared_gate_b_v2_once(spec_reference)
+    try:
+        validate_gate_b_v2_pinned_spec_reference(spec_reference)
+    except GateBV2RouteError:
+        _raise_sanitized(GateBSpecError)
+    try:
+        route = prepare_gate_b_v2_execution_route_from_reference(spec_reference)
+    except GateBV2RouteError:
+        _raise_sanitized(GateBPreflightError)
+    return _execute_prepared_gate_b_v2_once(route)
+
+
 def execute_gate_b_once(
-    spec_reference: object,
+    spec_reference: GateBPinnedSpecReference,
 ) -> Mapping[str, Any]:
     """Execute exactly one prevalidated Gate B attempt and stop at SEALED."""
-    if is_gate_b_v2_execution_route(spec_reference):
-        return _execute_gate_b_v2_once(spec_reference)
     if is_gate_b_v2_compatibility_object(spec_reference):
         _raise_sanitized(GateBPreflightError)
+    if type(spec_reference) is not GateBPinnedSpecReference:
+        _raise_sanitized(GateBSpecError)
     with ExitStack() as stack:
         spec = _load_top_spec(spec_reference, stack, operation="execute-once")
         _require_loaded_spec(spec, _OneShotExecutionSpec)

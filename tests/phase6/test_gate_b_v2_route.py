@@ -21,7 +21,7 @@ from phase6.contracts import canonical_json_bytes, sha256_bytes
 from phase6.gate_b_contracts import _plain
 from phase6.gate_b_executor import GateBProductionExecutor
 from phase6.gate_b_ledger import GateBLedgerError, GateBLedgerStore, GateBPinnedDirectory
-from phase6.gate_b_orchestrator import GateBPreflightError, execute_gate_b_once
+from phase6.gate_b_orchestrator import GateBPreflightError, execute_gate_b_v2_once
 from phase6.gate_b_v2_route import (
     EXECUTION_CONTEXT_V2_SCHEMA_VERSION,
     HUMAN_APPROVAL_RECORD_V4_SCHEMA_VERSION,
@@ -35,6 +35,8 @@ from phase6.gate_b_v2_route import (
     prepare_gate_b_v2_execution_route,
     validate_gate_b_v2_execution_plan,
 )
+
+EXACT_ROUTE_COMMIT = "6f86497e35d2002be19cbcb9f894b1b6c0eba95d"
 
 
 def _write_raw(path: Path, raw: bytes) -> Path:
@@ -58,6 +60,8 @@ def _production_plan_fixture(tmp_path: Path):
     batch_path = source.request.batch.path
 
     context = _plain(source.request.execution_context.payload)
+    science_commit = source.request.batch.payload["git"]["commit_oid"]
+    active_module_sources_sha256 = sha256_bytes(canonical_json_bytes(context["active_modules"]))
     context.update(
         {
             "schema_version": EXECUTION_CONTEXT_V2_SCHEMA_VERSION,
@@ -65,6 +69,9 @@ def _production_plan_fixture(tmp_path: Path):
             "compatibility_preflight_request_sha256": compatibility_hash,
             "phase6_contract_bundle_root_manifest_sha256": (bundle_evidence.root_manifest_sha256),
             "phase6_contract_bundle_provenance_sha256": (bundle_evidence.provenance_sha256),
+            "science_commit": science_commit,
+            "execution_route_commit": EXACT_ROUTE_COMMIT,
+            "active_module_sources_sha256": active_module_sources_sha256,
         }
     )
     context_raw = canonical_json_bytes(context)
@@ -157,6 +164,9 @@ def _production_plan_fixture(tmp_path: Path):
         "loader_request_sha256": request_hash,
         "execution_context_sha256": context_hash,
         "batch_manifest_sha256": batch_hash,
+        "science_commit": science_commit,
+        "execution_route_commit": EXACT_ROUTE_COMMIT,
+        "active_module_sources_sha256": active_module_sources_sha256,
         "expected_latest_record_sha256": None,
         "operation_timeout_seconds": 7200,
         "process_timeout_seconds": 7500,
@@ -201,6 +211,7 @@ def test_v2_production_plan_reuses_published_chain_and_is_write_free(
     assert validate_gate_b_v2_execution_plan(plan) is plan
     assert plan.compatibility_chain is chain
     assert plan.request.attempt_ordinal == 1
+    assert plan.execution_binding_sha256 == plan.artifact_hashes["one_shot_spec"]
     assert (
         plan.request.roots["ledger_base"]["anchor_sha256"]
         == chain.artifact_hashes["ledger_root_anchor"]
@@ -232,6 +243,9 @@ def test_v2_production_plan_reuses_published_chain_and_is_write_free(
         lambda spec: spec["projection_descriptor"].__setitem__(
             "serialization_profile", "windows-minimal-lowerhex-v1"
         ),
+        lambda spec: spec.__setitem__("science_commit", "f" * 40),
+        lambda spec: spec.__setitem__("execution_route_commit", spec["science_commit"]),
+        lambda spec: spec.__setitem__("active_module_sources_sha256", "f" * 64),
         lambda spec: spec.update({"unknown": None}),
     ],
 )
@@ -337,9 +351,10 @@ def test_ledger_dispatch_accepts_only_nominal_v2_ref_and_exact_published_anchor(
 
 
 class _FakePinnedRoot:
-    def __init__(self, role: str, chain) -> None:
+    def __init__(self, role: str, chain, close_log: list[str] | None = None) -> None:
         self.role = role
         self.chain = chain
+        self.close_log = close_log
         self.closed = False
         self.drift = False
 
@@ -357,15 +372,23 @@ class _FakePinnedRoot:
 
     def close(self):
         self.closed = True
+        if self.close_log is not None:
+            self.close_log.append(self.role)
 
 
-def _prepare_with_fake_roots(plan, chain, monkeypatch: pytest.MonkeyPatch):
+def _prepare_with_fake_roots(
+    plan,
+    chain,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    close_log: list[str] | None = None,
+):
     roots: dict[str, _FakePinnedRoot] = {}
     by_path = {root["absolute_path"]: role for role, root in _plain(chain.roots).items()}
 
     def fake_open(path, **_kwargs):
         role = by_path[path]
-        roots[role] = _FakePinnedRoot(role, chain)
+        roots[role] = _FakePinnedRoot(role, chain, close_log)
         return roots[role]
 
     monkeypatch.setattr(route_module, "open_gate_b_v2_pinned_directory", fake_open)
@@ -393,6 +416,23 @@ def test_production_prepare_internally_builds_exact_executor_before_root_open(
     assert route.executor._batch_hash == plan.request.batch.sha256
     close_gate_b_v2_execution_route(route)
     assert all(root.closed for root in roots.values())
+
+
+def test_retained_roots_close_in_reverse_acquisition_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _source, chain, _request, _spec, kwargs = _production_plan_fixture(tmp_path)
+    plan = build_gate_b_v2_execution_plan(chain, **kwargs)
+    close_log: list[str] = []
+    route, _roots = _prepare_with_fake_roots(
+        plan,
+        chain,
+        monkeypatch,
+        close_log=close_log,
+    )
+    close_gate_b_v2_execution_route(route)
+    assert close_log == ["test_root", "quarantine_base", "ledger_base"]
 
 
 def test_production_prepare_rejects_nonproduction_executor_before_retained_open(
@@ -438,7 +478,7 @@ def test_prewrite_failure_closes_all_retained_roots_without_reservation(
         lambda *_args, **_kwargs: reserved.append("reserved"),
     )
     with pytest.raises(GateBPreflightError):
-        execute_gate_b_once(route)
+        execute_gate_b_v2_once(route)
     assert reserved == []
     assert all(root.closed for root in roots.values())
 
@@ -461,7 +501,7 @@ def test_environment_failure_precedes_reservation_and_closes_retained_roots(
         lambda *_args, **_kwargs: reserved.append("reserved"),
     )
     with pytest.raises(GateBPreflightError):
-        execute_gate_b_once(route)
+        execute_gate_b_v2_once(route)
     assert reserved == []
     assert all(root.closed for root in roots.values())
 
@@ -480,7 +520,7 @@ def test_stored_artifact_drift_still_closes_registered_retained_roots(
         lambda *_args, **_kwargs: reserved.append("reserved"),
     )
     with pytest.raises(GateBPreflightError):
-        execute_gate_b_once(route)
+        execute_gate_b_v2_once(route)
     assert reserved == []
     assert all(root.closed for root in roots.values())
 
@@ -502,6 +542,7 @@ def test_disposable_v2_dispatcher_runs_one_mock_lifecycle_and_stops_at_sealed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(route_module.tempfile, "gettempdir", lambda: str(tmp_path.parent))
     authority = route_module._create_disposable_gate_b_v2_fixture_authority(tmp_path)
     source = _build_fixture(authority.root / "case")
     executor = _DrainExecutor(source)
@@ -515,14 +556,21 @@ def test_disposable_v2_dispatcher_runs_one_mock_lifecycle_and_stops_at_sealed(
         source.request,
         executor=executor,
     )
-    receipt = execute_gate_b_once(route)
-    assert receipt == {
-        "schema_version": "phase6-gate-b-cli-execution-receipt-v1",
-        "operation": "execute-once",
-        "status": "sealed",
-        "attempt_ordinal": 1,
-        "state": "SEALED",
-    }
+    receipt = execute_gate_b_v2_once(route)
+    assert receipt["schema_version"] == "phase6-gate-b-cli-execution-receipt-v2"
+    assert receipt["operation"] == "execute-once-v2"
+    assert receipt["status"] == "sealed"
+    assert receipt["attempt_ordinal"] == 1
+    assert receipt["state"] == "SEALED"
+    for name in (
+        "projection_sha256",
+        "execution_binding_sha256",
+        "loader_request_sha256",
+        "execution_context_sha256",
+        "sealed_record_sha256",
+        "quarantine_manifest_sha256",
+    ):
+        assert len(receipt[name]) == 64
     chain_records = GateBLedgerStore(source.request).load_chain()
     assert [record.to_state for record in chain_records] == ["RESERVED", "STARTED", "SEALED"]
     assert route._closed is True
@@ -539,7 +587,9 @@ def test_disposable_v2_dispatcher_runs_one_mock_lifecycle_and_stops_at_sealed(
 
 def test_disposable_authority_rejects_request_outside_its_fresh_root(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(route_module.tempfile, "gettempdir", lambda: str(tmp_path.parent))
     authority = route_module._create_disposable_gate_b_v2_fixture_authority(tmp_path)
     outside = _build_fixture(tmp_path / "outside-case")
     with pytest.raises(GateBV2RouteError):

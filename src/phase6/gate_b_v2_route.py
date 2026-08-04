@@ -14,6 +14,8 @@ the mock lifecycle used by tests.
 from __future__ import annotations
 
 import copy
+import os
+import re
 import tempfile
 import unicodedata
 from collections.abc import Iterator, Mapping
@@ -24,8 +26,10 @@ from types import MappingProxyType
 from typing import Any
 
 from phase6.contracts import (
+    CanonicalPhase6ContractArtifact,
     ValidatedPhase6ContractBundleEvidence,
     canonical_json_bytes,
+    load_phase6_contract_bundle_evidence_from_canonical_artifacts,
     sha256_bytes,
     validate_phase6_contract_bundle_evidence,
 )
@@ -51,6 +55,8 @@ from phase6.gate_b_contracts import (
     _validate_human_approval_record,
     _validate_human_signature_record,
     _validate_readiness_authorization,
+    build_gate_b_preapproval_root_identity_projection_v2,
+    build_gate_b_v2_compatibility_trust_chain,
     gate_b_root_identity_projection_descriptor_v2,
     load_gate_b_batch_manifest_bytes,
     validate_gate_b_v2_compatibility_trust_chain,
@@ -81,12 +87,16 @@ READINESS_AUTHORIZATION_V4_SCHEMA_VERSION = "phase6-gate-b-readiness-authorizati
 LOADER_REQUEST_V3_SCHEMA_VERSION = "phase6-gate-b-test-loader-request-v3"
 EXECUTION_CONTEXT_V2_SCHEMA_VERSION = "phase6-gate-b-execution-context-v2"
 ONE_SHOT_SPEC_V2_SCHEMA_VERSION = "phase6-gate-b-one-shot-execution-spec-v2"
+ROUTE_BOOTSTRAP_V2_SCHEMA_VERSION = "phase6-gate-b-v2-route-bootstrap-v1"
 
 _ROOT_ROLES = ("ledger_base", "quarantine_base", "test_root")
 _ANCHOR_ROLES = ("ledger_base", "quarantine_base")
 _COMPATIBILITY_HASH_FIELD = "compatibility_preflight_request_sha256"
 _BUNDLE_ROOT_HASH_FIELD = "phase6_contract_bundle_root_manifest_sha256"
 _BUNDLE_PROVENANCE_HASH_FIELD = "phase6_contract_bundle_provenance_sha256"
+_SCIENCE_COMMIT_FIELD = "science_commit"
+_ROUTE_COMMIT_FIELD = "execution_route_commit"
+_ACTIVE_MODULES_HASH_FIELD = "active_module_sources_sha256"
 _ARTIFACT_HASH_FIELDS = {
     _COMPATIBILITY_HASH_FIELD,
     _BUNDLE_ROOT_HASH_FIELD,
@@ -106,6 +116,7 @@ _ARTIFACT_TOKEN = object()
 _ROOT_REF_TOKEN = object()
 _DISPOSABLE_AUTHORITY_TOKEN = object()
 _DISPOSABLE_ROUTE_TOKEN = object()
+_PINNED_SPEC_TOKEN = object()
 _ANCHOR_NOT_PROVIDED = object()
 _PLAN_REGISTRY: dict[int, tuple[object, ...]] = {}
 _PREPARED_REGISTRY: dict[int, tuple[object, ...]] = {}
@@ -113,7 +124,43 @@ _ARTIFACT_REGISTRY: dict[int, tuple[object, ...]] = {}
 _ROOT_REF_REGISTRY: dict[int, tuple[object, ...]] = {}
 _DISPOSABLE_AUTHORITY_REGISTRY: dict[int, tuple[object, ...]] = {}
 _DISPOSABLE_ROUTE_REGISTRY: dict[int, tuple[object, ...]] = {}
+_PINNED_SPEC_REGISTRY: dict[int, tuple[object, ...]] = {}
 _DISPOSABLE_USED_AUTHORITIES: set[int] = set()
+
+_OID_RE = re.compile(r"[0-9a-f]{40}\Z")
+_VOLUME_RE = re.compile(r"[0-9a-f]{8}\Z")
+_FILE_RE = re.compile(r"[0-9a-f]{16}\Z")
+_CHILD_RE = re.compile(
+    r"(?:[A-Za-z0-9][A-Za-z0-9._-]{0,127}"
+    r"|\.[A-Za-z0-9][A-Za-z0-9._-]{0,126})\Z"
+)
+_BOOTSTRAP_INPUT_NAMES = {
+    "compatibility_approval_record",
+    "compatibility_signature_record",
+    "compatibility_readiness_authorization",
+    "ledger_root_anchor",
+    "quarantine_root_anchor",
+    "compatibility_loader_request",
+}
+_EXECUTION_INPUT_NAMES = {
+    "approval_record",
+    "signature_record",
+    "readiness_authorization",
+    "loader_request",
+    "execution_context",
+    "batch_manifest",
+    "one_shot_spec",
+}
+_PIN_FIELDS = {
+    "parent_absolute_path",
+    "parent_identity_scheme",
+    "parent_serialization_profile",
+    "parent_volume_id_hex",
+    "parent_file_id_hex",
+    "direct_child_name",
+    "expected_sha256",
+    "expected_size_bytes",
+}
 
 
 class GateBV2RouteError(ValueError):
@@ -150,6 +197,245 @@ def _absolute_path(value: object, label: str) -> Path:
     ):
         _fail(f"{label} must be an absolute control-free path")
     return path
+
+
+def _windows_drive_type(root: str) -> int:
+    """Return the Win32 drive type without opening the candidate path."""
+    if os.name != "nt":
+        return 0
+    import ctypes
+
+    return int(ctypes.windll.kernel32.GetDriveTypeW(root))
+
+
+def validate_gate_b_v2_fixed_local_path(value: object, label: str) -> Path:
+    """Reject nonlocal, device, UNC, ADS, and noncanonical paths before any open."""
+    if os.name != "nt" or not isinstance(value, Path):
+        _fail(f"{label} must be a Windows fixed-local absolute path")
+    text = str(value).replace("/", "\\")
+    if (
+        not text
+        or text.startswith("\\\\")
+        or len(text) < 3
+        or text[1:3] != ":\\"
+        or not text[0].isalpha()
+        or ":" in text[2:]
+        or ".." in value.parts
+        or any(unicodedata.category(character) in {"Cc", "Cf"} for character in text)
+        or not value.is_absolute()
+        or str(value) != os.path.abspath(str(value))
+    ):
+        _fail(f"{label} must be a Windows fixed-local absolute path")
+    drive_root = f"{text[0].upper()}:\\"
+    if _windows_drive_type(drive_root) != 3:
+        _fail(f"{label} must be on a fixed local volume")
+    return value
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class GateBV2PinnedSpecReference:
+    """Nominal pinned reference to one closed v2 route-bootstrap manifest."""
+
+    parent_absolute_path: Path
+    parent_identity_scheme: str
+    parent_serialization_profile: str
+    parent_volume_id_hex: str
+    parent_file_id_hex: str
+    direct_child_name: str
+    expected_sha256: str
+    expected_size_bytes: int
+    _token: object = field(repr=False, compare=False)
+
+    def __new__(cls, *, _token: object | None = None) -> GateBV2PinnedSpecReference:
+        if _token is not _PINNED_SPEC_TOKEN:
+            raise TypeError("v2 pinned spec-reference construction is private")
+        return object.__new__(cls)
+
+
+def _pinned_spec_snapshot(reference: GateBV2PinnedSpecReference) -> tuple[object, ...]:
+    return (
+        reference,
+        reference.parent_absolute_path,
+        reference.parent_identity_scheme,
+        reference.parent_serialization_profile,
+        reference.parent_volume_id_hex,
+        reference.parent_file_id_hex,
+        reference.direct_child_name,
+        reference.expected_sha256,
+        reference.expected_size_bytes,
+        reference._token,
+    )
+
+
+def build_gate_b_v2_pinned_spec_reference(
+    *,
+    parent_absolute_path: Path,
+    parent_identity_scheme: str,
+    parent_serialization_profile: str,
+    parent_volume_id_hex: str,
+    parent_file_id_hex: str,
+    direct_child_name: str,
+    expected_sha256: str,
+    expected_size_bytes: int,
+) -> GateBV2PinnedSpecReference:
+    """Build a closed nominal bootstrap reference without filesystem I/O."""
+    try:
+        parent = validate_gate_b_v2_fixed_local_path(parent_absolute_path, "v2 spec parent")
+        if (
+            parent_identity_scheme != "windows-volume-file-id-v1"
+            or parent_serialization_profile != ROOT_IDENTITY_SERIALIZATION_PROFILE_V2
+            or _VOLUME_RE.fullmatch(parent_volume_id_hex) is None
+            or int(parent_volume_id_hex, 16) == 0
+            or _FILE_RE.fullmatch(parent_file_id_hex) is None
+            or int(parent_file_id_hex, 16) == 0
+            or type(direct_child_name) is not str
+            or _CHILD_RE.fullmatch(direct_child_name) is None
+            or direct_child_name in {".", ".."}
+            or ":" in direct_child_name
+            or type(expected_sha256) is not str
+            or len(expected_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in expected_sha256)
+            or type(expected_size_bytes) is not int
+            or expected_size_bytes <= 0
+        ):
+            _fail("v2 pinned spec-reference fields mismatch")
+        reference = GateBV2PinnedSpecReference(_token=_PINNED_SPEC_TOKEN)
+        values = {
+            "parent_absolute_path": parent,
+            "parent_identity_scheme": parent_identity_scheme,
+            "parent_serialization_profile": parent_serialization_profile,
+            "parent_volume_id_hex": parent_volume_id_hex,
+            "parent_file_id_hex": parent_file_id_hex,
+            "direct_child_name": direct_child_name,
+            "expected_sha256": expected_sha256,
+            "expected_size_bytes": expected_size_bytes,
+            "_token": _PINNED_SPEC_TOKEN,
+        }
+        for name, item in values.items():
+            object.__setattr__(reference, name, item)
+        _PINNED_SPEC_REGISTRY[id(reference)] = _pinned_spec_snapshot(reference)
+        return reference
+    except GateBV2RouteError:
+        raise
+    except (TypeError, ValueError, OSError, OverflowError):
+        _fail("v2 pinned spec-reference fields mismatch")
+
+
+def validate_gate_b_v2_pinned_spec_reference(
+    reference: GateBV2PinnedSpecReference,
+) -> GateBV2PinnedSpecReference:
+    if type(reference) is not GateBV2PinnedSpecReference:
+        _fail("v2 pinned spec-reference nominal type mismatch")
+    try:
+        current = _pinned_spec_snapshot(reference)
+        validate_gate_b_v2_fixed_local_path(reference.parent_absolute_path, "v2 spec parent")
+    except GateBV2RouteError:
+        raise
+    except Exception:
+        _fail("v2 pinned spec-reference provenance mismatch")
+    if (
+        _PINNED_SPEC_REGISTRY.get(id(reference)) != current
+        or reference._token is not _PINNED_SPEC_TOKEN
+    ):
+        _fail("v2 pinned spec-reference provenance mismatch")
+    return reference
+
+
+def _bootstrap_pin(value: object, label: str) -> dict[str, Any]:
+    pin = _closed(value, _PIN_FIELDS, label)
+    parent = validate_gate_b_v2_fixed_local_path(
+        Path(pin["parent_absolute_path"]), f"{label} parent"
+    )
+    if (
+        pin["parent_identity_scheme"] != "windows-volume-file-id-v1"
+        or pin["parent_serialization_profile"] != ROOT_IDENTITY_SERIALIZATION_PROFILE_V2
+        or type(pin["parent_volume_id_hex"]) is not str
+        or _VOLUME_RE.fullmatch(pin["parent_volume_id_hex"]) is None
+        or int(pin["parent_volume_id_hex"], 16) == 0
+        or type(pin["parent_file_id_hex"]) is not str
+        or _FILE_RE.fullmatch(pin["parent_file_id_hex"]) is None
+        or int(pin["parent_file_id_hex"], 16) == 0
+        or type(pin["direct_child_name"]) is not str
+        or _CHILD_RE.fullmatch(pin["direct_child_name"]) is None
+        or pin["direct_child_name"] in {".", ".."}
+        or ":" in pin["direct_child_name"]
+        or type(pin["expected_sha256"]) is not str
+        or len(pin["expected_sha256"]) != 64
+        or any(character not in "0123456789abcdef" for character in pin["expected_sha256"])
+        or type(pin["expected_size_bytes"]) is not int
+        or pin["expected_size_bytes"] <= 0
+    ):
+        _fail(f"{label} fields mismatch")
+    result = dict(pin)
+    result["parent_absolute_path"] = parent
+    return result
+
+
+def _bootstrap_relative_path(value: object) -> str:
+    if type(value) is not str or not value or "\\" in value or ":" in value:
+        _fail("v2 bundle relative path mismatch")
+    path = Path(value)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        _fail("v2 bundle relative path mismatch")
+    return value
+
+
+def _validate_bootstrap_payload(raw: bytes) -> dict[str, Any]:
+    payload = _strict_canonical_object(raw, "v2 route bootstrap")
+    _closed(
+        payload,
+        {
+            "schema_version",
+            "artifact_type",
+            "compatibility_inputs",
+            "phase6_contract_bundle",
+            "execution_inputs",
+        },
+        "v2 route bootstrap",
+    )
+    if (
+        payload["schema_version"] != ROUTE_BOOTSTRAP_V2_SCHEMA_VERSION
+        or payload["artifact_type"] != "gate_b_v2_route_bootstrap"
+    ):
+        _fail("v2 route-bootstrap identity mismatch")
+    compatibility = _closed(
+        payload["compatibility_inputs"],
+        _BOOTSTRAP_INPUT_NAMES,
+        "v2 compatibility inputs",
+    )
+    execution = _closed(
+        payload["execution_inputs"],
+        _EXECUTION_INPUT_NAMES,
+        "v2 execution inputs",
+    )
+    for name, pin in compatibility.items():
+        compatibility[name] = _bootstrap_pin(pin, f"v2 {name}")
+    for name, pin in execution.items():
+        execution[name] = _bootstrap_pin(pin, f"v2 {name}")
+    bundle = _closed(
+        payload["phase6_contract_bundle"],
+        {"root_manifest", "artifacts"},
+        "v2 contract bundle",
+    )
+    bundle["root_manifest"] = _bootstrap_pin(bundle["root_manifest"], "v2 contract root manifest")
+    if type(bundle["artifacts"]) is not list or not bundle["artifacts"]:
+        _fail("v2 contract bundle artifact inventory mismatch")
+    normalized_artifacts = []
+    relative_paths: set[str] = set()
+    for index, value in enumerate(bundle["artifacts"]):
+        item = _closed(value, {"relative_path", "reference"}, "v2 contract artifact")
+        relative = _bootstrap_relative_path(item["relative_path"])
+        if relative in relative_paths:
+            _fail("v2 contract bundle artifact inventory mismatch")
+        relative_paths.add(relative)
+        normalized_artifacts.append(
+            {
+                "relative_path": relative,
+                "reference": _bootstrap_pin(item["reference"], f"v2 contract artifact {index}"),
+            }
+        )
+    bundle["artifacts"] = normalized_artifacts
+    return payload
 
 
 def _descriptor_equal(value: object, expected: Mapping[str, Any], label: str) -> None:
@@ -553,6 +839,9 @@ class GateBV2ExecutionPlan:
     artifact_hashes: Mapping[str, str]
     roots: Mapping[str, Mapping[str, Any]]
     request: GateBLoaderRequest
+    science_commit: str
+    execution_route_commit: str
+    active_module_sources_sha256: str
     operation_timeout_seconds: int
     process_timeout_seconds: int
     _artifacts: Mapping[str, GateBV2StoredArtifactSnapshot] = field(repr=False, compare=False)
@@ -567,6 +856,11 @@ class GateBV2ExecutionPlan:
     def projection(self):
         return self.compatibility_chain.projection
 
+    @property
+    def execution_binding_sha256(self) -> str:
+        """Bind the receipt to the exact closed one-shot spec in this artifact model."""
+        return self.artifact_hashes["one_shot_spec"]
+
 
 def _plan_snapshot(plan: GateBV2ExecutionPlan) -> tuple[object, ...]:
     return (
@@ -579,6 +873,9 @@ def _plan_snapshot(plan: GateBV2ExecutionPlan) -> tuple[object, ...]:
         canonical_json_bytes(_plain(plan.artifact_hashes)),
         canonical_json_bytes(_plain(plan.roots)),
         _request_snapshot(plan.request),
+        plan.science_commit,
+        plan.execution_route_commit,
+        plan.active_module_sources_sha256,
         plan.operation_timeout_seconds,
         plan.process_timeout_seconds,
         tuple((name, artifact) for name, artifact in plan._artifacts.items()),
@@ -718,6 +1015,9 @@ def build_gate_b_v2_execution_plan(
                 _COMPATIBILITY_HASH_FIELD,
                 _BUNDLE_ROOT_HASH_FIELD,
                 _BUNDLE_PROVENANCE_HASH_FIELD,
+                _SCIENCE_COMMIT_FIELD,
+                _ROUTE_COMMIT_FIELD,
+                _ACTIVE_MODULES_HASH_FIELD,
             },
             label="v2 execution context",
         )
@@ -843,6 +1143,9 @@ def build_gate_b_v2_execution_plan(
                 "artifact_type",
                 "projection_descriptor",
                 *_ARTIFACT_HASH_FIELDS,
+                _SCIENCE_COMMIT_FIELD,
+                _ROUTE_COMMIT_FIELD,
+                _ACTIVE_MODULES_HASH_FIELD,
                 "expected_latest_record_sha256",
                 "operation_timeout_seconds",
                 "process_timeout_seconds",
@@ -882,6 +1185,28 @@ def build_gate_b_v2_execution_plan(
         }
         if any(_sha(spec.get(name), name) != digest for name, digest in expected_hashes.items()):
             _fail("v2 one-shot artifact hash join mismatch")
+
+        science_commit = context.get(_SCIENCE_COMMIT_FIELD)
+        execution_route_commit = context.get(_ROUTE_COMMIT_FIELD)
+        active_module_sources_sha256 = context.get(_ACTIVE_MODULES_HASH_FIELD)
+        expected_active_modules_hash = sha256_bytes(
+            canonical_json_bytes(_plain(context_legacy["active_modules"]))
+        )
+        if (
+            type(science_commit) is not str
+            or _OID_RE.fullmatch(science_commit) is None
+            or science_commit != context_legacy["expected_implementation_commit"]
+            or science_commit != batch.payload["git"]["commit_oid"]
+            or type(execution_route_commit) is not str
+            or _OID_RE.fullmatch(execution_route_commit) is None
+            or execution_route_commit == science_commit
+            or _sha(active_module_sources_sha256, "v2 active-module source hash")
+            != expected_active_modules_hash
+            or spec.get(_SCIENCE_COMMIT_FIELD) != science_commit
+            or spec.get(_ROUTE_COMMIT_FIELD) != execution_route_commit
+            or spec.get(_ACTIVE_MODULES_HASH_FIELD) != active_module_sources_sha256
+        ):
+            _fail("v2 science, route, and active-module join mismatch")
 
         readiness_object = GateBReadinessAuthorization(
             readiness_hash,
@@ -929,6 +1254,9 @@ def build_gate_b_v2_execution_plan(
             "artifact_hashes": MappingProxyType(dict(artifact_hashes)),
             "roots": chain.roots,
             "request": request_object,
+            "science_commit": science_commit,
+            "execution_route_commit": execution_route_commit,
+            "active_module_sources_sha256": active_module_sources_sha256,
             "operation_timeout_seconds": 7200,
             "process_timeout_seconds": 7500,
             "_artifacts": MappingProxyType(dict(artifacts)),
@@ -1159,6 +1487,160 @@ def prepare_gate_b_v2_execution_route(
                 with suppress(Exception):
                     directory.close()
         raise
+
+
+def _read_v2_bootstrap_reference(reference: GateBV2PinnedSpecReference) -> bytes:
+    validated = validate_gate_b_v2_pinned_spec_reference(reference)
+    directory = None
+    try:
+        directory = open_gate_b_v2_pinned_directory(
+            validated.parent_absolute_path,
+            serialization_profile=validated.parent_serialization_profile,
+            expected_volume_id_hex=validated.parent_volume_id_hex,
+            expected_file_id_hex=validated.parent_file_id_hex,
+        )
+        return directory.read_regular(
+            validated.direct_child_name,
+            expected_sha256=validated.expected_sha256,
+            expected_size_bytes=validated.expected_size_bytes,
+        ).raw
+    finally:
+        if directory is not None:
+            directory.close()
+
+
+def _read_v2_bootstrap_inputs(
+    payload: Mapping[str, Any],
+) -> tuple[dict[str, bytes], dict[str, Path]]:
+    pins: dict[str, Mapping[str, Any]] = {}
+    pins.update(
+        {f"compatibility:{name}": pin for name, pin in payload["compatibility_inputs"].items()}
+    )
+    pins.update({f"execution:{name}": pin for name, pin in payload["execution_inputs"].items()})
+    bundle = payload["phase6_contract_bundle"]
+    pins["bundle:root_manifest"] = bundle["root_manifest"]
+    pins.update(
+        {
+            f"bundle:artifact:{item['relative_path']}": item["reference"]
+            for item in bundle["artifacts"]
+        }
+    )
+    parent_specs: dict[str, Mapping[str, Any]] = {}
+    for pin in pins.values():
+        key = os.path.normcase(str(pin["parent_absolute_path"]))
+        previous = parent_specs.get(key)
+        if previous is not None and (
+            previous["parent_volume_id_hex"],
+            previous["parent_file_id_hex"],
+            previous["parent_serialization_profile"],
+        ) != (
+            pin["parent_volume_id_hex"],
+            pin["parent_file_id_hex"],
+            pin["parent_serialization_profile"],
+        ):
+            _fail("v2 bootstrap parent identity substitution")
+        parent_specs[key] = pin
+    opened: dict[str, GateBPinnedDirectory] = {}
+    ordered: list[str] = []
+    try:
+        for key in sorted(parent_specs):
+            pin = parent_specs[key]
+            opened[key] = open_gate_b_v2_pinned_directory(
+                pin["parent_absolute_path"],
+                serialization_profile=pin["parent_serialization_profile"],
+                expected_volume_id_hex=pin["parent_volume_id_hex"],
+                expected_file_id_hex=pin["parent_file_id_hex"],
+            )
+            ordered.append(key)
+        raws: dict[str, bytes] = {}
+        paths: dict[str, Path] = {}
+        identities: set[tuple[str, str]] = set()
+        for name, pin in pins.items():
+            key = os.path.normcase(str(pin["parent_absolute_path"]))
+            artifact = opened[key].read_regular(
+                pin["direct_child_name"],
+                expected_sha256=pin["expected_sha256"],
+                expected_size_bytes=pin["expected_size_bytes"],
+            )
+            if artifact.physical_identity in identities:
+                _fail("v2 bootstrap artifact physical alias")
+            identities.add(artifact.physical_identity)
+            raws[name] = artifact.raw
+            paths[name] = Path(pin["parent_absolute_path"]) / pin["direct_child_name"]
+        return raws, paths
+    finally:
+        for key in reversed(ordered):
+            opened[key].close()
+
+
+def prepare_gate_b_v2_execution_route_from_reference(
+    spec_reference: GateBV2PinnedSpecReference,
+) -> PreparedGateBV2ExecutionRoute:
+    """Resolve one closed bootstrap into the exact read-only plan and retained route."""
+    try:
+        bootstrap_raw = _read_v2_bootstrap_reference(spec_reference)
+        payload = _validate_bootstrap_payload(bootstrap_raw)
+        raws, paths = _read_v2_bootstrap_inputs(payload)
+
+        compatibility_request = _strict_canonical_object(
+            raws["compatibility:compatibility_loader_request"],
+            "v2 compatibility loader request",
+        )
+        projection = build_gate_b_preapproval_root_identity_projection_v2(
+            compatibility_request["roots"]
+        )
+        compatibility_chain = build_gate_b_v2_compatibility_trust_chain(
+            projection,
+            approval_record_raw=raws["compatibility:compatibility_approval_record"],
+            signature_record_raw=raws["compatibility:compatibility_signature_record"],
+            readiness_authorization_raw=raws["compatibility:compatibility_readiness_authorization"],
+            root_anchor_raws={
+                "ledger_base": raws["compatibility:ledger_root_anchor"],
+                "quarantine_base": raws["compatibility:quarantine_root_anchor"],
+            },
+            loader_request_raw=raws["compatibility:compatibility_loader_request"],
+        )
+        bundle_artifacts = tuple(
+            CanonicalPhase6ContractArtifact(
+                item["relative_path"],
+                raws[f"bundle:artifact:{item['relative_path']}"],
+                item["reference"]["expected_sha256"],
+            )
+            for item in payload["phase6_contract_bundle"]["artifacts"]
+        )
+        root_pin = payload["phase6_contract_bundle"]["root_manifest"]
+        bundle_evidence = load_phase6_contract_bundle_evidence_from_canonical_artifacts(
+            raws["bundle:root_manifest"],
+            expected_sha256=root_pin["expected_sha256"],
+            artifacts=bundle_artifacts,
+        )
+        execution = {
+            name: (raws[f"execution:{name}"], paths[f"execution:{name}"])
+            for name in _EXECUTION_INPUT_NAMES
+        }
+        plan = build_gate_b_v2_execution_plan(
+            compatibility_chain,
+            phase6_contract_bundle_evidence=bundle_evidence,
+            approval_record_raw=execution["approval_record"][0],
+            approval_record_path=execution["approval_record"][1],
+            signature_record_raw=execution["signature_record"][0],
+            signature_record_path=execution["signature_record"][1],
+            readiness_authorization_raw=execution["readiness_authorization"][0],
+            readiness_authorization_path=execution["readiness_authorization"][1],
+            loader_request_raw=execution["loader_request"][0],
+            loader_request_path=execution["loader_request"][1],
+            execution_context_raw=execution["execution_context"][0],
+            execution_context_path=execution["execution_context"][1],
+            batch_manifest_raw=execution["batch_manifest"][0],
+            batch_manifest_path=execution["batch_manifest"][1],
+            one_shot_spec_raw=execution["one_shot_spec"][0],
+            one_shot_spec_path=execution["one_shot_spec"][1],
+        )
+        return prepare_gate_b_v2_execution_route(plan)
+    except GateBV2RouteError:
+        raise
+    except (GateBContractError, KeyError, TypeError, ValueError, OSError, OverflowError):
+        _fail("Gate B v2 bootstrap failed closed")
 
 
 @dataclass(frozen=True, slots=True, init=False)
