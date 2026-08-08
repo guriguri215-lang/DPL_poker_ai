@@ -42,6 +42,7 @@ from phase6.gate_b_executor import (
 from phase6.gate_b_ledger import (
     GateBLedgerError,
     GateBLedgerStore,
+    _open_quarantine,
 )
 from phase6.gate_b_loader import (
     GateBExecutorFailure,
@@ -1599,7 +1600,11 @@ def _open_with_callback_classification(
         raise
 
 
-def _validate_gate_b_v2_execution_receipt(value: object) -> Mapping[str, Any]:
+def _validate_gate_b_v2_execution_receipt(
+    value: object,
+    *,
+    expected_hashes: Mapping[str, str] | None = None,
+) -> Mapping[str, Any]:
     fields = {
         "schema_version",
         "operation",
@@ -1610,6 +1615,7 @@ def _validate_gate_b_v2_execution_receipt(value: object) -> Mapping[str, Any]:
         "execution_binding_sha256",
         "loader_request_sha256",
         "execution_context_sha256",
+        "execution_route_attestation_sha256",
         "sealed_record_sha256",
         "quarantine_manifest_sha256",
     }
@@ -1624,8 +1630,15 @@ def _validate_gate_b_v2_execution_receipt(value: object) -> Mapping[str, Any]:
         or value["state"] != "SEALED"
     ):
         raise ValueError("v2 execution receipt identity mismatch")
-    for name in fields - {"schema_version", "operation", "status", "attempt_ordinal", "state"}:
+    hash_fields = fields - {"schema_version", "operation", "status", "attempt_ordinal", "state"}
+    for name in hash_fields:
         _sha(value[name], f"v2 receipt {name}")
+    if expected_hashes is not None and (
+        type(expected_hashes) is not dict
+        or set(expected_hashes) != hash_fields
+        or any(value[name] != expected_hashes[name] for name in hash_fields)
+    ):
+        raise ValueError("v2 execution receipt contextual hash mismatch")
     return MappingProxyType(dict(value))
 
 
@@ -1638,6 +1651,7 @@ def _gate_b_v2_receipt_bindings(route: object, request: GateBLoaderRequest) -> d
             "execution_binding_sha256": plan.execution_binding_sha256,
             "loader_request_sha256": plan.request.request_sha256,
             "execution_context_sha256": plan.request.execution_context.sha256,
+            "execution_route_attestation_sha256": plan.execution_route_attestation_sha256,
         }
     roots_hash = sha256_bytes(canonical_json_bytes(_plain(request.roots)))
     binding_hash = sha256_bytes(
@@ -1655,6 +1669,7 @@ def _gate_b_v2_receipt_bindings(route: object, request: GateBLoaderRequest) -> d
         "execution_binding_sha256": binding_hash,
         "loader_request_sha256": request.request_sha256,
         "execution_context_sha256": request.execution_context.sha256,
+        "execution_route_attestation_sha256": binding_hash,
     }
 
 
@@ -1663,25 +1678,61 @@ def _gate_b_v2_execution_receipt(
     request: GateBLoaderRequest,
     receipt: Any,
 ) -> Mapping[str, Any]:
-    if receipt.state != "SEALED" or receipt.attempt_ordinal != 1:
+    if (
+        receipt.state != "SEALED"
+        or receipt.attempt_ordinal != 1
+        or receipt.test_batch_hash != request.batch.test_batch_hash
+        or receipt.executor_id != route.executor.executor_id
+    ):
         raise ValueError("v2 one-shot receipt is not the exact initial SEALED state")
-    chain = GateBLedgerStore(request).load_chain()
-    if not chain or chain[-1].record_sha256 != receipt.sealed_record_sha256:
+    manifest_path = (
+        Path(request.roots["quarantine_base"]["absolute_path"])
+        / request.batch.test_batch_hash
+        / f"attempt-{request.attempt_ordinal:06d}"
+        / "quarantine-manifest.json"
+    )
+    store = GateBLedgerStore(request)
+    chain = store.load_chain()
+    if not chain:
         raise ValueError("v2 sealed ledger receipt mismatch")
     manifest_hash = chain[-1].payload["quarantine_manifest_sha256"]
-    bindings = _gate_b_v2_receipt_bindings(route, request)
-    return _validate_gate_b_v2_execution_receipt(
-        {
-            "schema_version": V2_EXECUTION_RECEIPT_SCHEMA,
-            "operation": "execute-once-v2",
-            "status": "sealed",
-            "attempt_ordinal": 1,
-            "state": "SEALED",
+    with _open_quarantine(request, manifest_path, manifest_hash) as pinned:
+        pinned.verify_identity(request)
+        chain = store.load_chain()
+        if (
+            len(chain) != 3
+            or tuple(record.to_state for record in chain) != ("RESERVED", "STARTED", "SEALED")
+            or any(record.attempt_ordinal != 1 for record in chain)
+            or any(
+                record.payload["test_batch_hash"] != request.batch.test_batch_hash
+                for record in chain
+            )
+            or chain[-2].record_sha256 != receipt.started_record_sha256
+            or chain[-1].record_sha256 != receipt.sealed_record_sha256
+            or chain[-1].payload["quarantine_manifest_sha256"] != manifest_hash
+            or pinned.manifest["status"] != "sealed"
+            or pinned.manifest["started_record_sha256"] != receipt.started_record_sha256
+        ):
+            raise ValueError("v2 sealed ledger receipt mismatch")
+        bindings = _gate_b_v2_receipt_bindings(route, request)
+        receipt_hashes = {
             **bindings,
             "sealed_record_sha256": receipt.sealed_record_sha256,
             "quarantine_manifest_sha256": manifest_hash,
         }
-    )
+        result = _validate_gate_b_v2_execution_receipt(
+            {
+                "schema_version": V2_EXECUTION_RECEIPT_SCHEMA,
+                "operation": "execute-once-v2",
+                "status": "sealed",
+                "attempt_ordinal": 1,
+                "state": "SEALED",
+                **receipt_hashes,
+            },
+            expected_hashes=receipt_hashes,
+        )
+        pinned.verify_identity(request)
+        return result
 
 
 def _execute_prepared_gate_b_v2_once(route: object) -> Mapping[str, Any]:
@@ -1695,13 +1746,19 @@ def _execute_prepared_gate_b_v2_once(route: object) -> Mapping[str, Any]:
         reservation = reserve_gate_b_attempt(request, expected_latest_record_sha256=None)
         prepared = prepare_gate_b_test_open(request, reservation)
         receipt = _open_with_callback_classification(prepared, executor)
-        return _gate_b_v2_execution_receipt(route, request, receipt)
+        try:
+            return _gate_b_v2_execution_receipt(route, request, receipt)
+        except GateBV2RouteError:
+            _raise_sanitized(GateBPreflightError)
     except BaseException as exc:
         primary_error = exc
         raise
     finally:
         try:
             close_gate_b_v2_execution_route(route)
+        except GateBV2RouteError:
+            if primary_error is None:
+                _raise_sanitized(GateBPreflightError)
         except BaseException:
             if primary_error is None:
                 raise

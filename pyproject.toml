@@ -26,6 +26,7 @@ dev = [
 
 [project.scripts]
 poker-xai-export-schemas = "poker_core.schema_export:main"
+poker-xai-gate-b-v2 = "phase6.gate_b_v2_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

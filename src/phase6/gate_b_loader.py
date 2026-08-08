@@ -68,6 +68,41 @@ from phase6.gate_b_ledger import (
     verify_gate_b_v2_retained_root_topology,
 )
 
+# This is the closed execution-route inventory, separate from the unchanged
+# v1 science-module inventory in gate_b_contracts.ACTIVE_MODULE_PATHS.  The
+# commit is supplied by the approved v2 execution context; no source file
+# embeds (and therefore cannot self-reference) a commit hash.
+GATE_B_V2_ROUTE_MODULE_PATHS = (
+    ("phase6.contracts", "src/phase6/contracts.py"),
+    ("phase6.gate_b_contracts", "src/phase6/gate_b_contracts.py"),
+    ("phase6.gate_b_ledger", "src/phase6/gate_b_ledger.py"),
+    ("phase6.gate_b_loader", "src/phase6/gate_b_loader.py"),
+    ("phase6.gate_b_executor", "src/phase6/gate_b_executor.py"),
+    ("phase6.gate_b_v2_route", "src/phase6/gate_b_v2_route.py"),
+    ("phase6.gate_b_orchestrator", "src/phase6/gate_b_orchestrator.py"),
+    ("phase6.gate_b_v2_cli", "src/phase6/gate_b_v2_cli.py"),
+)
+GATE_B_V2_ROUTE_ALLOWED_CHANGE_PATHS = (
+    "src/phase6/gate_b_ledger.py",
+    "src/phase6/gate_b_loader.py",
+    "src/phase6/gate_b_v2_route.py",
+    "src/phase6/gate_b_orchestrator.py",
+    "src/phase6/gate_b_v2_cli.py",
+    "README.md",
+    "docs/gate_b_v2.md",
+    "pyproject.toml",
+    "tests/phase6/test_gate_b_cli.py",
+    "tests/phase6/test_gate_b_contracts.py",
+    "tests/phase6/test_gate_b_executor.py",
+    "tests/phase6/test_gate_b_ledger.py",
+    "tests/phase6/test_gate_b_loader.py",
+    "tests/phase6/test_gate_b_orchestrator.py",
+    "tests/phase6/test_gate_b_v2_cli.py",
+    "tests/phase6/test_gate_b_v2_packaging.py",
+    "tests/phase6/test_gate_b_v2_route.py",
+)
+_OPTIONAL_V2_ROUTE_MODULES = {"phase6.gate_b_v2_cli"}
+
 _SHA_ZERO = "0" * 64
 _MAX_CHUNK = 1048576
 _TIME_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z")
@@ -2050,6 +2085,166 @@ def _module_sources(root: Path, context: GateBExecutionContext) -> list[dict[str
     return verified
 
 
+def _commit_blob(root: Path, commit: str, relative_path: str) -> bytes:
+    value = _run_git(root, "cat-file", "blob", f"{commit}:{relative_path}", text=False)
+    if type(value) is not bytes:
+        raise GateBExecutionEnvironmentFailure("Git blob probe returned invalid bytes")
+    return value
+
+
+def _verify_commit_object(root: Path, commit: str, label: str) -> None:
+    if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        raise GateBExecutionEnvironmentFailure(f"{label} commit identity is invalid")
+    _run_git(root, "cat-file", "-e", f"{commit}^{{commit}}")
+    resolved = _run_git(root, "rev-parse", f"{commit}^{{commit}}").strip()
+    if resolved != commit:
+        raise GateBExecutionEnvironmentFailure(f"{label} is not the exact commit object")
+
+
+def _verify_gate_b_v2_route_diff(
+    root: Path,
+    science_commit: str,
+    route_commit: str,
+) -> tuple[str, ...]:
+    changed = tuple(
+        line
+        for line in _run_git(
+            root,
+            "diff",
+            "--name-only",
+            "--diff-filter=ACDMRTUXB",
+            science_commit,
+            route_commit,
+            "--",
+        ).splitlines()
+        if line
+    )
+    allowed = set(GATE_B_V2_ROUTE_ALLOWED_CHANGE_PATHS)
+    if (
+        not changed
+        or len(changed) != len(set(changed))
+        or any(path not in allowed for path in changed)
+    ):
+        raise GateBExecutionEnvironmentFailure("execution route changed a forbidden source path")
+    return changed
+
+
+def _verify_source_parent_chain(root: Path, path: Path) -> None:
+    if path == root or root not in path.parents:
+        raise GateBExecutionEnvironmentFailure("route source escapes repository")
+    relative = path.relative_to(root)
+    current = root
+    try:
+        for part in relative.parts[:-1]:
+            current = current / part
+            _verify_directory(current, "route source parent")
+    except GateBLedgerError as exc:
+        raise GateBExecutionEnvironmentFailure("route source parent topology mismatch") from exc
+
+
+def _verify_loaded_route_module(module_name: str, expected_path: Path) -> None:
+    module = sys.modules.get(module_name)
+    if module is None:
+        if module_name in _OPTIONAL_V2_ROUTE_MODULES:
+            return
+        raise GateBExecutionEnvironmentFailure("active v2 route module is unavailable")
+    if module.__name__ != module_name or module.__package__ != "phase6":
+        raise GateBExecutionEnvironmentFailure("active v2 route module identity mismatch")
+    spec = getattr(module, "__spec__", None)
+    loader = getattr(spec, "loader", None)
+    if not isinstance(loader, importlib.machinery.SourceFileLoader):
+        raise GateBExecutionEnvironmentFailure("active v2 route module loader is not source-only")
+    expected = os.path.normcase(os.path.abspath(str(expected_path)))
+    origin = os.path.normcase(os.path.abspath(str(getattr(spec, "origin", ""))))
+    module_file = os.path.normcase(os.path.abspath(str(getattr(module, "__file__", ""))))
+    if origin != expected or module_file != expected:
+        raise GateBExecutionEnvironmentFailure("active v2 route module origin mismatch")
+
+
+def _working_tree_source_matches_git_blob(raw: bytes, blob: bytes) -> bool:
+    """Accept only Git's complete LF-to-CRLF Windows checkout transform."""
+    if b"\r" in blob:
+        return False
+    if raw == blob:
+        return True
+    return raw == blob.replace(b"\n", b"\r\n")
+
+
+def _v2_science_module_sources(
+    root: Path,
+    context: GateBExecutionContext,
+    science_commit: str,
+) -> list[dict[str, str]]:
+    verified = []
+    for expected, fixed in zip(context.payload["active_modules"], ACTIVE_MODULE_PATHS, strict=True):
+        module_name, relative_path = fixed
+        blob = _commit_blob(root, science_commit, relative_path)
+        source_hash = sha256_bytes(blob)
+        if (
+            expected["module_name"] != module_name
+            or expected["repository_relative_path"] != relative_path
+            or expected["sha256"] != source_hash
+        ):
+            raise GateBExecutionEnvironmentFailure("science-module commit evidence mismatch")
+        verified.append(
+            {
+                "module_name": module_name,
+                "repository_relative_path": relative_path,
+                "sha256": source_hash,
+            }
+        )
+    return verified
+
+
+def _v2_route_module_sources(root: Path, route_commit: str) -> list[dict[str, str]]:
+    verified = []
+    identities: set[tuple[int, int]] = set()
+    for module_name, relative_path in GATE_B_V2_ROUTE_MODULE_PATHS:
+        expected_path = root / Path(relative_path)
+        _verify_source_parent_chain(root, expected_path)
+        _verify_loaded_route_module(module_name, expected_path)
+        try:
+            before = expected_path.lstat()
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or stat.S_ISLNK(before.st_mode)
+                or before.st_nlink != 1
+                or bool(getattr(before, "st_file_attributes", 0) & 0x400)
+            ):
+                raise GateBExecutionEnvironmentFailure("v2 route source topology mismatch")
+            raw = _read_pinned(expected_path, "v2 route module source")
+            after = expected_path.lstat()
+        except (OSError, GateBLedgerError) as exc:
+            raise GateBExecutionEnvironmentFailure(
+                "v2 route source physical verification failed"
+            ) from exc
+        identity = (before.st_dev, before.st_ino)
+        if identity in identities:
+            raise GateBExecutionEnvironmentFailure("v2 route source physical alias")
+        identities.add(identity)
+        blob = _commit_blob(root, route_commit, relative_path)
+        source_hash = sha256_bytes(blob)
+        if not _working_tree_source_matches_git_blob(raw, blob) or (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+        ) != (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+        ):
+            raise GateBExecutionEnvironmentFailure("v2 route source commit evidence mismatch")
+        verified.append(
+            {
+                "module_name": module_name,
+                "repository_relative_path": relative_path,
+                "sha256": source_hash,
+            }
+        )
+    _verify_helper_bindings()
+    return verified
+
+
 def _runtime_fingerprint() -> dict[str, str]:
     return {
         "python_implementation": platform.python_implementation(),
@@ -2233,6 +2428,118 @@ def _verify_dependency_lock(root: Path, context: GateBExecutionContext) -> str:
         raise GateBExecutionEnvironmentFailure("dependency lock verification failed") from exc
 
 
+def gate_b_v2_route_attestation_sha256(science_commit: str, route_commit: str) -> str:
+    """Hash the external two-commit route declaration without self-reference."""
+    if (
+        type(science_commit) is not str
+        or re.fullmatch(r"[0-9a-f]{40}", science_commit) is None
+        or type(route_commit) is not str
+        or re.fullmatch(r"[0-9a-f]{40}", route_commit) is None
+        or route_commit == science_commit
+    ):
+        raise GateBExecutionEnvironmentFailure("v2 route commit declaration mismatch")
+    return sha256_bytes(
+        canonical_json_bytes(
+            {
+                "schema_version": "phase6-gate-b-v2-route-attestation-v1",
+                "science_commit": science_commit,
+                "execution_route_commit": route_commit,
+                "route_modules": [
+                    {"module_name": module_name, "repository_relative_path": relative_path}
+                    for module_name, relative_path in GATE_B_V2_ROUTE_MODULE_PATHS
+                ],
+                "allowed_change_paths": list(GATE_B_V2_ROUTE_ALLOWED_CHANGE_PATHS),
+            }
+        )
+    )
+
+
+def _verify_gate_b_v2_execution_environment_unchecked(
+    request: GateBLoaderRequest,
+    context: GateBExecutionContext,
+    *,
+    science_commit: str,
+    execution_route_commit: str,
+) -> tuple[GateBExecutionEvidence, str]:
+    """Verify the approved science object and the active route object separately."""
+    if context is not request.execution_context:
+        raise GateBExecutionEnvironmentFailure("execution context object mismatch")
+    if context.payload["expected_implementation_commit"] != science_commit:
+        raise GateBExecutionEnvironmentFailure("science commit declaration mismatch")
+    attestation_sha256 = gate_b_v2_route_attestation_sha256(
+        science_commit,
+        execution_route_commit,
+    )
+    repository_ref = context.payload["repository_root"]
+    root = Path(repository_ref["absolute_path"])
+    if _root_identity_payload(root) != _plain(repository_ref):
+        raise GateBExecutionEnvironmentFailure("repository physical identity mismatch")
+    git_directory = _run_git(root, "rev-parse", "--git-dir")
+    index_path = Path(_run_git(root, "rev-parse", "--git-path", "index").strip())
+    if not index_path.is_absolute():
+        index_path = root / index_path
+    before_index = _file_snapshot(index_path)
+    _verify_commit_object(root, science_commit, "science")
+    _verify_commit_object(root, execution_route_commit, "execution route")
+    _run_git(root, "merge-base", "--is-ancestor", science_commit, execution_route_commit)
+    _verify_gate_b_v2_route_diff(root, science_commit, execution_route_commit)
+    head = _run_git(root, "rev-parse", "HEAD").strip()
+    dirty = _run_git(root, "status", "--porcelain=v1", "--untracked-files=all").strip()
+    staged = _run_git(root, "diff", "--cached", "--name-only").strip()
+    git_dir_path = Path(git_directory.strip())
+    if not git_dir_path.is_absolute():
+        git_dir_path = root / git_dir_path
+    if (
+        head != execution_route_commit
+        or dirty
+        or staged
+        or _path_entry_present_no_follow(git_dir_path / "index.lock")
+    ):
+        raise GateBExecutionEnvironmentFailure("v2 route repository state drifted")
+    science_modules = _v2_science_module_sources(root, context, science_commit)
+    _v2_route_module_sources(root, execution_route_commit)
+    runtime = _runtime_fingerprint()
+    if runtime != _plain(context.payload["runtime_fingerprint"]):
+        raise GateBExecutionEnvironmentFailure("runtime fingerprint drifted")
+    dependency_hash = _verify_dependency_lock(root, context)
+    if _file_snapshot(index_path) != before_index:
+        raise GateBExecutionEnvironmentFailure("repository index changed during read-only probe")
+    return (
+        GateBExecutionEvidence(
+            context.sha256,
+            science_commit,
+            sha256_bytes(canonical_json_bytes(science_modules)),
+            dependency_hash,
+            sha256_bytes(canonical_json_bytes(runtime)),
+        ),
+        attestation_sha256,
+    )
+
+
+@_sanitized_api
+def verify_gate_b_v2_execution_environment(
+    request: GateBLoaderRequest,
+    context: GateBExecutionContext,
+    *,
+    science_commit: str,
+    execution_route_commit: str,
+) -> tuple[GateBExecutionEvidence, str]:
+    """Fail closed unless both Git commits and every active route source bind."""
+    try:
+        return _verify_gate_b_v2_execution_environment_unchecked(
+            request,
+            context,
+            science_commit=science_commit,
+            execution_route_commit=execution_route_commit,
+        )
+    except GateBExecutionEnvironmentFailure:
+        raise
+    except BaseException as exc:
+        raise GateBExecutionEnvironmentFailure(
+            "v2 execution environment verification failed closed"
+        ) from exc
+
+
 def _verify_gate_b_execution_environment_unchecked(
     request: GateBLoaderRequest, context: GateBExecutionContext
 ) -> GateBExecutionEvidence:
@@ -2330,6 +2637,13 @@ def reserve_gate_b_attempt(
     """Create the one durable reservation path before any Test-child open."""
     if is_gate_b_v2_compatibility_object(request):
         _fail("legacy reservation rejects v2 compatibility objects")
+    from phase6.gate_b_v2_route import (
+        claim_gate_b_v2_reservation_authorization,
+        is_gate_b_v2_runtime_request,
+    )
+
+    if is_gate_b_v2_runtime_request(request):
+        claim_gate_b_v2_reservation_authorization(request)
     return _reserve_attempt(request, expected_latest_record_sha256=expected_latest_record_sha256)
 
 
@@ -3363,6 +3677,23 @@ def _complete_failure(
     )
 
 
+def _verify_execution_environment_for_open(
+    request: GateBLoaderRequest,
+) -> GateBExecutionEvidence:
+    """Preserve the v1 API while dispatching only an exact registered v2 request."""
+    from phase6.gate_b_v2_route import (
+        is_gate_b_v2_runtime_request,
+        verify_gate_b_v2_runtime_execution_environment,
+    )
+
+    if is_gate_b_v2_runtime_request(request):
+        return verify_gate_b_v2_runtime_execution_environment(
+            request,
+            request.execution_context,
+        )
+    return verify_gate_b_execution_environment(request, request.execution_context)
+
+
 @_sanitized_api
 def open_gate_b_test_input(
     prepared: PreparedGateBTestOpen, *, executor: GateBApprovedExecutor
@@ -3393,7 +3724,7 @@ def open_gate_b_test_input(
         )
         access = _AccessLog(quarantine.access_log_handle(), request)
         try:
-            evidence = verify_gate_b_execution_environment(request, request.execution_context)
+            evidence = _verify_execution_environment_for_open(request)
         except BaseException as exc:
             try:
                 prepared.close()

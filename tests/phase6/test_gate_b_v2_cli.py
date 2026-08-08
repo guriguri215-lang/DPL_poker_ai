@@ -26,6 +26,7 @@ def _receipt() -> dict[str, object]:
         "execution_binding_sha256": "2" * 64,
         "loader_request_sha256": "3" * 64,
         "execution_context_sha256": "4" * 64,
+        "execution_route_attestation_sha256": "7" * 64,
         "sealed_record_sha256": "5" * 64,
         "quarantine_manifest_sha256": "6" * 64,
     }
@@ -72,7 +73,7 @@ def test_v2_cli_success_emits_only_the_canonical_receipt(
     monkeypatch: pytest.MonkeyPatch,
     capfd: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.setattr(route, "_windows_drive_type", lambda _root: 3)
+    monkeypatch.setattr(cli, "validate_gate_b_v2_fixed_local_path", lambda value, _label: value)
     reference = object()
     monkeypatch.setattr(cli, "build_gate_b_v2_pinned_spec_reference", lambda **_kwargs: reference)
     monkeypatch.setattr(cli, "execute_gate_b_v2_once", lambda value: _receipt())
@@ -164,12 +165,32 @@ def test_nonfixed_volume_rejects_before_reference_construction(
     assert _error(capfd)["error_code"] == "gate_b_invalid_arguments"
 
 
+def test_non_windows_cli_imports_and_fails_closed_before_reference_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(route.os, "name", "posix")
+    monkeypatch.setattr(
+        cli,
+        "build_gate_b_v2_pinned_spec_reference",
+        lambda **_kwargs: pytest.fail("non-Windows path reached reference construction"),
+    )
+    assert cli.main(_argv(tmp_path.resolve())) == 2
+    assert _error(capfd)["error_code"] == "gate_b_invalid_arguments"
+
+
 @pytest.mark.parametrize(
     ("exception", "error_code", "status"),
     [
         ("spec", "gate_b_invalid_spec", 1),
         ("preflight", "gate_b_invalid_preflight", 1),
+        ("contract", "gate_b_contract_error", 1),
+        ("ledger", "gate_b_ledger_error", 1),
+        ("loader", "gate_b_loader_error", 1),
+        ("executor", "gate_b_executor_error", 1),
         ("timeout", "gate_b_operation_timeout", 124),
+        ("orchestrator", "gate_b_orchestrator_error", 1),
         ("interrupt", "gate_b_interrupted", 130),
         ("internal", "gate_b_internal_error", 1),
     ],
@@ -182,7 +203,7 @@ def test_v2_cli_exception_mapping_is_canonical_and_closed(
     monkeypatch: pytest.MonkeyPatch,
     capfd: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.setattr(route, "_windows_drive_type", lambda _root: 3)
+    monkeypatch.setattr(cli, "validate_gate_b_v2_fixed_local_path", lambda value, _label: value)
     monkeypatch.setattr(cli, "build_gate_b_v2_pinned_spec_reference", lambda **_kwargs: object())
 
     def fail(_reference):
@@ -194,12 +215,32 @@ def test_v2_cli_exception_mapping_is_canonical_and_closed(
             from phase6.gate_b_orchestrator import GateBPreflightError
 
             raise GateBPreflightError
+        if exception == "contract":
+            from phase6.gate_b_contracts import GateBContractError
+
+            raise GateBContractError("closed contract fixture")
+        if exception == "ledger":
+            from phase6.gate_b_ledger import GateBLedgerError
+
+            raise GateBLedgerError("closed ledger fixture")
+        if exception == "loader":
+            from phase6.gate_b_loader import GateBLoaderError
+
+            raise GateBLoaderError("closed loader fixture")
+        if exception == "executor":
+            from phase6.gate_b_executor import GateBExecutorError
+
+            raise GateBExecutorError
         if exception == "timeout":
             from phase6.gate_b_executor import GateBDeadlineExceeded
 
             raise GateBDeadlineExceeded
         if exception == "interrupt":
             raise KeyboardInterrupt
+        if exception == "orchestrator":
+            from phase6.gate_b_orchestrator import GateBOrchestratorError
+
+            raise GateBOrchestratorError
         raise RuntimeError("closed internal fixture")
 
     monkeypatch.setattr(cli, "execute_gate_b_v2_once", fail)
@@ -210,3 +251,19 @@ def test_v2_cli_exception_mapping_is_canonical_and_closed(
         "status": "failed",
         "error_code": error_code,
     }
+
+
+def test_huge_decimal_size_is_invalid_arguments_before_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    argv = _argv(tmp_path.resolve())
+    argv[-1] = "9" * 5000
+    monkeypatch.setattr(
+        cli,
+        "build_gate_b_v2_pinned_spec_reference",
+        lambda **_kwargs: pytest.fail("huge decimal reached reference construction"),
+    )
+    assert cli.main(argv) == 2
+    assert _error(capfd)["error_code"] == "gate_b_invalid_arguments"

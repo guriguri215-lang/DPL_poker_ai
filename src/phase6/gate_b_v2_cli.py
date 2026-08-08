@@ -73,7 +73,7 @@ class _Parser(argparse.ArgumentParser):
 
 
 def _parser() -> _Parser:
-    parser = _Parser(prog="phase6_gate_b_v2", add_help=False, allow_abbrev=False)
+    parser = _Parser(prog="poker-xai-gate-b-v2", add_help=False, allow_abbrev=False)
     parser.add_argument("operation")
     parser.add_argument("--spec-parent", required=True)
     parser.add_argument("--spec-parent-identity-scheme", required=True)
@@ -153,10 +153,14 @@ def _dispatch(argv: Sequence[str]) -> Mapping[str, object]:
         or _SHA_RE.fullmatch(namespace.expected_spec_sha256) is None
         or not namespace.expected_spec_size_bytes.isascii()
         or not namespace.expected_spec_size_bytes.isdecimal()
+        or len(namespace.expected_spec_size_bytes) > 19
     ):
         raise _InvalidArguments
-    size = int(namespace.expected_spec_size_bytes, 10)
-    if size <= 0 or str(size) != namespace.expected_spec_size_bytes:
+    try:
+        size = int(namespace.expected_spec_size_bytes, 10)
+    except (ValueError, OverflowError):
+        raise _InvalidArguments from None
+    if not 0 < size < (1 << 63) or str(size) != namespace.expected_spec_size_bytes:
         raise _InvalidArguments
     try:
         reference = build_gate_b_v2_pinned_spec_reference(

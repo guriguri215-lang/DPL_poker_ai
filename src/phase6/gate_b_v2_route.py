@@ -68,9 +68,7 @@ from phase6.gate_b_executor import (
 )
 from phase6.gate_b_ledger import (
     GateBPinnedDirectory,
-    _read_pinned,
     _verify_directory,
-    _verify_regular,
     open_gate_b_v2_pinned_directory,
     verify_gate_b_v2_pinned_directory,
     verify_gate_b_v2_retained_root_topology,
@@ -78,7 +76,8 @@ from phase6.gate_b_ledger import (
 from phase6.gate_b_loader import (
     GateBExecutionEvidence,
     GateBLoaderRequest,
-    verify_gate_b_execution_environment,
+    gate_b_v2_route_attestation_sha256,
+    verify_gate_b_v2_execution_environment,
 )
 
 HUMAN_APPROVAL_RECORD_V4_SCHEMA_VERSION = "phase6-gate-b-human-approval-record-v4"
@@ -97,6 +96,7 @@ _BUNDLE_PROVENANCE_HASH_FIELD = "phase6_contract_bundle_provenance_sha256"
 _SCIENCE_COMMIT_FIELD = "science_commit"
 _ROUTE_COMMIT_FIELD = "execution_route_commit"
 _ACTIVE_MODULES_HASH_FIELD = "active_module_sources_sha256"
+_ROUTE_ATTESTATION_HASH_FIELD = "execution_route_attestation_sha256"
 _ARTIFACT_HASH_FIELDS = {
     _COMPATIBILITY_HASH_FIELD,
     _BUNDLE_ROOT_HASH_FIELD,
@@ -117,6 +117,7 @@ _ROOT_REF_TOKEN = object()
 _DISPOSABLE_AUTHORITY_TOKEN = object()
 _DISPOSABLE_ROUTE_TOKEN = object()
 _PINNED_SPEC_TOKEN = object()
+_INPUT_OWNER_TOKEN = object()
 _ANCHOR_NOT_PROVIDED = object()
 _PLAN_REGISTRY: dict[int, tuple[object, ...]] = {}
 _PREPARED_REGISTRY: dict[int, tuple[object, ...]] = {}
@@ -125,6 +126,9 @@ _ROOT_REF_REGISTRY: dict[int, tuple[object, ...]] = {}
 _DISPOSABLE_AUTHORITY_REGISTRY: dict[int, tuple[object, ...]] = {}
 _DISPOSABLE_ROUTE_REGISTRY: dict[int, tuple[object, ...]] = {}
 _PINNED_SPEC_REGISTRY: dict[int, tuple[object, ...]] = {}
+_INPUT_OWNER_REGISTRY: dict[int, tuple[object, ...]] = {}
+_V2_RUNTIME_REQUEST_PLANS: dict[int, object] = {}
+_V2_RESERVATION_AUTHORIZATIONS: dict[int, tuple[object, object]] = {}
 _DISPOSABLE_USED_AUTHORITIES: set[int] = set()
 
 _OID_RE = re.compile(r"[0-9a-f]{40}\Z")
@@ -232,6 +236,22 @@ def validate_gate_b_v2_fixed_local_path(value: object, label: str) -> Path:
     return value
 
 
+def _validate_embedded_fixed_local_paths(value: object, label: str) -> None:
+    """Reject every declared absolute-path field before retained input acquisition."""
+    if isinstance(value, Mapping):
+        for name, item in value.items():
+            if name == "absolute_path":
+                validate_gate_b_v2_fixed_local_path(
+                    _absolute_path(item, f"{label} absolute path"),
+                    f"{label} absolute path",
+                )
+            else:
+                _validate_embedded_fixed_local_paths(item, label)
+    elif isinstance(value, list | tuple):
+        for item in value:
+            _validate_embedded_fixed_local_paths(item, label)
+
+
 @dataclass(frozen=True, slots=True, init=False)
 class GateBV2PinnedSpecReference:
     """Nominal pinned reference to one closed v2 route-bootstrap manifest."""
@@ -296,7 +316,7 @@ def build_gate_b_v2_pinned_spec_reference(
             or len(expected_sha256) != 64
             or any(character not in "0123456789abcdef" for character in expected_sha256)
             or type(expected_size_bytes) is not int
-            or expected_size_bytes <= 0
+            or not 0 < expected_size_bytes < (1 << 63)
         ):
             _fail("v2 pinned spec-reference fields mismatch")
         reference = GateBV2PinnedSpecReference(_token=_PINNED_SPEC_TOKEN)
@@ -450,6 +470,278 @@ def _descriptor_equal(value: object, expected: Mapping[str, Any], label: str) ->
         _fail(f"{label} projection descriptor mismatch")
 
 
+@dataclass(frozen=True, slots=True)
+class _RetainedInputParent:
+    path: Path
+    serialization_profile: str | None
+    volume_id_hex: str
+    file_id_hex: str
+
+
+@dataclass(frozen=True, slots=True)
+class _RetainedInputArtifact:
+    logical_name: str
+    parent_key: str
+    direct_child_name: str
+    reference_path: Path
+    raw: bytes = field(repr=False)
+    sha256: str
+    size_bytes: int
+    physical_identity: tuple[str, str]
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class _GateBV2RetainedInputOwner:
+    """Own already-verified artifact parents through the pre-write boundary."""
+
+    parents: Mapping[str, _RetainedInputParent]
+    directories: Mapping[str, GateBPinnedDirectory] = field(repr=False, compare=False)
+    artifacts: Mapping[str, _RetainedInputArtifact] = field(repr=False, compare=False)
+    _closed: bool = field(repr=False, compare=False)
+    _token: object = field(repr=False, compare=False)
+
+    def __new__(cls, *, _token: object | None = None) -> _GateBV2RetainedInputOwner:
+        if _token is not _INPUT_OWNER_TOKEN:
+            raise TypeError("v2 retained-input owner construction is private")
+        return object.__new__(cls)
+
+
+def _input_owner_snapshot(owner: _GateBV2RetainedInputOwner) -> tuple[object, ...]:
+    return (
+        owner,
+        tuple(owner.parents.items()),
+        tuple(owner.directories.items()),
+        tuple(owner.artifacts.items()),
+        owner._closed,
+        owner._token,
+    )
+
+
+def _validate_input_owner(
+    owner: _GateBV2RetainedInputOwner,
+    *,
+    reread: bool,
+) -> _GateBV2RetainedInputOwner:
+    if type(owner) is not _GateBV2RetainedInputOwner:
+        _fail("v2 retained-input owner nominal mismatch")
+    try:
+        current = _input_owner_snapshot(owner)
+    except Exception:
+        _fail("v2 retained-input owner provenance mismatch")
+    if (
+        _INPUT_OWNER_REGISTRY.get(id(owner)) != current
+        or owner._token is not _INPUT_OWNER_TOKEN
+        or owner._closed
+    ):
+        _fail("v2 retained-input owner provenance mismatch")
+    try:
+        for key, parent in owner.parents.items():
+            directory = owner.directories[key]
+            if parent.serialization_profile is None:
+                directory.verify_identity()
+            else:
+                verify_gate_b_v2_pinned_directory(
+                    directory,
+                    serialization_profile=parent.serialization_profile,
+                    expected_volume_id_hex=parent.volume_id_hex,
+                    expected_file_id_hex=parent.file_id_hex,
+                )
+        if reread:
+            for artifact in owner.artifacts.values():
+                observed = owner.directories[artifact.parent_key].read_regular(
+                    artifact.direct_child_name,
+                    expected_sha256=artifact.sha256,
+                    expected_size_bytes=artifact.size_bytes,
+                )
+                if (
+                    observed.raw != artifact.raw
+                    or observed.physical_identity != artifact.physical_identity
+                ):
+                    _fail("v2 retained input bytes or physical identity changed")
+    except GateBV2RouteError:
+        raise
+    except Exception:
+        _fail("v2 retained input verification failed closed")
+    return owner
+
+
+def _close_input_owner(owner: _GateBV2RetainedInputOwner) -> None:
+    registered = _INPUT_OWNER_REGISTRY.get(id(owner))
+    if registered is None or registered[0] is not owner:
+        _fail("v2 retained-input owner close provenance mismatch")
+    if registered[4] is True:
+        return
+    first_error: BaseException | None = None
+    for _key, directory in reversed(registered[2]):
+        try:
+            directory.close()
+        except BaseException as exc:
+            if first_error is None:
+                first_error = exc
+    object.__setattr__(owner, "_closed", True)
+    _INPUT_OWNER_REGISTRY[id(owner)] = _input_owner_snapshot(owner)
+    if first_error is not None:
+        _fail("v2 retained-input owner close failed closed")
+
+
+def _validate_input_owner_topology(owners: tuple[_GateBV2RetainedInputOwner, ...]) -> None:
+    parent_identities: dict[tuple[int, int], str] = {}
+    artifact_identities: set[tuple[str, str]] = set()
+    for owner in owners:
+        validated = _validate_input_owner(owner, reread=True)
+        for key, directory in validated.directories.items():
+            identity = directory._expected_identity
+            normalized = os.path.normcase(str(validated.parents[key].path))
+            previous = parent_identities.get(identity)
+            if previous is not None and previous != normalized:
+                _fail("v2 retained input parent physical alias")
+            parent_identities[identity] = normalized
+        for artifact in validated.artifacts.values():
+            if artifact.physical_identity in artifact_identities:
+                _fail("v2 retained input artifact physical alias")
+            artifact_identities.add(artifact.physical_identity)
+
+
+def _open_retained_input_owner(
+    pins: Mapping[str, Mapping[str, Any]],
+    *,
+    supplied_raws: Mapping[str, bytes] | None = None,
+) -> _GateBV2RetainedInputOwner:
+    if type(pins) is not dict or not pins:
+        _fail("v2 retained-input inventory mismatch")
+    normalized_pins: dict[str, dict[str, Any]] = {}
+    parent_declarations: dict[str, dict[str, Any]] = {}
+    # This complete syntactic/fixed-volume pass intentionally precedes every
+    # directory or artifact open, including for the public direct planner.
+    for name, raw_pin in pins.items():
+        pin = dict(raw_pin)
+        parent = validate_gate_b_v2_fixed_local_path(
+            Path(pin["parent_absolute_path"]),
+            f"{name} parent",
+        )
+        direct_child_name = pin["direct_child_name"]
+        if (
+            type(name) is not str
+            or type(direct_child_name) is not str
+            or _CHILD_RE.fullmatch(direct_child_name) is None
+            or direct_child_name in {".", ".."}
+            or ":" in direct_child_name
+            or type(pin["expected_sha256"]) is not str
+            or len(pin["expected_sha256"]) != 64
+            or any(character not in "0123456789abcdef" for character in pin["expected_sha256"])
+            or type(pin["expected_size_bytes"]) is not int
+            or not 0 < pin["expected_size_bytes"] < (1 << 63)
+        ):
+            _fail("v2 retained-input pin mismatch")
+        reference_path = parent / direct_child_name
+        if "reference_path" in pin and pin["reference_path"] != reference_path:
+            _fail("v2 retained-input reference path mismatch")
+        key = os.path.normcase(str(parent))
+        declaration = {
+            "path": parent,
+            "serialization_profile": pin.get("parent_serialization_profile"),
+            "volume_id_hex": pin.get("parent_volume_id_hex"),
+            "file_id_hex": pin.get("parent_file_id_hex"),
+        }
+        previous = parent_declarations.get(key)
+        if previous is not None and previous != declaration:
+            _fail("v2 retained-input parent identity substitution")
+        parent_declarations[key] = declaration
+        pin.update(
+            {
+                "parent_absolute_path": parent,
+                "direct_child_name": direct_child_name,
+                "reference_path": reference_path,
+                "parent_key": key,
+            }
+        )
+        normalized_pins[name] = pin
+
+    opened: dict[str, GateBPinnedDirectory] = {}
+    parents: dict[str, _RetainedInputParent] = {}
+    artifacts: dict[str, _RetainedInputArtifact] = {}
+    try:
+        physical_parents: dict[tuple[int, int], str] = {}
+        for key in sorted(parent_declarations):
+            declaration = parent_declarations[key]
+            parent = declaration["path"]
+            profile = declaration["serialization_profile"]
+            if profile is None:
+                metadata = _verify_directory(parent, "v2 retained artifact parent")
+                volume_id_hex = format(metadata.st_dev, "x")
+                file_id_hex = format(metadata.st_ino, "x")
+                directory = GateBPinnedDirectory.open(
+                    parent,
+                    expected_volume_id_hex=volume_id_hex,
+                    expected_file_id_hex=file_id_hex,
+                )
+            else:
+                volume_id_hex = declaration["volume_id_hex"]
+                file_id_hex = declaration["file_id_hex"]
+                directory = open_gate_b_v2_pinned_directory(
+                    parent,
+                    serialization_profile=profile,
+                    expected_volume_id_hex=volume_id_hex,
+                    expected_file_id_hex=file_id_hex,
+                )
+            identity = directory._expected_identity
+            previous = physical_parents.get(identity)
+            if previous is not None and previous != key:
+                _fail("v2 retained input parent physical alias")
+            physical_parents[identity] = key
+            opened[key] = directory
+            parents[key] = _RetainedInputParent(
+                parent,
+                profile,
+                volume_id_hex,
+                file_id_hex,
+            )
+        physical_artifacts: set[tuple[str, str]] = set()
+        for name, pin in normalized_pins.items():
+            artifact = opened[pin["parent_key"]].read_regular(
+                pin["direct_child_name"],
+                expected_sha256=pin["expected_sha256"],
+                expected_size_bytes=pin["expected_size_bytes"],
+            )
+            supplied = None if supplied_raws is None else supplied_raws.get(name)
+            if supplied_raws is not None and (
+                type(supplied) is not bytes or artifact.raw != supplied
+            ):
+                _fail("v2 retained input differs from supplied bytes")
+            if artifact.physical_identity in physical_artifacts:
+                _fail("v2 retained input artifact physical alias")
+            physical_artifacts.add(artifact.physical_identity)
+            artifacts[name] = _RetainedInputArtifact(
+                name,
+                pin["parent_key"],
+                pin["direct_child_name"],
+                pin["reference_path"],
+                artifact.raw,
+                artifact.sha256,
+                artifact.size_bytes,
+                artifact.physical_identity,
+            )
+        owner = _GateBV2RetainedInputOwner(_token=_INPUT_OWNER_TOKEN)
+        values = {
+            "parents": MappingProxyType(dict(parents)),
+            "directories": MappingProxyType(dict(opened)),
+            "artifacts": MappingProxyType(dict(artifacts)),
+            "_closed": False,
+            "_token": _INPUT_OWNER_TOKEN,
+        }
+        for name, value in values.items():
+            object.__setattr__(owner, name, value)
+        _INPUT_OWNER_REGISTRY[id(owner)] = _input_owner_snapshot(owner)
+        return _validate_input_owner(owner, reread=True)
+    except BaseException as exc:
+        for key in reversed(tuple(opened)):
+            with suppress(Exception):
+                opened[key].close()
+        if isinstance(exc, GateBV2RouteError):
+            raise
+        _fail("v2 retained-input acquisition failed closed")
+
+
 def _legacy_payload(
     payload: dict[str, Any],
     *,
@@ -502,8 +794,6 @@ def _artifact_snapshot_tuple(snapshot: GateBV2StoredArtifactSnapshot) -> tuple[o
 
 def _validate_stored_artifact(
     snapshot: GateBV2StoredArtifactSnapshot,
-    *,
-    reread: bool,
 ) -> GateBV2StoredArtifactSnapshot:
     if type(snapshot) is not GateBV2StoredArtifactSnapshot:
         _fail("v2 stored-artifact nominal type mismatch")
@@ -520,20 +810,6 @@ def _validate_stored_artifact(
         or sha256_bytes(snapshot.raw) != snapshot.sha256
     ):
         _fail("v2 stored-artifact provenance mismatch")
-    if reread:
-        try:
-            before = _verify_regular(snapshot.reference_path, snapshot.logical_role)
-            observed = _read_pinned(snapshot.reference_path, snapshot.logical_role)
-            after = _verify_regular(snapshot.reference_path, snapshot.logical_role)
-        except Exception:
-            _fail("v2 stored-artifact pinned reread failed")
-        identity = (before.st_dev, before.st_ino)
-        if (
-            identity != snapshot.physical_identity
-            or (after.st_dev, after.st_ino) != identity
-            or observed != snapshot.raw
-        ):
-            _fail("v2 stored-artifact bytes or identity changed")
     return snapshot
 
 
@@ -541,6 +817,8 @@ def _load_stored_artifact(
     raw: object,
     path: object,
     label: str,
+    *,
+    retained: _RetainedInputArtifact | None = None,
 ) -> tuple[GateBV2StoredArtifactSnapshot, dict[str, Any]]:
     if type(raw) is not bytes or type(path) is not type(Path()):
         _fail(f"{label} stored input type mismatch")
@@ -548,14 +826,17 @@ def _load_stored_artifact(
     owned = bytes(raw)
     try:
         payload = _strict_canonical_object(owned, label)
-        before = _verify_regular(reference, label)
-        observed = _read_pinned(reference, label)
-        after = _verify_regular(reference, label)
     except Exception:
         _fail(f"{label} stored-byte acquisition failed")
-    identity = (before.st_dev, before.st_ino)
-    if observed != owned or (after.st_dev, after.st_ino) != identity:
-        _fail(f"{label} stored bytes do not match the supplied snapshot")
+    if (
+        type(retained) is not _RetainedInputArtifact
+        or retained.reference_path != reference
+        or retained.raw != owned
+        or retained.sha256 != sha256_bytes(owned)
+        or retained.size_bytes != len(owned)
+    ):
+        _fail(f"{label} retained stored-byte acquisition mismatch")
+    identity = (int(retained.physical_identity[0], 16), int(retained.physical_identity[1], 16))
     snapshot = GateBV2StoredArtifactSnapshot(_token=_ARTIFACT_TOKEN)
     values = {
         "logical_role": label,
@@ -569,7 +850,7 @@ def _load_stored_artifact(
     for name, value in values.items():
         object.__setattr__(snapshot, name, value)
     _ARTIFACT_REGISTRY[id(snapshot)] = _artifact_snapshot_tuple(snapshot)
-    return _validate_stored_artifact(snapshot, reread=False), payload
+    return _validate_stored_artifact(snapshot), payload
 
 
 def _validate_execution_human_and_readiness(
@@ -842,9 +1123,12 @@ class GateBV2ExecutionPlan:
     science_commit: str
     execution_route_commit: str
     active_module_sources_sha256: str
+    execution_route_attestation_sha256: str
     operation_timeout_seconds: int
     process_timeout_seconds: int
     _artifacts: Mapping[str, GateBV2StoredArtifactSnapshot] = field(repr=False, compare=False)
+    _input_owners: tuple[_GateBV2RetainedInputOwner, ...] = field(repr=False, compare=False)
+    _closed: bool = field(repr=False, compare=False)
     _token: object = field(repr=False, compare=False)
 
     def __new__(cls, *, _token: object | None = None) -> GateBV2ExecutionPlan:
@@ -876,9 +1160,12 @@ def _plan_snapshot(plan: GateBV2ExecutionPlan) -> tuple[object, ...]:
         plan.science_commit,
         plan.execution_route_commit,
         plan.active_module_sources_sha256,
+        plan.execution_route_attestation_sha256,
         plan.operation_timeout_seconds,
         plan.process_timeout_seconds,
         tuple((name, artifact) for name, artifact in plan._artifacts.items()),
+        plan._input_owners,
+        plan._closed,
         plan._token,
     )
 
@@ -889,6 +1176,11 @@ def validate_gate_b_v2_execution_plan(plan: GateBV2ExecutionPlan) -> GateBV2Exec
     try:
         validate_gate_b_v2_compatibility_trust_chain(plan.compatibility_chain)
         validate_phase6_contract_bundle_evidence(plan.phase6_contract_bundle_evidence)
+        if plan.execution_route_attestation_sha256 != gate_b_v2_route_attestation_sha256(
+            plan.science_commit,
+            plan.execution_route_commit,
+        ):
+            _fail("v2 execution-route attestation provenance mismatch")
         current = _plan_snapshot(plan)
     except GateBV2RouteError:
         raise
@@ -904,9 +1196,47 @@ def validate_gate_b_v2_execution_plan(plan: GateBV2ExecutionPlan) -> GateBV2Exec
         or plan._token is not _PLAN_TOKEN
     ):
         _fail("v2 execution-plan provenance mismatch")
+    _validate_input_owner_topology(plan._input_owners)
     for snapshot in plan._artifacts.values():
-        _validate_stored_artifact(snapshot, reread=True)
+        _validate_stored_artifact(snapshot)
     return plan
+
+
+def close_gate_b_v2_execution_plan(plan: GateBV2ExecutionPlan) -> None:
+    """Close an unprepared plan, using only its registered owner snapshot."""
+    registered = _PLAN_REGISTRY.get(id(plan))
+    if registered is None:
+        if type(plan) is GateBV2ExecutionPlan and plan._closed and plan._token is _PLAN_TOKEN:
+            return
+        _fail("v2 execution-plan close provenance mismatch")
+    if registered[0] is not plan:
+        _fail("v2 execution-plan close provenance mismatch")
+    validation_error: BaseException | None = None
+    try:
+        if registered != _plan_snapshot(plan) or plan._token is not _PLAN_TOKEN:
+            _fail("v2 execution-plan close provenance mismatch")
+    except BaseException as exc:
+        validation_error = exc
+    first_error: BaseException | None = None
+    registered_owners = registered[-3]
+    for owner in reversed(registered_owners):
+        try:
+            _close_input_owner(owner)
+        except BaseException as exc:
+            if first_error is None:
+                first_error = exc
+    registered_request = registered[8][0]
+    if _V2_RUNTIME_REQUEST_PLANS.get(id(registered_request)) is plan:
+        _V2_RUNTIME_REQUEST_PLANS.pop(id(registered_request), None)
+    authorization = _V2_RESERVATION_AUTHORIZATIONS.get(id(registered_request))
+    if authorization is not None and authorization[0] is registered_request:
+        _V2_RESERVATION_AUTHORIZATIONS.pop(id(registered_request), None)
+    object.__setattr__(plan, "_closed", True)
+    _PLAN_REGISTRY.pop(id(plan), None)
+    if validation_error is not None:
+        _fail("v2 execution-plan close provenance mismatch")
+    if first_error is not None:
+        _fail("v2 execution-plan close failed closed")
 
 
 def build_gate_b_v2_execution_plan(
@@ -927,19 +1257,15 @@ def build_gate_b_v2_execution_plan(
     batch_manifest_path: Path,
     one_shot_spec_raw: bytes,
     one_shot_spec_path: Path,
+    _retained_input_owner: _GateBV2RetainedInputOwner | None = None,
+    _retained_input_keys: Mapping[str, str] | None = None,
+    _additional_input_owners: tuple[_GateBV2RetainedInputOwner, ...] = (),
 ) -> GateBV2ExecutionPlan:
-    """Read and validate the complete execution DAG without opening or writing roots."""
+    """Build a retained plan; hand it to prepare or close it explicitly without writing roots."""
+    created_owner: _GateBV2RetainedInputOwner | None = None
+    registered_plan: GateBV2ExecutionPlan | None = None
     try:
-        chain = validate_gate_b_v2_compatibility_trust_chain(compatibility_chain)
-        validate_phase6_contract_bundle_evidence(phase6_contract_bundle_evidence)
-        bundle_evidence = phase6_contract_bundle_evidence
-        projection = chain.projection
-        descriptor = dict(gate_b_root_identity_projection_descriptor_v2(projection))
-        compatibility_request_hash = chain.artifact_hashes["loader_request"]
-
-        artifacts: dict[str, GateBV2StoredArtifactSnapshot] = {}
-        payloads: dict[str, dict[str, Any]] = {}
-        for name, raw, path, label in (
+        input_rows = (
             ("approval_record", approval_record_raw, approval_record_path, "v2 execution approval"),
             (
                 "signature_record",
@@ -962,8 +1288,83 @@ def build_gate_b_v2_execution_plan(
             ),
             ("batch_manifest", batch_manifest_raw, batch_manifest_path, "v2 batch manifest"),
             ("one_shot_spec", one_shot_spec_raw, one_shot_spec_path, "v2 one-shot spec"),
+        )
+        validated_paths: dict[str, Path] = {}
+        for name, raw, path, label in input_rows:
+            if type(raw) is not bytes or type(path) is not type(Path()):
+                _fail(f"{label} stored input type mismatch")
+            validated_paths[name] = validate_gate_b_v2_fixed_local_path(path, f"{label} path")
+
+        chain = validate_gate_b_v2_compatibility_trust_chain(compatibility_chain)
+        validate_phase6_contract_bundle_evidence(phase6_contract_bundle_evidence)
+        bundle_evidence = phase6_contract_bundle_evidence
+        projection = chain.projection
+        descriptor = dict(gate_b_root_identity_projection_descriptor_v2(projection))
+        compatibility_request_hash = chain.artifact_hashes["loader_request"]
+        for role in _ROOT_ROLES:
+            validate_gate_b_v2_fixed_local_path(
+                Path(chain.roots[role]["absolute_path"]),
+                f"v2 {role} root",
+            )
+
+        # The exact supplied bytes are already available to the public
+        # planner.  Parse all embedded absolute-path declarations before the
+        # first retained parent is acquired, including late request/context
+        # fields that otherwise would be discovered only after earlier opens.
+        for name, raw, _path, label in input_rows:
+            _validate_embedded_fixed_local_paths(
+                _strict_canonical_object(raw, label),
+                f"v2 {name}",
+            )
+
+        supplied_raws = {name: raw for name, raw, _path, _label in input_rows}
+        if _retained_input_owner is None:
+            direct_pins = {
+                name: {
+                    "parent_absolute_path": validated_paths[name].parent,
+                    "direct_child_name": validated_paths[name].name,
+                    "expected_sha256": sha256_bytes(raw),
+                    "expected_size_bytes": len(raw),
+                    "reference_path": validated_paths[name],
+                }
+                for name, raw, _path, _label in input_rows
+            }
+            input_owner = _open_retained_input_owner(direct_pins, supplied_raws=supplied_raws)
+            created_owner = input_owner
+            input_keys = {name: name for name in supplied_raws}
+        else:
+            input_owner = _validate_input_owner(_retained_input_owner, reread=True)
+            if type(_retained_input_keys) is not dict or set(_retained_input_keys) != set(
+                supplied_raws
+            ):
+                _fail("v2 retained execution-input key inventory mismatch")
+            input_keys = dict(_retained_input_keys)
+            for name, raw in supplied_raws.items():
+                retained = input_owner.artifacts.get(input_keys[name])
+                if (
+                    type(retained) is not _RetainedInputArtifact
+                    or retained.reference_path != validated_paths[name]
+                    or retained.raw != raw
+                ):
+                    _fail("v2 retained execution input continuity mismatch")
+        input_owners = (*_additional_input_owners, input_owner)
+        if (
+            not input_owners
+            or any(type(owner) is not _GateBV2RetainedInputOwner for owner in input_owners)
+            or len({id(owner) for owner in input_owners}) != len(input_owners)
         ):
-            snapshot, payload = _load_stored_artifact(raw, path, label)
+            _fail("v2 retained-input owner inventory mismatch")
+        _validate_input_owner_topology(input_owners)
+
+        artifacts: dict[str, GateBV2StoredArtifactSnapshot] = {}
+        payloads: dict[str, dict[str, Any]] = {}
+        for name, raw, path, label in input_rows:
+            snapshot, payload = _load_stored_artifact(
+                raw,
+                path,
+                label,
+                retained=input_owner.artifacts[input_keys[name]],
+            )
             artifacts[name] = snapshot
             payloads[name] = payload
 
@@ -1018,8 +1419,17 @@ def build_gate_b_v2_execution_plan(
                 _SCIENCE_COMMIT_FIELD,
                 _ROUTE_COMMIT_FIELD,
                 _ACTIVE_MODULES_HASH_FIELD,
+                _ROUTE_ATTESTATION_HASH_FIELD,
             },
             label="v2 execution context",
+        )
+        validate_gate_b_v2_fixed_local_path(
+            Path(context_legacy["repository_root"]["absolute_path"]),
+            "v2 execution repository",
+        )
+        validate_gate_b_v2_fixed_local_path(
+            Path(context_legacy["dependency_lock"]["absolute_path"]),
+            "v2 execution dependency lock",
         )
         try:
             _validate_execution_context(context_legacy)
@@ -1066,7 +1476,11 @@ def build_gate_b_v2_execution_plan(
             reference = _closed(request_legacy[field_name], {"absolute_path", "sha256"}, field_name)
             artifact = artifacts[artifact_name]
             if (
-                _absolute_path(reference["absolute_path"], field_name) != artifact.reference_path
+                validate_gate_b_v2_fixed_local_path(
+                    _absolute_path(reference["absolute_path"], field_name),
+                    field_name,
+                )
+                != artifact.reference_path
                 or _sha(reference["sha256"], field_name) != artifact.sha256
             ):
                 _fail("v2 execution request artifact reference mismatch")
@@ -1146,6 +1560,7 @@ def build_gate_b_v2_execution_plan(
                 _SCIENCE_COMMIT_FIELD,
                 _ROUTE_COMMIT_FIELD,
                 _ACTIVE_MODULES_HASH_FIELD,
+                _ROUTE_ATTESTATION_HASH_FIELD,
                 "expected_latest_record_sha256",
                 "operation_timeout_seconds",
                 "process_timeout_seconds",
@@ -1189,8 +1604,18 @@ def build_gate_b_v2_execution_plan(
         science_commit = context.get(_SCIENCE_COMMIT_FIELD)
         execution_route_commit = context.get(_ROUTE_COMMIT_FIELD)
         active_module_sources_sha256 = context.get(_ACTIVE_MODULES_HASH_FIELD)
+        declared_route_attestation_sha256 = context.get(_ROUTE_ATTESTATION_HASH_FIELD)
         expected_active_modules_hash = sha256_bytes(
             canonical_json_bytes(_plain(context_legacy["active_modules"]))
+        )
+        expected_route_attestation_sha256 = (
+            gate_b_v2_route_attestation_sha256(science_commit, execution_route_commit)
+            if type(science_commit) is str
+            and _OID_RE.fullmatch(science_commit) is not None
+            and type(execution_route_commit) is str
+            and _OID_RE.fullmatch(execution_route_commit) is not None
+            and science_commit != execution_route_commit
+            else None
         )
         if (
             type(science_commit) is not str
@@ -1205,8 +1630,15 @@ def build_gate_b_v2_execution_plan(
             or spec.get(_SCIENCE_COMMIT_FIELD) != science_commit
             or spec.get(_ROUTE_COMMIT_FIELD) != execution_route_commit
             or spec.get(_ACTIVE_MODULES_HASH_FIELD) != active_module_sources_sha256
+            or _sha(
+                declared_route_attestation_sha256,
+                "v2 execution-route attestation hash",
+            )
+            != expected_route_attestation_sha256
+            or spec.get(_ROUTE_ATTESTATION_HASH_FIELD) != declared_route_attestation_sha256
         ):
             _fail("v2 science, route, and active-module join mismatch")
+        execution_route_attestation_sha256 = declared_route_attestation_sha256
 
         readiness_object = GateBReadinessAuthorization(
             readiness_hash,
@@ -1257,19 +1689,91 @@ def build_gate_b_v2_execution_plan(
             "science_commit": science_commit,
             "execution_route_commit": execution_route_commit,
             "active_module_sources_sha256": active_module_sources_sha256,
+            "execution_route_attestation_sha256": execution_route_attestation_sha256,
             "operation_timeout_seconds": 7200,
             "process_timeout_seconds": 7500,
             "_artifacts": MappingProxyType(dict(artifacts)),
+            "_input_owners": input_owners,
+            "_closed": False,
             "_token": _PLAN_TOKEN,
         }
         for name, value in values.items():
             object.__setattr__(plan, name, value)
         _PLAN_REGISTRY[id(plan)] = _plan_snapshot(plan)
-        return validate_gate_b_v2_execution_plan(plan)
+        registered_plan = plan
+        validated_plan = validate_gate_b_v2_execution_plan(plan)
+        _V2_RUNTIME_REQUEST_PLANS[id(plan.request)] = plan
+        created_owner = None
+        return validated_plan
     except GateBV2RouteError:
+        if registered_plan is not None:
+            with suppress(Exception):
+                close_gate_b_v2_execution_plan(registered_plan)
+        elif created_owner is not None:
+            with suppress(Exception):
+                _close_input_owner(created_owner)
         raise
     except (GateBContractError, KeyError, TypeError, ValueError, OverflowError, OSError):
+        if registered_plan is not None:
+            with suppress(Exception):
+                close_gate_b_v2_execution_plan(registered_plan)
+        elif created_owner is not None:
+            with suppress(Exception):
+                _close_input_owner(created_owner)
         _fail("Gate B v2 execution plan failed closed")
+
+
+def is_gate_b_v2_runtime_request(value: object) -> bool:
+    plan = _V2_RUNTIME_REQUEST_PLANS.get(id(value))
+    return (
+        type(value) is GateBLoaderRequest
+        and type(plan) is GateBV2ExecutionPlan
+        and plan.request is value
+    )
+
+
+def claim_gate_b_v2_reservation_authorization(request: GateBLoaderRequest) -> None:
+    """Consume the one reserve capability minted only by route.consume()."""
+    authorization = _V2_RESERVATION_AUTHORIZATIONS.pop(id(request), None)
+    if (
+        authorization is None
+        or authorization[0] is not request
+        or type(authorization[1]) is not PreparedGateBV2ExecutionRoute
+    ):
+        _fail("v2 reservation is not authorized by a consumed route")
+    route = authorization[1]
+    validated = validate_prepared_gate_b_v2_execution_route(route)
+    if validated.request is not request or validated._closed or not validated._consumed:
+        _fail("v2 reservation authorization provenance mismatch")
+
+
+def verify_gate_b_v2_runtime_execution_environment(
+    request: GateBLoaderRequest,
+    context: GateBExecutionContext,
+) -> GateBExecutionEvidence:
+    """Resolve an exact registered request to its approved two-commit plan."""
+    plan = _V2_RUNTIME_REQUEST_PLANS.get(id(request))
+    if type(plan) is not GateBV2ExecutionPlan or plan.request is not request:
+        _fail("v2 runtime request provenance mismatch")
+    validated = validate_gate_b_v2_execution_plan(plan)
+    try:
+        evidence, attestation_sha256 = verify_gate_b_v2_execution_environment(
+            request,
+            context,
+            science_commit=validated.science_commit,
+            execution_route_commit=validated.execution_route_commit,
+        )
+    except Exception:
+        _fail("v2 execution environment failed closed")
+    if (
+        type(evidence) is not GateBExecutionEvidence
+        or evidence.execution_context_sha256 != request.execution_context.sha256
+        or evidence.implementation_commit != validated.science_commit
+        or evidence.active_module_sources_sha256 != validated.active_module_sources_sha256
+        or attestation_sha256 != validated.execution_route_attestation_sha256
+    ):
+        _fail("v2 execution environment evidence join mismatch")
+    return evidence
 
 
 def _executor_snapshot(executor: GateBProductionExecutor) -> tuple[object, ...]:
@@ -1342,7 +1846,7 @@ class PreparedGateBV2ExecutionRoute:
             if retained.raw != expected_raw:
                 _fail("published v2 root anchor changed before reservation")
         try:
-            evidence = verify_gate_b_execution_environment(
+            evidence = verify_gate_b_v2_runtime_execution_environment(
                 plan.request,
                 plan.request.execution_context,
             )
@@ -1359,6 +1863,9 @@ class PreparedGateBV2ExecutionRoute:
         self.verify_pre_write()
         object.__setattr__(self, "_consumed", True)
         _PREPARED_REGISTRY[id(self)] = _prepared_snapshot(self)
+        if id(self.request) in _V2_RESERVATION_AUTHORIZATIONS:
+            _fail("v2 reservation authorization already exists")
+        _V2_RESERVATION_AUTHORIZATIONS[id(self.request)] = (self.request, self)
         return self.request, self.executor
 
     def close(self) -> None:
@@ -1369,19 +1876,33 @@ class PreparedGateBV2ExecutionRoute:
         registered_closed = bool(
             registered is not None and registered[0] is self and registered[5] is True
         )
+        if registered_closed:
+            try:
+                if registered != _prepared_snapshot(self) or self._token is not _PREPARED_TOKEN:
+                    _fail("v2 retained-root close provenance failed closed")
+            except GateBV2RouteError:
+                raise
+            except Exception:
+                _fail("v2 retained-root close provenance failed closed")
+            return
         validation_error: BaseException | None = None
         try:
             validate_prepared_gate_b_v2_execution_route(self)
         except BaseException as exc:
             validation_error = exc
-        if registered_closed:
-            if validation_error is not None:
-                _fail("v2 retained-root close provenance failed closed")
-            return
         first_error: BaseException | None = None
         for role in reversed(_ROOT_ROLES):
             try:
                 registered_directories[role].close()
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+        registered_plan = (
+            registered[1] if registered is not None and registered[0] is self else None
+        )
+        if type(registered_plan) is GateBV2ExecutionPlan:
+            try:
+                close_gate_b_v2_execution_plan(registered_plan)
             except BaseException as exc:
                 if first_error is None:
                     first_error = exc
@@ -1452,8 +1973,12 @@ def prepare_gate_b_v2_execution_route(
         )
         executor_provenance = _executor_snapshot(executor)
     except GateBV2RouteError:
+        with suppress(Exception):
+            close_gate_b_v2_execution_plan(validated)
         raise
     except Exception:
+        with suppress(Exception):
+            close_gate_b_v2_execution_plan(validated)
         _fail("v2 production executor construction failed closed")
     opened: dict[str, GateBPinnedDirectory] = {}
     try:
@@ -1486,32 +2011,34 @@ def prepare_gate_b_v2_execution_route(
             if directory is not None:
                 with suppress(Exception):
                     directory.close()
+        with suppress(Exception):
+            close_gate_b_v2_execution_plan(validated)
         raise
 
 
-def _read_v2_bootstrap_reference(reference: GateBV2PinnedSpecReference) -> bytes:
+def _read_v2_bootstrap_reference(
+    reference: GateBV2PinnedSpecReference,
+) -> tuple[bytes, _GateBV2RetainedInputOwner]:
     validated = validate_gate_b_v2_pinned_spec_reference(reference)
-    directory = None
-    try:
-        directory = open_gate_b_v2_pinned_directory(
-            validated.parent_absolute_path,
-            serialization_profile=validated.parent_serialization_profile,
-            expected_volume_id_hex=validated.parent_volume_id_hex,
-            expected_file_id_hex=validated.parent_file_id_hex,
-        )
-        return directory.read_regular(
-            validated.direct_child_name,
-            expected_sha256=validated.expected_sha256,
-            expected_size_bytes=validated.expected_size_bytes,
-        ).raw
-    finally:
-        if directory is not None:
-            directory.close()
+    owner = _open_retained_input_owner(
+        {
+            "bootstrap": {
+                "parent_absolute_path": validated.parent_absolute_path,
+                "parent_serialization_profile": validated.parent_serialization_profile,
+                "parent_volume_id_hex": validated.parent_volume_id_hex,
+                "parent_file_id_hex": validated.parent_file_id_hex,
+                "direct_child_name": validated.direct_child_name,
+                "expected_sha256": validated.expected_sha256,
+                "expected_size_bytes": validated.expected_size_bytes,
+            }
+        }
+    )
+    return owner.artifacts["bootstrap"].raw, owner
 
 
 def _read_v2_bootstrap_inputs(
     payload: Mapping[str, Any],
-) -> tuple[dict[str, bytes], dict[str, Path]]:
+) -> tuple[dict[str, bytes], dict[str, Path], _GateBV2RetainedInputOwner]:
     pins: dict[str, Mapping[str, Any]] = {}
     pins.update(
         {f"compatibility:{name}": pin for name, pin in payload["compatibility_inputs"].items()}
@@ -1540,47 +2067,23 @@ def _read_v2_bootstrap_inputs(
         ):
             _fail("v2 bootstrap parent identity substitution")
         parent_specs[key] = pin
-    opened: dict[str, GateBPinnedDirectory] = {}
-    ordered: list[str] = []
-    try:
-        for key in sorted(parent_specs):
-            pin = parent_specs[key]
-            opened[key] = open_gate_b_v2_pinned_directory(
-                pin["parent_absolute_path"],
-                serialization_profile=pin["parent_serialization_profile"],
-                expected_volume_id_hex=pin["parent_volume_id_hex"],
-                expected_file_id_hex=pin["parent_file_id_hex"],
-            )
-            ordered.append(key)
-        raws: dict[str, bytes] = {}
-        paths: dict[str, Path] = {}
-        identities: set[tuple[str, str]] = set()
-        for name, pin in pins.items():
-            key = os.path.normcase(str(pin["parent_absolute_path"]))
-            artifact = opened[key].read_regular(
-                pin["direct_child_name"],
-                expected_sha256=pin["expected_sha256"],
-                expected_size_bytes=pin["expected_size_bytes"],
-            )
-            if artifact.physical_identity in identities:
-                _fail("v2 bootstrap artifact physical alias")
-            identities.add(artifact.physical_identity)
-            raws[name] = artifact.raw
-            paths[name] = Path(pin["parent_absolute_path"]) / pin["direct_child_name"]
-        return raws, paths
-    finally:
-        for key in reversed(ordered):
-            opened[key].close()
+    owner = _open_retained_input_owner(dict(pins))
+    raws = {name: owner.artifacts[name].raw for name in pins}
+    paths = {name: owner.artifacts[name].reference_path for name in pins}
+    return raws, paths, owner
 
 
 def prepare_gate_b_v2_execution_route_from_reference(
     spec_reference: GateBV2PinnedSpecReference,
 ) -> PreparedGateBV2ExecutionRoute:
     """Resolve one closed bootstrap into the exact read-only plan and retained route."""
+    spec_owner: _GateBV2RetainedInputOwner | None = None
+    input_owner: _GateBV2RetainedInputOwner | None = None
     try:
-        bootstrap_raw = _read_v2_bootstrap_reference(spec_reference)
+        bootstrap_raw, spec_owner = _read_v2_bootstrap_reference(spec_reference)
         payload = _validate_bootstrap_payload(bootstrap_raw)
-        raws, paths = _read_v2_bootstrap_inputs(payload)
+        raws, paths, input_owner = _read_v2_bootstrap_inputs(payload)
+        _validate_input_owner_topology((spec_owner, input_owner))
 
         compatibility_request = _strict_canonical_object(
             raws["compatibility:compatibility_loader_request"],
@@ -1635,12 +2138,25 @@ def prepare_gate_b_v2_execution_route_from_reference(
             batch_manifest_path=execution["batch_manifest"][1],
             one_shot_spec_raw=execution["one_shot_spec"][0],
             one_shot_spec_path=execution["one_shot_spec"][1],
+            _retained_input_owner=input_owner,
+            _retained_input_keys={name: f"execution:{name}" for name in _EXECUTION_INPUT_NAMES},
+            _additional_input_owners=(spec_owner,),
         )
-        return prepare_gate_b_v2_execution_route(plan)
+        prepared = prepare_gate_b_v2_execution_route(plan)
+        input_owner = None
+        spec_owner = None
+        return prepared
     except GateBV2RouteError:
         raise
     except (GateBContractError, KeyError, TypeError, ValueError, OSError, OverflowError):
         _fail("Gate B v2 bootstrap failed closed")
+    finally:
+        for owner in (input_owner, spec_owner):
+            if owner is not None:
+                registered = _INPUT_OWNER_REGISTRY.get(id(owner))
+                if registered is not None and registered[4] is False:
+                    with suppress(Exception):
+                        _close_input_owner(owner)
 
 
 @dataclass(frozen=True, slots=True, init=False)

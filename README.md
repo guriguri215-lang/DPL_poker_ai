@@ -44,6 +44,31 @@ pytest
 python cli/export_schemas.py --out-dir docs/schemas
 ```
 
+## Gate B v2 one-shot CLI
+
+The packaged Windows-only Gate B v2 route is exposed as
+`poker-xai-gate-b-v2`. It accepts one pinned bootstrap manifest on a fixed
+local volume and stops after the initial attempt is durably `SEALED`:
+
+```powershell
+poker-xai-gate-b-v2 execute-once-v2 `
+  --spec-parent 'D:\gate-b\approved' `
+  --spec-parent-identity-scheme windows-volume-file-id-v1 `
+  --spec-parent-serialization-profile windows-volume8-file16-lowerhex-v1 `
+  --spec-parent-volume-id-hex 00000001 `
+  --spec-parent-file-id-hex 0000000000000001 `
+  --spec-name gate-b-v2-bootstrap.json `
+  --expected-spec-sha256 <64-lowercase-hex-sha256> `
+  --expected-spec-size-bytes <positive-size>
+```
+
+UNC paths, device paths, alternate data streams, and non-fixed volumes are
+rejected before artifact open. The parent volume/file identity, exact bootstrap
+bytes, two approved Git commits, and active route sources must all match. A
+prepared route is single-consume; replay fails closed. Replace the placeholders
+only with independently approved evidence, and do not use this example against
+production data.
+
 ## Status
 
 Early development. Phase 0 (frozen contracts) lives in `src/poker_core`:
