@@ -992,6 +992,128 @@ def test_store_reserve_entrypoint_consumes_the_same_one_shot_authorization(
 
 
 @WINDOWS_PRODUCTION
+@pytest.mark.parametrize("entrypoint", ["loader", "store"])
+@pytest.mark.parametrize(
+    "mutation",
+    ["copy-only", "marker", "payload", "marker-and-payload"],
+)
+def test_v2_derived_request_copy_is_rejected_by_both_public_reserve_entries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    entrypoint: str,
+    mutation: str,
+) -> None:
+    _source, chain, _request, _spec, kwargs = _production_plan_fixture(tmp_path)
+    plan = build_gate_b_v2_execution_plan(chain, **kwargs)
+    route, _roots = _prepare_with_fake_roots(plan, chain, monkeypatch)
+    request, _executor = route.consume()
+    copied_request = copy.copy(request)
+    if mutation in {"marker", "marker-and-payload"}:
+        object.__setattr__(copied_request, "_v2_reservation_origin", None)
+        object.__setattr__(copied_request, "_v2_reservation_state", "legacy")
+        object.__setattr__(copied_request, "_v2_reservation_authorization", None)
+    if mutation in {"payload", "marker-and-payload"}:
+        object.__setattr__(copied_request, "_payload", MappingProxyType({}))
+    assert route_module.is_gate_b_v2_runtime_request(copied_request)
+
+    lower_reserve_calls: list[str] = []
+    if entrypoint == "loader":
+        monkeypatch.setattr(
+            ledger_module.GateBLedgerStore,
+            "reserve_attempt",
+            staticmethod(lambda *_args, **_kwargs: lower_reserve_calls.append("store")),
+        )
+        call = loader_module.reserve_gate_b_attempt
+    else:
+        monkeypatch.setattr(
+            ledger_module,
+            "_reserve_attempt",
+            lambda *_args, **_kwargs: lower_reserve_calls.append("ledger"),
+        )
+        call = GateBLedgerStore.reserve_attempt
+
+    with pytest.raises(GateBLedgerError):
+        call(copied_request, expected_latest_record_sha256=None)
+    assert lower_reserve_calls == []
+    assert request._v2_reservation_state == "authorized"
+    assert id(request) in route_module._V2_RESERVATION_AUTHORIZATIONS
+    close_gate_b_v2_execution_route(route)
+
+
+@WINDOWS_PRODUCTION
+def test_consume_then_close_cleans_request_lifecycle_and_rejects_reuse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _source, chain, _request, _spec, kwargs = _production_plan_fixture(tmp_path)
+    plan = build_gate_b_v2_execution_plan(chain, **kwargs)
+    route, _roots = _prepare_with_fake_roots(plan, chain, monkeypatch)
+    request, _executor = route.consume()
+    request_id = id(request)
+    lower_reserve_calls: list[str] = []
+    monkeypatch.setattr(
+        ledger_module,
+        "_reserve_attempt",
+        lambda *_args, **_kwargs: lower_reserve_calls.append("ledger"),
+    )
+
+    close_gate_b_v2_execution_route(route)
+
+    assert request._v2_reservation_state == "closed"
+    assert request._v2_reservation_authorization is None
+    assert request_id not in route_module._V2_RUNTIME_REQUEST_ORIGINS
+    assert request_id not in route_module._V2_RESERVATION_AUTHORIZATIONS
+    assert request_id not in route_module._V2_RUNTIME_REQUEST_PLANS
+    assert request_id not in route_module._V2_RUNTIME_REQUEST_COPY_PROVENANCE
+    for call in (loader_module.reserve_gate_b_attempt, GateBLedgerStore.reserve_attempt):
+        with pytest.raises(GateBLedgerError):
+            call(request, expected_latest_record_sha256=None)
+    assert lower_reserve_calls == []
+
+
+@WINDOWS_PRODUCTION
+@pytest.mark.parametrize("entrypoint", ["loader", "store"])
+def test_consume_reserve_then_close_cleans_request_lifecycle_and_rejects_reuse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    entrypoint: str,
+) -> None:
+    _source, chain, _request, _spec, kwargs = _production_plan_fixture(tmp_path)
+    plan = build_gate_b_v2_execution_plan(chain, **kwargs)
+    route, _roots = _prepare_with_fake_roots(plan, chain, monkeypatch)
+    request, _executor = route.consume()
+    request_id = id(request)
+    lower_reserve_calls: list[str] = []
+    reservation = object()
+
+    def lower_reserve(*_args, **_kwargs):
+        lower_reserve_calls.append("ledger")
+        return reservation
+
+    monkeypatch.setattr(ledger_module, "_reserve_attempt", lower_reserve)
+    call = (
+        loader_module.reserve_gate_b_attempt
+        if entrypoint == "loader"
+        else GateBLedgerStore.reserve_attempt
+    )
+    assert call(request, expected_latest_record_sha256=None) is reservation
+    assert request._v2_reservation_state == "consumed"
+
+    close_gate_b_v2_execution_route(route)
+
+    assert request._v2_reservation_state == "closed"
+    assert request._v2_reservation_authorization is None
+    assert request_id not in route_module._V2_RUNTIME_REQUEST_ORIGINS
+    assert request_id not in route_module._V2_RESERVATION_AUTHORIZATIONS
+    assert request_id not in route_module._V2_RUNTIME_REQUEST_PLANS
+    assert request_id not in route_module._V2_RUNTIME_REQUEST_COPY_PROVENANCE
+    for reuse in (loader_module.reserve_gate_b_attempt, GateBLedgerStore.reserve_attempt):
+        with pytest.raises(GateBLedgerError):
+            reuse(request, expected_latest_record_sha256=None)
+    assert lower_reserve_calls == ["ledger"]
+
+
+@WINDOWS_PRODUCTION
 def test_reserve_authorization_is_atomic_across_public_entrypoints(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

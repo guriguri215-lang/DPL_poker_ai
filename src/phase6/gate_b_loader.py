@@ -404,7 +404,7 @@ def require_gate_b_v2_source_only_startup() -> None:
             or os.environ.get("PYTHONDONTWRITEBYTECODE") != "1"
             or os.environ.get("PYTHONNOUSERSITE") != "1"
         ):
-            raise GateBExecutionEnvironmentFailure("v2 source-only interpreter startup mismatch")
+            raise GateBExecutionEnvironmentFailure("v2 source-only startup interpreter mismatch")
         impossible_cache = Path(
             importlib.util.cache_from_source(
                 str(Path(__file__).resolve()),
@@ -1484,6 +1484,30 @@ class GateBLoaderRequest:
             f"test_batch_hash={self.batch.test_batch_hash!r}, "
             f"attempt_ordinal={self.attempt_ordinal!r}, actor_role='test_runner')"
         )
+
+    def __copy__(self) -> GateBLoaderRequest:
+        """Copy immutable request data while preserving external v2 derivation."""
+        duplicate = object.__new__(type(self))
+        for name in (
+            "request_sha256",
+            "batch",
+            "readiness",
+            "execution_context",
+            "roots",
+            "actor_id",
+            "actor_role",
+            "attempt_ordinal",
+            "_payload",
+            "_path",
+            "_v2_reservation_origin",
+            "_v2_reservation_state",
+            "_v2_reservation_authorization",
+        ):
+            object.__setattr__(duplicate, name, object.__getattribute__(self, name))
+        from phase6.gate_b_v2_route import _inherit_gate_b_v2_request_copy_provenance
+
+        _inherit_gate_b_v2_request_copy_provenance(self, duplicate)
+        return duplicate
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -3501,6 +3525,12 @@ def reserve_gate_b_attempt(
     """Create the one durable reservation path before any Test-child open."""
     if is_gate_b_v2_compatibility_object(request):
         _fail("legacy reservation rejects v2 compatibility objects")
+    from phase6.gate_b_v2_route import validate_gate_b_v2_reservation_entry
+
+    try:
+        validate_gate_b_v2_reservation_entry(request)
+    except Exception:
+        raise GateBLedgerError("v2 reservation is not authorized by a consumed route") from None
     return GateBLedgerStore.reserve_attempt(
         request,
         expected_latest_record_sha256=expected_latest_record_sha256,

@@ -11,6 +11,7 @@ import json
 import os
 import re
 import stat
+import threading
 import weakref
 from collections.abc import Mapping
 from contextlib import AbstractContextManager, suppress
@@ -1243,15 +1244,29 @@ class GateBPinnedArtifact:
         )
 
 
-_PINNED_ARTIFACT_REGISTRY: weakref.WeakValueDictionary[int, GateBPinnedArtifact] = (
-    weakref.WeakValueDictionary()
-)
+_PinnedArtifactSnapshot = tuple[bytes, str, int, str, str]
+_PINNED_ARTIFACT_REGISTRY: dict[
+    int,
+    tuple[weakref.ReferenceType[GateBPinnedArtifact], _PinnedArtifactSnapshot],
+] = {}
+_PINNED_ARTIFACT_REGISTRY_LOCK = threading.Lock()
+
+
+def _drop_pinned_artifact_registration(
+    artifact_id: int,
+    reference: weakref.ReferenceType[GateBPinnedArtifact],
+) -> None:
+    with _PINNED_ARTIFACT_REGISTRY_LOCK:
+        registered = _PINNED_ARTIFACT_REGISTRY.get(artifact_id)
+        if registered is not None and registered[0] is reference:
+            _PINNED_ARTIFACT_REGISTRY.pop(artifact_id, None)
 
 
 def _validated_pinned_artifact_snapshot(
     artifact: GateBPinnedArtifact,
 ) -> tuple[bytes, str, int, str, str]:
-    registered = _PINNED_ARTIFACT_REGISTRY.get(id(artifact))
+    with _PINNED_ARTIFACT_REGISTRY_LOCK:
+        registered = _PINNED_ARTIFACT_REGISTRY.get(id(artifact))
     try:
         current = (
             object.__getattribute__(artifact, "_raw"),
@@ -1264,13 +1279,19 @@ def _validated_pinned_artifact_snapshot(
     except (AttributeError, TypeError):
         _fail("pinned artifact loader provenance mismatch")
     if (
-        registered is not artifact
+        registered is None
+        or registered[0]() is not artifact
         or loader_token is not _PINNED_ARTIFACT_LOADER_TOKEN
         or type(current[0]) is not bytes
+        or type(current[1]) is not str
+        or type(current[2]) is not int
+        or type(current[3]) is not str
+        or type(current[4]) is not str
         or sha256_bytes(current[0]) != current[1]
         or len(current[0]) != current[2]
         or _HEX_RE.fullmatch(current[3]) is None
         or _HEX_RE.fullmatch(current[4]) is None
+        or current != registered[1]
     ):
         _fail("pinned artifact loader provenance mismatch")
     return current
@@ -1287,7 +1308,16 @@ def _new_pinned_artifact(raw: bytes, metadata: os.stat_result) -> GateBPinnedArt
     object.__setattr__(artifact, "_volume_id_hex", volume_id)
     object.__setattr__(artifact, "_file_id_hex", file_id)
     object.__setattr__(artifact, "_loader_token", _PINNED_ARTIFACT_LOADER_TOKEN)
-    _PINNED_ARTIFACT_REGISTRY[id(artifact)] = artifact
+    artifact_id = id(artifact)
+    snapshot = (memoryview(raw).tobytes(), digest, len(raw), volume_id, file_id)
+    reference = weakref.ref(
+        artifact,
+        lambda observed: _drop_pinned_artifact_registration(artifact_id, observed),
+    )
+    with _PINNED_ARTIFACT_REGISTRY_LOCK:
+        if artifact_id in _PINNED_ARTIFACT_REGISTRY:
+            _fail("pinned artifact loader provenance identity collision")
+        _PINNED_ARTIFACT_REGISTRY[artifact_id] = (reference, snapshot)
     return artifact
 
 

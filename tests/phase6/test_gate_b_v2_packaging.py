@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 import importlib
-import importlib.util
+import importlib.metadata
 import json
 import os
 import subprocess
 import sys
+import sysconfig
 import tomllib
 from pathlib import Path
-
-import pytest
 
 
 def test_gate_b_v2_console_entrypoint_targets_the_closed_cli() -> None:
@@ -114,16 +113,54 @@ def test_real_python_m_entrypoint_emits_the_fixed_invalid_argument_contract() ->
 def test_console_metadata_survives_offline_target_install_without_mutating_venv(
     tmp_path: Path,
 ) -> None:
-    if importlib.util.find_spec("setuptools") is None:
-        pytest.skip("shared venv has no offline setuptools build backend")
+    scheme = sysconfig.get_preferred_scheme("prefix")
+    candidate_paths = tuple(
+        dict.fromkeys(
+            Path(
+                sysconfig.get_path(
+                    "purelib",
+                    scheme=scheme,
+                    vars={"base": prefix, "platbase": prefix},
+                )
+            ).resolve()
+            for prefix in (sys.prefix, sys.base_prefix)
+        )
+    )
+    backend: tuple[Path, str] | None = None
+    for path in candidate_paths:
+        matches = tuple(
+            distribution
+            for distribution in importlib.metadata.distributions(path=[str(path)])
+            if distribution.metadata["Name"] == "setuptools"
+        )
+        if matches:
+            assert len(matches) == 1, "approved local setuptools backend path is ambiguous"
+            backend = path, matches[0].version
+            break
+    if backend is None:
+        raise AssertionError(
+            "offline packaging evidence is incomplete: provision setuptools>=77 in the "
+            "approved exact Python from an approved local environment or offline wheelhouse; "
+            "network download is forbidden"
+        ) from None
+    backend_path, setuptools_version = backend
+    assert int(setuptools_version.split(".", 1)[0]) >= 77, (
+        "offline packaging evidence is incomplete: upgrade the approved exact Python to "
+        f"setuptools>=77 from an approved local environment or offline wheelhouse; found "
+        f"{setuptools_version}; network download is forbidden"
+    )
     root = Path(__file__).resolve().parents[2]
     target = tmp_path / "offline-target"
     environment = os.environ.copy()
+    backend_python_path = os.pathsep.join(
+        value for value in (environment.get("PYTHONPATH"), str(backend_path)) if value
+    )
     environment.update(
         {
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTHONNOUSERSITE": "1",
             "PIP_NO_INDEX": "1",
+            "PYTHONPATH": backend_python_path,
         }
     )
     installed = subprocess.run(
@@ -133,6 +170,7 @@ def test_console_metadata_survives_offline_target_install_without_mutating_venv(
             "pip",
             "install",
             "--no-index",
+            "--no-cache-dir",
             "--no-deps",
             "--no-build-isolation",
             "--target",

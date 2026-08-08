@@ -136,6 +136,9 @@ _PINNED_SPEC_REGISTRY: dict[int, tuple[object, ...]] = {}
 _INPUT_OWNER_REGISTRY: dict[int, tuple[object, ...]] = {}
 _V2_RUNTIME_REQUEST_PLANS: dict[int, object] = {}
 _V2_RUNTIME_REQUEST_ORIGINS: dict[int, weakref.ReferenceType[GateBLoaderRequest]] = {}
+_V2_RUNTIME_REQUEST_COPY_PROVENANCE: dict[
+    int, weakref.ReferenceType[GateBLoaderRequest]
+] = {}
 _V2_RESERVATION_AUTHORIZATIONS: dict[
     int, tuple[weakref.ReferenceType[GateBLoaderRequest], object]
 ] = {}
@@ -1367,17 +1370,22 @@ def close_gate_b_v2_execution_plan(plan: GateBV2ExecutionPlan) -> None:
             if first_error is None:
                 first_error = exc
     registered_request = registered[8][0]
-    if _V2_RUNTIME_REQUEST_PLANS.get(id(registered_request)) is plan:
-        _V2_RUNTIME_REQUEST_PLANS.pop(id(registered_request), None)
+    request_id = id(registered_request)
     with _V2_RESERVATION_AUTHORIZATION_LOCK:
-        authorization = _V2_RESERVATION_AUTHORIZATIONS.get(id(registered_request))
+        if _V2_RUNTIME_REQUEST_PLANS.get(request_id) is plan:
+            _V2_RUNTIME_REQUEST_PLANS.pop(request_id, None)
+        origin = _V2_RUNTIME_REQUEST_ORIGINS.get(request_id)
+        if origin is not None and origin() is registered_request:
+            _V2_RUNTIME_REQUEST_ORIGINS.pop(request_id, None)
+        authorization = _V2_RESERVATION_AUTHORIZATIONS.get(request_id)
         if authorization is not None and authorization[0]() is registered_request:
-            _V2_RESERVATION_AUTHORIZATIONS.pop(id(registered_request), None)
-    if (
-        registered_request._v2_reservation_origin is _V2_RUNTIME_REQUEST_TOKEN
-        and registered_request._v2_reservation_state in {"planned", "authorized"}
-    ):
-        object.__setattr__(registered_request, "_v2_reservation_state", "closed")
+            _V2_RESERVATION_AUTHORIZATIONS.pop(request_id, None)
+        if (
+            registered_request._v2_reservation_origin is _V2_RUNTIME_REQUEST_TOKEN
+            and registered_request._v2_reservation_state
+            in {"planned", "authorized", "consumed"}
+        ):
+            object.__setattr__(registered_request, "_v2_reservation_state", "closed")
         object.__setattr__(registered_request, "_v2_reservation_authorization", None)
     for _role, _payload, root_reference in registered[8][17]:
         root_snapshot = _ROOT_REF_REGISTRY.pop(id(root_reference), None)
@@ -1958,7 +1966,8 @@ def build_gate_b_v2_execution_plan(
         _PLAN_REGISTRY[id(plan)] = _plan_snapshot(plan)
         registered_plan = plan
         validated_plan = validate_gate_b_v2_execution_plan(plan)
-        _V2_RUNTIME_REQUEST_PLANS[id(plan.request)] = plan
+        with _V2_RESERVATION_AUTHORIZATION_LOCK:
+            _V2_RUNTIME_REQUEST_PLANS[id(plan.request)] = plan
         created_owner = None
         return validated_plan
     except GateBV2RouteError:
@@ -1993,13 +2002,71 @@ def is_gate_b_v2_runtime_request(value: object) -> bool:
     if type(value) is GateBLoaderRequest:
         with _V2_RESERVATION_AUTHORIZATION_LOCK:
             origin = _V2_RUNTIME_REQUEST_ORIGINS.get(id(value))
-            registered_v2 = origin is not None and origin() is value
+            copied = _V2_RUNTIME_REQUEST_COPY_PROVENANCE.get(id(value))
+            registered_v2 = (origin is not None and origin() is value) or (
+                copied is not None and copied() is value
+            )
     marked_v2 = (
         type(value) is GateBLoaderRequest
         and value._v2_reservation_origin is _V2_RUNTIME_REQUEST_TOKEN
         and value._v2_reservation_state in {"planned", "authorized", "consumed", "closed"}
     )
     return type(value) is GateBLoaderRequest and (declared_v2 or registered_v2 or marked_v2)
+
+
+def _inherit_gate_b_v2_request_copy_provenance(
+    source: GateBLoaderRequest,
+    duplicate: GateBLoaderRequest,
+) -> None:
+    """Register a v2-derived copy without trusting copied fields or payload."""
+    if type(source) is not GateBLoaderRequest or type(duplicate) is not GateBLoaderRequest:
+        _fail("v2 request copy provenance nominal mismatch")
+    with _V2_RESERVATION_AUTHORIZATION_LOCK:
+        origin = _V2_RUNTIME_REQUEST_ORIGINS.get(id(source))
+        copied = _V2_RUNTIME_REQUEST_COPY_PROVENANCE.get(id(source))
+        if not (
+            (origin is not None and origin() is source)
+            or (copied is not None and copied() is source)
+        ):
+            return
+        duplicate_id = id(duplicate)
+        if duplicate_id in _V2_RUNTIME_REQUEST_COPY_PROVENANCE:
+            _fail("v2 request copy provenance identity was already registered")
+        reference = weakref.ref(
+            duplicate,
+            lambda observed: _drop_v2_request_copy_provenance(
+                duplicate_id,
+                observed,
+            ),
+        )
+        _V2_RUNTIME_REQUEST_COPY_PROVENANCE[duplicate_id] = reference
+
+
+def validate_gate_b_v2_reservation_entry(request: GateBLoaderRequest) -> bool:
+    """Non-consuming one-shot check for the public loader reservation facade."""
+    if not is_gate_b_v2_runtime_request(request):
+        return False
+    _require_v2_source_only_startup()
+    with _V2_RESERVATION_AUTHORIZATION_LOCK:
+        authorization = _V2_RESERVATION_AUTHORIZATIONS.get(id(request))
+        registered_route = authorization[1] if authorization is not None else None
+        valid = (
+            type(request) is GateBLoaderRequest
+            and authorization is not None
+            and authorization[0]() is request
+            and type(registered_route) is PreparedGateBV2ExecutionRoute
+            and registered_route.request is request
+            and registered_route._consumed
+            and not registered_route._closed
+            and request._v2_reservation_origin is _V2_RUNTIME_REQUEST_TOKEN
+            and request._v2_reservation_state == "authorized"
+            and request._v2_reservation_authorization
+            is _V2_RESERVATION_AUTHORIZATION_TOKEN
+        )
+    if not valid:
+        _fail("v2 reservation is not authorized by a consumed route")
+    validate_prepared_gate_b_v2_execution_route(registered_route)
+    return True
 
 
 def claim_gate_b_v2_reservation_authorization(request: GateBLoaderRequest) -> None:
@@ -2045,12 +2112,22 @@ def _drop_v2_runtime_request_origin(
             _V2_RUNTIME_REQUEST_ORIGINS.pop(request_id, None)
 
 
+def _drop_v2_request_copy_provenance(
+    request_id: int,
+    reference: weakref.ReferenceType[GateBLoaderRequest],
+) -> None:
+    with _V2_RESERVATION_AUTHORIZATION_LOCK:
+        if _V2_RUNTIME_REQUEST_COPY_PROVENANCE.get(request_id) is reference:
+            _V2_RUNTIME_REQUEST_COPY_PROVENANCE.pop(request_id, None)
+
+
 def verify_gate_b_v2_runtime_execution_environment(
     request: GateBLoaderRequest,
     context: GateBExecutionContext,
 ) -> GateBExecutionEvidence:
     """Resolve an exact registered request to its approved two-commit plan."""
-    plan = _V2_RUNTIME_REQUEST_PLANS.get(id(request))
+    with _V2_RESERVATION_AUTHORIZATION_LOCK:
+        plan = _V2_RUNTIME_REQUEST_PLANS.get(id(request))
     if type(plan) is not GateBV2ExecutionPlan or plan.request is not request:
         _fail("v2 runtime request provenance mismatch")
     validated = validate_gate_b_v2_execution_plan(plan)
