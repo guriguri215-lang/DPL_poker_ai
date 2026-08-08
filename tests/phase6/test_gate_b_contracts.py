@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import itertools
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePath
 from types import MappingProxyType, SimpleNamespace
 
@@ -2361,3 +2362,47 @@ def test_execution_context_v1_bytes_route_cannot_type_consume_v2_object() -> Non
             expected_sha256="f" * 64,
             reference_path=reference,
         )
+
+
+def test_v2_chain_builder_releases_exact_temporary_projection_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _v2_chain_fixture()
+    before = dict(contracts_module._V2_PROJECTION_REGISTRY)
+    original = contracts_module.build_gate_b_preapproval_root_identity_projection_v2
+
+    def mismatched_rebuild(*args, **kwargs):
+        rebuilt = original(*args, **kwargs)
+        object.__setattr__(rebuilt, "canonical_bytes", b"mismatch\n")
+        return rebuilt
+
+    monkeypatch.setattr(
+        contracts_module,
+        "build_gate_b_preapproval_root_identity_projection_v2",
+        mismatched_rebuild,
+    )
+    with pytest.raises(GateBContractError):
+        _rebuild_v2_chain(fixture)
+    assert before == contracts_module._V2_PROJECTION_REGISTRY
+
+
+def test_parallel_v2_chain_builders_keep_only_their_adopted_projections() -> None:
+    before_projections = set(contracts_module._V2_PROJECTION_REGISTRY)
+    before_chains = set(contracts_module._V2_TRUST_CHAIN_REGISTRY)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        fixtures = tuple(pool.map(lambda _index: _v2_chain_fixture(), range(8)))
+    new_chains = {
+        key: snapshot
+        for key, snapshot in contracts_module._V2_TRUST_CHAIN_REGISTRY.items()
+        if key not in before_chains
+    }
+    new_projections = {
+        key: snapshot
+        for key, snapshot in contracts_module._V2_PROJECTION_REGISTRY.items()
+        if key not in before_projections
+    }
+    assert set(new_chains) == {id(fixture.chain) for fixture in fixtures}
+    assert set(new_projections) == {id(fixture.projection) for fixture in fixtures}
+    assert {id(snapshot[1]) for snapshot in new_chains.values()} == {
+        id(fixture.projection) for fixture in fixtures
+    }

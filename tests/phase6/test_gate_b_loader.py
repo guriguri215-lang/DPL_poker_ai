@@ -2,14 +2,22 @@ from __future__ import annotations
 
 import ast
 import copy
+import importlib.util
+import inspect
 import json
 import multiprocessing
 import os
+import py_compile
+import re
+import shutil
 import struct
+import subprocess
+import sys
+import zipfile
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -17,6 +25,7 @@ from test_gate_b_contracts import _v2_chain_fixture
 
 import phase6.gate_b_ledger as ledger_module
 import phase6.gate_b_loader as loader_module
+import phase6.gate_b_v2_route as route_module
 from phase6.contracts import canonical_json_bytes, sha256_bytes
 from phase6.gate_b_contracts import (
     ACTIVE_MODULE_PATHS,
@@ -31,6 +40,7 @@ from phase6.gate_b_contracts import (
     ROOT_ANCHOR_SCHEMA_VERSION,
     SELECTED_CONFIG_LOCK_SCHEMA_VERSION,
     TOPOLOGY_POLICY_VERSION,
+    _plain,
     _root_identity_payload,
     build_gate_b_preapproval_root_identity_projection,
 )
@@ -63,6 +73,21 @@ from phase6.gate_b_loader import (
 COMMIT = "a" * 40
 APPROVAL_HASH = "d" * 64
 SIGNATURE_HASH = "e" * 64
+
+
+def test_gate_b_loader_request_v1_constructor_signature_is_unchanged() -> None:
+    assert tuple(inspect.signature(GateBLoaderRequest).parameters) == (
+        "request_sha256",
+        "batch",
+        "readiness",
+        "execution_context",
+        "roots",
+        "actor_id",
+        "actor_role",
+        "attempt_ordinal",
+        "_payload",
+        "_path",
+    )
 
 
 def _store(path: Path, payload: object) -> tuple[str, int]:
@@ -2071,6 +2096,349 @@ def test_helper_binding_rejects_wrong_declaring_module(
         loader_module._verify_helper_bindings()
 
 
+def _import_source_fixture(module_name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_executed_source_binding_accepts_repository_source_without_cache(tmp_path: Path) -> None:
+    path = tmp_path / "source_only.py"
+    raw = b"def value():\n    return 7\n"
+    path.write_bytes(raw)
+    module_name = "gate_b_source_only_fixture"
+    try:
+        module = _import_source_fixture(module_name, path)
+        cached = Path(module.__cached__)
+        if cached.exists():
+            cached.unlink()
+        assert len(loader_module._verify_executed_source_code(module_name, path, raw)) == 64
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+def test_timestamp_valid_stale_pyc_is_rejected_against_executed_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "pycache_prefix", None)
+    path = tmp_path / "timestamp_cache.py"
+    trusted = b"value = 'trusted'\n"
+    shadow = b"value = 'shadow!'\n"
+    assert len(trusted) == len(shadow)
+    path.write_bytes(trusted)
+    before = path.stat()
+    cached = Path(importlib.util.cache_from_source(str(path)))
+    cached.parent.mkdir()
+    py_compile.compile(str(path), cfile=str(cached), doraise=True)
+    path.write_bytes(shadow)
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    module_name = "gate_b_timestamp_cache_fixture"
+    try:
+        module = _import_source_fixture(module_name, path)
+        assert module.value == "trusted"
+        with pytest.raises(GateBExecutionEnvironmentFailure, match="loader code differs"):
+            loader_module._verify_executed_source_code(module_name, path, shadow)
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+def test_deleted_timestamp_pyc_cannot_leave_unattested_top_level_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "pycache_prefix", None)
+    path = tmp_path / "deleting_cache.py"
+    delete_line = b"Path(__cached__).unlink()\n"
+    trusted_line = b"#" + b" " * (len(delete_line) - 2) + b"\n"
+    malicious = (
+        b"from pathlib import Path\n"
+        b"MODE = 'shadow!'\n" + delete_line + b"def value():\n    return MODE\n"
+    )
+    trusted = (
+        b"from pathlib import Path\n"
+        b"MODE = 'trusted'\n" + trusted_line + b"def value():\n    return MODE\n"
+    )
+    assert len(malicious) == len(trusted)
+    path.write_bytes(malicious)
+    before = path.stat()
+    cached = Path(importlib.util.cache_from_source(str(path)))
+    cached.parent.mkdir()
+    py_compile.compile(str(path), cfile=str(cached), doraise=True)
+    path.write_bytes(trusted)
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    module_name = "gate_b_deleting_cache_fixture"
+    try:
+        module = _import_source_fixture(module_name, path)
+        assert module.MODE == "shadow!"
+        assert not cached.exists()
+        with pytest.raises(GateBExecutionEnvironmentFailure, match="module state"):
+            loader_module._verify_executed_source_code(module_name, path, trusted)
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+@pytest.mark.parametrize(
+    "attack",
+    [
+        "dynamic_method",
+        "default",
+        "import_alias",
+        "same_module_callable",
+        "computed_global",
+    ],
+)
+def test_executed_source_binding_rejects_live_named_state_tamper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    attack: str,
+) -> None:
+    dependency_name = "gate_b_binding_dependency"
+    module_name = "gate_b_binding_fixture"
+    dependency_path = tmp_path / f"{dependency_name}.py"
+    module_path = tmp_path / f"{module_name}.py"
+    dependency_path.write_text("def imported():\n    return 1\n", encoding="utf-8")
+    module_path.write_text(
+        "import re\n"
+        f"from {dependency_name} import imported\n"
+        "CHECK = re.compile(r'^trusted$')\n"
+        "def value(limit=7):\n"
+        "    return imported() + limit\n"
+        "def alternate(limit=7):\n"
+        "    return limit\n"
+        "class Service:\n"
+        "    def execute(self):\n"
+        "        return value()\n",
+        encoding="utf-8",
+    )
+    old_inventory = loader_module.GATE_B_V2_RUNTIME_MODULE_PATHS
+    try:
+        dependency = _import_source_fixture(dependency_name, dependency_path)
+        module = _import_source_fixture(module_name, module_path)
+        monkeypatch.setattr(
+            loader_module,
+            "GATE_B_V2_RUNTIME_MODULE_PATHS",
+            (
+                (dependency_name, dependency_path.name),
+                (module_name, module_path.name),
+            ),
+        )
+        if attack == "dynamic_method":
+            namespace: dict[str, object] = {}
+            exec("def execute(self):\n    return 99\n", namespace)
+            replacement = namespace["execute"]
+            replacement.__module__ = module_name
+            replacement.__qualname__ = "Service.execute"
+            module.Service.execute = replacement
+        elif attack == "default":
+            module.value.__defaults__ = (8,)
+        elif attack == "import_alias":
+            module.imported = lambda: 9
+        elif attack == "same_module_callable":
+            module.value = module.alternate
+        else:
+            module.CHECK = re.compile(r".*")
+        with pytest.raises(GateBExecutionEnvironmentFailure):
+            loader_module._verify_executed_source_code(
+                module_name,
+                module_path,
+                module_path.read_bytes(),
+            )
+        assert dependency.imported() == 1
+    finally:
+        loader_module.GATE_B_V2_RUNTIME_MODULE_PATHS = old_inventory
+        sys.modules.pop(module_name, None)
+        sys.modules.pop(dependency_name, None)
+
+
+def test_alternate_checkout_and_site_packages_source_origins_are_rejected(
+    tmp_path: Path,
+) -> None:
+    expected = tmp_path / "repository" / "src" / "phase6" / "shadow_fixture.py"
+    alternate = tmp_path / "site-packages" / "phase6" / "shadow_fixture.py"
+    expected.parent.mkdir(parents=True)
+    alternate.parent.mkdir(parents=True)
+    expected.write_text("value = 'repository'\n", encoding="utf-8")
+    alternate.write_text("value = 'wheel'\n", encoding="utf-8")
+    module_name = "phase6.shadow_fixture"
+    try:
+        _import_source_fixture(module_name, alternate)
+        with pytest.raises(GateBExecutionEnvironmentFailure, match="origin mismatch"):
+            loader_module._verify_loaded_route_module(module_name, expected)
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+def test_real_wheel_zipimport_origin_is_rejected(tmp_path: Path) -> None:
+    wheel_path = tmp_path / "gate_b_shadow-1.0-py3-none-any.whl"
+    module_name = "gate_b_wheel_shadow"
+    with zipfile.ZipFile(wheel_path, "w") as archive:
+        archive.writestr(f"{module_name}.py", "value = 'wheel'\n")
+    expected = tmp_path / "repository" / f"{module_name}.py"
+    expected.parent.mkdir()
+    expected.write_text("value = 'repository'\n", encoding="utf-8")
+    sys.path.insert(0, str(wheel_path))
+    try:
+        module = importlib.import_module(module_name)
+        assert type(module.__spec__.loader).__name__ == "zipimporter"
+        with pytest.raises(GateBExecutionEnvironmentFailure, match="source-only"):
+            loader_module._verify_loaded_route_module(module_name, expected)
+    finally:
+        sys.path.remove(str(wheel_path))
+        sys.modules.pop(module_name, None)
+
+
+def test_real_temporary_git_repository_rejects_runtime_source_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "git-source-mismatch"
+    source = root / "src" / "phase6" / "git_fixture.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("value = 'committed'\n", encoding="utf-8")
+
+    def git(*arguments: str) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=Gate B Test",
+                "-c",
+                "user.email=gate-b@example.invalid",
+                *arguments,
+            ],
+            cwd=root,
+            check=True,
+            capture_output=True,
+        )
+
+    git("init")
+    git("add", "src/phase6/git_fixture.py")
+    git("commit", "-m", "fixture")
+    commit = git("rev-parse", "HEAD").stdout.decode("ascii").strip()
+    source.write_text("value = 'working-tree'\n", encoding="utf-8")
+    module_name = "phase6.git_fixture"
+    try:
+        _import_source_fixture(module_name, source)
+        monkeypatch.setattr(
+            loader_module,
+            "GATE_B_V2_RUNTIME_MODULE_PATHS",
+            ((module_name, "src/phase6/git_fixture.py"),),
+        )
+        with pytest.raises(GateBExecutionEnvironmentFailure, match="commit evidence mismatch"):
+            loader_module._v2_route_module_sources(root, commit)
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+def _source_only_python_command(code: str) -> list[str]:
+    executable = str(Path(sys.executable).resolve())
+    return [
+        executable,
+        "-B",
+        "-P",
+        "-s",
+        "-X",
+        f"pycache_prefix={executable}",
+        "-c",
+        code,
+    ]
+
+
+def test_source_only_startup_attests_every_clean_runtime_module() -> None:
+    root = Path(__file__).resolve().parents[2]
+    code = (
+        "import importlib,pathlib; "
+        "from phase6 import gate_b_loader as loader; "
+        "loader.require_gate_b_v2_source_only_startup(); "
+        "root=pathlib.Path.cwd(); "
+        "[importlib.import_module(name) for name,_path in loader.GATE_B_V2_RUNTIME_MODULE_PATHS]; "
+        "[loader._verify_executed_source_code(name,root/path,(root/path).read_bytes()) "
+        "for name,path in loader.GATE_B_V2_RUNTIME_MODULE_PATHS]; "
+        "print(len(loader.GATE_B_V2_RUNTIME_MODULE_PATHS))"
+    )
+    result = subprocess.run(
+        _source_only_python_command(code),
+        cwd=root,
+        env={**os.environ, "PYTHONPATH": str((root / "src").resolve())},
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert result.stdout == f"{len(loader_module.GATE_B_V2_RUNTIME_MODULE_PATHS)}\n"
+    assert result.stderr == ""
+
+
+def test_source_only_startup_ignores_self_deleting_default_pyc_side_effect(
+    tmp_path: Path,
+) -> None:
+    copied_src = tmp_path / "src"
+    shutil.copytree(Path(__file__).resolve().parents[2] / "src", copied_src)
+    source = copied_src / "phase6" / "gate_b_v2_cli.py"
+    trusted = source.read_bytes()
+    payload = (
+        b"import os\n"
+        b"os.environ['GATE_B_DEFAULT_PYC_SIDE_EFFECT'] = 'shadow'\n"
+        b"from pathlib import Path\n"
+        b"Path(__cached__).unlink()\n"
+    )
+    malicious = payload + b"#" + (b"x" * (len(trusted) - len(payload) - 2)) + b"\n"
+    assert len(malicious) == len(trusted)
+    source.write_bytes(malicious)
+    malicious_metadata = source.stat()
+    cached = source.parent / "__pycache__" / f"{source.stem}.{sys.implementation.cache_tag}.pyc"
+    cached.parent.mkdir()
+    py_compile.compile(str(source), cfile=str(cached), doraise=True)
+    source.write_bytes(trusted)
+    os.utime(
+        source,
+        ns=(malicious_metadata.st_atime_ns, malicious_metadata.st_mtime_ns),
+    )
+    code = (
+        "import os; "
+        "from phase6.gate_b_loader import require_gate_b_v2_source_only_startup; "
+        "require_gate_b_v2_source_only_startup(); "
+        "import phase6.gate_b_v2_cli; "
+        "assert 'GATE_B_DEFAULT_PYC_SIDE_EFFECT' not in os.environ; "
+        "print('source-only')"
+    )
+    result = subprocess.run(
+        _source_only_python_command(code),
+        env={**os.environ, "PYTHONPATH": str(copied_src.resolve())},
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert result.stdout == "source-only\n"
+    assert result.stderr == ""
+    assert cached.exists()
+
+
+def test_v2_source_only_guard_rejects_an_ordinary_existing_process() -> None:
+    root = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from phase6.gate_b_loader import require_gate_b_v2_source_only_startup; "
+                "require_gate_b_v2_source_only_startup()"
+            ),
+        ],
+        cwd=root,
+        env={**os.environ, "PYTHONPATH": str((root / "src").resolve())},
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert "source-only startup" in result.stderr
+
+
 def test_dependency_lock_binds_complete_runtime_and_rejects_unknown_field(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -2151,20 +2519,51 @@ def test_dependency_lock_binds_complete_runtime_and_rejects_unknown_field(
     monkeypatch.setattr(loader_module.platform, "platform", lambda: runtime["platform"])
     monkeypatch.setattr(loader_module.platform, "python_version", lambda: runtime["version"])
     monkeypatch.setattr(
-        loader_module.importlib.metadata,
-        "version",
-        lambda _name: "1.0",
+        loader_module,
+        "_commit_blob",
+        lambda _root, _commit, _path: b'[project]\nname = "fixture-project"\nversion = "1.0"\n',
     )
+    events: list[tuple[str, str]] = []
     monkeypatch.setattr(
         loader_module,
         "_installed_distributions",
-        lambda _name: [
-            {"name": "fixture-a", "version": "1.0"},
-            {"name": "fixture-b", "version": "2.0"},
-        ],
+        lambda _name: (
+            events.append(("metadata", "distributions")),
+            [
+                {"name": "fixture-a", "version": "1.0"},
+                {"name": "fixture-b", "version": "2.0"},
+            ],
+        )[1],
     )
 
+    real_validate_path = route_module.validate_gate_b_v2_fixed_local_path
+    real_read_pinned = loader_module._read_pinned
+
+    def validate_path(path: Path, label: str) -> Path:
+        events.append(("validate", label))
+        return real_validate_path(path, label)
+
+    def read_pinned(path: Path, label: str) -> bytes:
+        events.append(("read", label))
+        return real_read_pinned(path, label)
+
+    monkeypatch.setattr(route_module, "validate_gate_b_v2_fixed_local_path", validate_path)
+    monkeypatch.setattr(loader_module, "_read_pinned", read_pinned)
     assert loader_module._verify_dependency_lock(root, context) == lock_hash
+    assert events.index(("validate", "locked base executable")) < events.index(
+        ("read", "base executable")
+    )
+    assert events.index(("validate", "active base executable")) < events.index(
+        ("metadata", "distributions")
+    )
+
+    events.clear()
+    monkeypatch.setattr(loader_module.sys, "_base_executable", r"\\server\share\python.exe")
+    with pytest.raises(GateBExecutionEnvironmentFailure):
+        loader_module._verify_dependency_lock(root, context)
+    assert ("read", "base executable") not in events
+    assert ("metadata", "distributions") not in events
+    monkeypatch.setattr(loader_module.sys, "_base_executable", str(base_executable))
 
     bad = copy.deepcopy(lock_payload)
     bad["unknown"] = True
@@ -3388,3 +3787,52 @@ def test_v2_prepared_boundary_rejects_chain_and_unregistered_forgery() -> None:
     forged = object.__new__(PreparedGateBV2CompatibilityPreflight)
     with pytest.raises(GateBLoaderError):
         validate_gate_b_v2_compatibility_preflight(forged)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="v2 profile is Windows-only")
+def test_v2_compatibility_preflight_close_uses_registered_graph_and_releases_bytes() -> None:
+    chain = _v2_chain_fixture().chain
+
+    class Directory:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    directories = {role: Directory() for role in ("ledger_base", "quarantine_base", "test_root")}
+    prepared = PreparedGateBV2CompatibilityPreflight(_token=loader_module._V2_PREPARED_TOKEN)
+    values = {
+        "projection_sha256": chain.projection.sha256,
+        "loader_request_sha256": chain.artifact_hashes["loader_request"],
+        "roots": chain.roots,
+        "_chain": chain,
+        "_directories": MappingProxyType(dict(directories)),
+        "_closed": False,
+        "_token": loader_module._V2_PREPARED_TOKEN,
+        "_close_tombstone": None,
+    }
+    for name, value in values.items():
+        object.__setattr__(prepared, name, value)
+    loader_module._V2_PREPARED_REGISTRY[id(prepared)] = (
+        prepared,
+        prepared.projection_sha256,
+        prepared.loader_request_sha256,
+        canonical_json_bytes(_plain(prepared.roots)),
+        chain,
+        tuple((role, directories[role]) for role in directories),
+        False,
+        loader_module._V2_PREPARED_TOKEN,
+        None,
+    )
+    projection = chain.projection
+    object.__setattr__(prepared, "_closed", True)
+    with pytest.raises(GateBLoaderError, match="provenance mismatch"):
+        prepared.close()
+    assert all(directory.closed for directory in directories.values())
+    assert id(prepared) not in loader_module._V2_PREPARED_REGISTRY
+    assert id(chain) not in loader_module.gate_b_contracts_module._V2_TRUST_CHAIN_REGISTRY
+    assert id(projection) not in loader_module.gate_b_contracts_module._V2_PROJECTION_REGISTRY
+    assert chain.projection is None and not chain._artifact_raws
+    assert projection.canonical_bytes == b""
+    assert prepared._chain is None and not prepared._directories and not prepared.roots
+    prepared.close()

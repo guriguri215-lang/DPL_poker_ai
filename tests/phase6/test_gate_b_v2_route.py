@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import ast
 import copy
 import os
+import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext, suppress
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
@@ -13,7 +17,7 @@ from test_gate_b_contracts import (
     human_signature_payload,
     readiness_payload,
 )
-from test_gate_b_executor import _build_genuine_evidence, _genuine_evidence
+from test_gate_b_executor import _build_genuine_evidence
 from test_gate_b_loader import (
     _build_fixture,
     _DrainExecutor,
@@ -29,7 +33,11 @@ from phase6.contracts import canonical_json_bytes, sha256_bytes
 from phase6.gate_b_contracts import _plain
 from phase6.gate_b_executor import GateBProductionExecutor
 from phase6.gate_b_ledger import GateBLedgerError, GateBLedgerStore, GateBPinnedDirectory
-from phase6.gate_b_orchestrator import GateBPreflightError, execute_gate_b_v2_once
+from phase6.gate_b_orchestrator import (
+    GateBPostSealValidationError,
+    GateBPreflightError,
+    execute_gate_b_v2_once,
+)
 from phase6.gate_b_v2_route import (
     EXECUTION_CONTEXT_V2_SCHEMA_VERSION,
     HUMAN_APPROVAL_RECORD_V4_SCHEMA_VERSION,
@@ -47,7 +55,24 @@ from phase6.gate_b_v2_route import (
     validate_gate_b_v2_execution_plan,
 )
 
-EXACT_ROUTE_COMMIT = "6f86497e35d2002be19cbcb9f894b1b6c0eba95d"
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+EXACT_ROUTE_COMMIT = (
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            f"safe.directory={_REPOSITORY_ROOT.as_posix()}",
+            "-C",
+            str(_REPOSITORY_ROOT),
+            "rev-parse",
+            "HEAD",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    .stdout.decode("ascii")
+    .strip()
+)
 WINDOWS_PRODUCTION = pytest.mark.skipif(
     os.name != "nt",
     reason="Gate B v2 production routes require Windows fixed-local identity",
@@ -78,7 +103,7 @@ def _production_plan_fixture(tmp_path: Path):
     projection = chain.projection
     descriptor = dict(route_module.gate_b_root_identity_projection_descriptor_v2(projection))
     compatibility_hash = chain.artifact_hashes["loader_request"]
-    bundle_evidence = _genuine_evidence()
+    bundle_evidence = _build_genuine_evidence()
 
     batch_raw = source.request.batch.raw_bytes
     batch_hash = source.request.batch.sha256
@@ -549,12 +574,39 @@ def test_route_attestation_is_commit_agnostic_and_has_closed_runtime_inventory()
     other = loader_module.gate_b_v2_route_attestation_sha256("a" * 40, "c" * 40)
     assert len(digest) == 64
     assert digest != other
+    inventory = {name for name, _path in loader_module.GATE_B_V2_ROUTE_MODULE_PATHS}
     assert {
         "phase6.gate_b_v2_route",
         "phase6.gate_b_orchestrator",
         "phase6.gate_b_v2_cli",
         "phase6.gate_b_executor",
-    } <= {name for name, _path in loader_module.GATE_B_V2_ROUTE_MODULE_PATHS}
+        "phase6.calibration",
+        "phase6.exact_ev",
+        "phase6.p6_7",
+        "phase6.production_inputs",
+        "opponents.ground_truth",
+        "opponents.model",
+        "opponents.synthesis",
+        "poker_ai.exploit",
+        "poker_ai.leak",
+        "poker_ai.mixer",
+        "poker_ai.observation",
+        "poker_solver.best_response",
+        "poker_solver.game",
+        "poker_solver.nodelock",
+        "poker_solver.strategy",
+    } <= inventory
+    executor_tree = ast.parse(
+        (Path(loader_module.__file__).with_name("gate_b_executor.py")).read_bytes()
+    )
+    direct_project_modules = {
+        node.module
+        for node in executor_tree.body
+        if isinstance(node, ast.ImportFrom)
+        and node.module is not None
+        and node.module.split(".", 1)[0] in {"opponents", "phase6", "poker_ai", "poker_solver"}
+    }
+    assert direct_project_modules <= inventory
     assert "src/phase6/exact_ev.py" not in loader_module.GATE_B_V2_ROUTE_ALLOWED_CHANGE_PATHS
     assert "src/phase6/gate_b_executor.py" not in loader_module.GATE_B_V2_ROUTE_ALLOWED_CHANGE_PATHS
 
@@ -675,6 +727,7 @@ def test_route_source_attestation_hashes_the_canonical_git_blob(
     blob = b"value = 1\n"
     monkeypatch.setattr(loader_module, "_read_pinned", lambda *_args: b"value = 1\r\n")
     monkeypatch.setattr(loader_module, "_commit_blob", lambda *_args: blob)
+    monkeypatch.setattr(loader_module, "_verify_executed_source_code", lambda *_args: "a" * 64)
     sources = loader_module._v2_route_module_sources(root, "b" * 40)
     assert len(sources) == len(loader_module.GATE_B_V2_ROUTE_MODULE_PATHS)
     assert {entry["sha256"] for entry in sources} == {sha256_bytes(blob)}
@@ -795,10 +848,14 @@ def test_unprepared_plan_has_explicit_idempotent_close_and_unregisters_request(
     _source, chain, _request, _spec, kwargs = _production_plan_fixture(tmp_path)
     plan = build_gate_b_v2_execution_plan(chain, **kwargs)
     owners = plan._input_owners
-    assert route_module.is_gate_b_v2_runtime_request(plan.request)
+    request = plan.request
+    assert route_module.is_gate_b_v2_runtime_request(request)
     close_gate_b_v2_execution_plan(plan)
     assert all(owner._closed for owner in owners)
-    assert not route_module.is_gate_b_v2_runtime_request(plan.request)
+    assert route_module.is_gate_b_v2_runtime_request(request)
+    assert request._v2_reservation_state == "closed"
+    with pytest.raises(GateBLedgerError):
+        GateBLedgerStore.reserve_attempt(request, expected_latest_record_sha256=None)
     close_gate_b_v2_execution_plan(plan)
 
 
@@ -809,11 +866,12 @@ def test_plan_owner_inventory_tamper_still_closes_registered_original_handles(
     _source, chain, _request, _spec, kwargs = _production_plan_fixture(tmp_path)
     plan = build_gate_b_v2_execution_plan(chain, **kwargs)
     original_owners = plan._input_owners
+    request = plan.request
     object.__setattr__(plan, "_input_owners", ())
     with pytest.raises(GateBV2RouteError):
         close_gate_b_v2_execution_plan(plan)
     assert all(owner._closed for owner in original_owners)
-    assert not route_module.is_gate_b_v2_runtime_request(plan.request)
+    assert route_module.is_gate_b_v2_runtime_request(request)
 
 
 @WINDOWS_PRODUCTION
@@ -829,12 +887,42 @@ def test_direct_plan_request_cannot_reserve_without_consumed_route(
         "_reserve_attempt",
         lambda *_args, **_kwargs: writes.append("reserved"),
     )
-    with pytest.raises(loader_module.GateBLoaderError):
+    with pytest.raises(GateBLedgerError):
         loader_module.reserve_gate_b_attempt(
             plan.request,
             expected_latest_record_sha256=None,
         )
     assert writes == []
+
+
+@WINDOWS_PRODUCTION
+@pytest.mark.parametrize("attack", ["state", "origin", "combined"])
+def test_runtime_request_marker_tamper_cannot_forge_reserve_authorization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    attack: str,
+) -> None:
+    _source, chain, _request, _spec, kwargs = _production_plan_fixture(tmp_path)
+    plan = build_gate_b_v2_execution_plan(chain, **kwargs)
+    writes: list[str] = []
+    monkeypatch.setattr(
+        ledger_module,
+        "_reserve_attempt",
+        lambda *_args, **_kwargs: writes.append("reserved"),
+    )
+    if attack == "state":
+        object.__setattr__(plan.request, "_v2_reservation_state", "authorized")
+    else:
+        object.__setattr__(plan.request, "_v2_reservation_origin", None)
+        object.__setattr__(plan.request, "_v2_reservation_state", "legacy")
+        if attack == "combined":
+            object.__setattr__(plan.request, "_payload", MappingProxyType({}))
+    with pytest.raises(GateBLedgerError):
+        GateBLedgerStore.reserve_attempt(plan.request, expected_latest_record_sha256=None)
+    assert writes == []
+    with pytest.raises(GateBV2RouteError) if attack == "combined" else nullcontext():
+        close_gate_b_v2_execution_plan(plan)
+    assert id(plan) not in route_module._PLAN_REGISTRY
 
 
 @WINDOWS_PRODUCTION
@@ -853,7 +941,7 @@ def test_consumed_production_route_mints_exactly_one_reserve_authorization(
         writes.append("reserved")
         return reservation
 
-    monkeypatch.setattr(loader_module, "_reserve_attempt", reserve)
+    monkeypatch.setattr(ledger_module, "_reserve_attempt", reserve)
     assert (
         loader_module.reserve_gate_b_attempt(
             request,
@@ -861,7 +949,7 @@ def test_consumed_production_route_mints_exactly_one_reserve_authorization(
         )
         is reservation
     )
-    with pytest.raises(loader_module.GateBLoaderError):
+    with pytest.raises(GateBLedgerError):
         loader_module.reserve_gate_b_attempt(
             request,
             expected_latest_record_sha256=None,
@@ -869,6 +957,230 @@ def test_consumed_production_route_mints_exactly_one_reserve_authorization(
     assert writes == ["reserved"]
     close_gate_b_v2_execution_route(route)
     assert all(root.closed for root in roots.values())
+
+
+@WINDOWS_PRODUCTION
+def test_store_reserve_entrypoint_consumes_the_same_one_shot_authorization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _source, chain, _request, _spec, kwargs = _production_plan_fixture(tmp_path)
+    plan = build_gate_b_v2_execution_plan(chain, **kwargs)
+    route, _roots = _prepare_with_fake_roots(plan, chain, monkeypatch)
+    request, _executor = route.consume()
+    reservation = object()
+    writes: list[str] = []
+
+    def reserve(*_args, **_kwargs):
+        writes.append("reserved")
+        return reservation
+
+    monkeypatch.setattr(ledger_module, "_reserve_attempt", reserve)
+    copied_request = copy.copy(request)
+    object.__setattr__(copied_request, "_payload", MappingProxyType({}))
+    with pytest.raises(GateBLedgerError):
+        GateBLedgerStore.reserve_attempt(copied_request, expected_latest_record_sha256=None)
+    assert (
+        GateBLedgerStore.reserve_attempt(request, expected_latest_record_sha256=None) is reservation
+    )
+    with pytest.raises(GateBLedgerError):
+        GateBLedgerStore.reserve_attempt(request, expected_latest_record_sha256=None)
+    with pytest.raises(GateBLedgerError):
+        loader_module.reserve_gate_b_attempt(request, expected_latest_record_sha256=None)
+    assert writes == ["reserved"]
+    close_gate_b_v2_execution_route(route)
+
+
+@WINDOWS_PRODUCTION
+def test_reserve_authorization_is_atomic_across_public_entrypoints(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _source, chain, _request, _spec, kwargs = _production_plan_fixture(tmp_path)
+    plan = build_gate_b_v2_execution_plan(chain, **kwargs)
+    route, _roots = _prepare_with_fake_roots(plan, chain, monkeypatch)
+    request, _executor = route.consume()
+    barrier = threading.Barrier(2)
+    writes: list[str] = []
+    reservation = object()
+
+    def reserve(*_args, **_kwargs):
+        writes.append("reserved")
+        return reservation
+
+    def call(entrypoint):
+        barrier.wait()
+        try:
+            return entrypoint(request, expected_latest_record_sha256=None)
+        except GateBLedgerError:
+            return "rejected"
+
+    monkeypatch.setattr(ledger_module, "_reserve_attempt", reserve)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = tuple(
+            future.result()
+            for future in (
+                pool.submit(call, GateBLedgerStore.reserve_attempt),
+                pool.submit(call, loader_module.reserve_gate_b_attempt),
+            )
+        )
+    assert outcomes.count(reservation) == 1
+    assert outcomes.count("rejected") == 1
+    assert writes == ["reserved"]
+    close_gate_b_v2_execution_route(route)
+
+
+@WINDOWS_PRODUCTION
+def test_post_consume_route_tamper_invalidates_reserve_authorization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _source, chain, _request, _spec, kwargs = _production_plan_fixture(tmp_path)
+    plan = build_gate_b_v2_execution_plan(chain, **kwargs)
+    route, roots = _prepare_with_fake_roots(plan, chain, monkeypatch)
+    request, _executor = route.consume()
+    writes: list[str] = []
+    monkeypatch.setattr(
+        ledger_module,
+        "_reserve_attempt",
+        lambda *_args, **_kwargs: writes.append("reserved"),
+    )
+    object.__setattr__(route, "_consumed", False)
+    with pytest.raises(GateBLedgerError):
+        GateBLedgerStore.reserve_attempt(request, expected_latest_record_sha256=None)
+    assert writes == []
+    with pytest.raises(GateBV2RouteError):
+        close_gate_b_v2_execution_route(route)
+    assert all(root.closed for root in roots.values())
+
+
+@WINDOWS_PRODUCTION
+def test_route_close_releases_registries_object_graph_and_artifact_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _source, chain, _request, _spec, kwargs = _production_plan_fixture(tmp_path)
+    plan = build_gate_b_v2_execution_plan(chain, **kwargs)
+    artifacts = tuple(plan._artifacts.values())
+    owners = plan._input_owners
+    root_references = tuple(plan.request.roots.values())
+    batch = plan.request.batch
+    readiness = plan.request.readiness
+    context = plan.request.execution_context
+    bundle_evidence = plan.phase6_contract_bundle_evidence
+    bundle_artifacts = bundle_evidence.artifacts
+    projection = chain.projection
+    route, _roots = _prepare_with_fake_roots(plan, chain, monkeypatch)
+    executor = route.executor
+    route_id = id(route)
+    plan_id = id(plan)
+    close_gate_b_v2_execution_route(route)
+    assert route_id not in route_module._PREPARED_REGISTRY
+    assert plan_id not in route_module._PLAN_REGISTRY
+    assert all(id(artifact) not in route_module._ARTIFACT_REGISTRY for artifact in artifacts)
+    assert all(artifact.raw == b"" and artifact.size_bytes == 0 for artifact in artifacts)
+    assert all(owner._closed and not owner.artifacts for owner in owners)
+    assert all(
+        id(reference) not in route_module._ROOT_REF_REGISTRY for reference in root_references
+    )
+    assert all(
+        reference._anchor_raw is None and not reference._payload for reference in root_references
+    )
+    assert id(bundle_evidence) not in route_module.contracts_module._BUNDLE_EVIDENCE_REGISTRY
+    assert bundle_evidence.root_manifest_raw == b"" and not bundle_evidence.artifacts
+    assert all(artifact.raw == b"" for artifact in bundle_artifacts)
+    assert batch.raw_bytes == b"" and not batch.payload
+    assert readiness._raw == b"" and not readiness.payload
+    assert context._raw == b"" and not context.payload
+    assert executor._phase6_contract_bundle_evidence is None and not executor._manifest
+    assert not chain._artifact_raws and chain.projection is None
+    assert projection.canonical_bytes == b""
+    assert id(chain) not in route_module.gate_b_contracts_module._V2_TRUST_CHAIN_REGISTRY
+    assert id(projection) not in route_module.gate_b_contracts_module._V2_PROJECTION_REGISTRY
+    assert route.plan is None and route.executor is None
+    close_gate_b_v2_execution_route(route)
+
+
+@WINDOWS_PRODUCTION
+def test_plan_close_registry_loss_reports_tamper_after_releasing_graph(
+    tmp_path: Path,
+) -> None:
+    _source, chain, _request, _spec, kwargs = _production_plan_fixture(tmp_path)
+    plan = build_gate_b_v2_execution_plan(chain, **kwargs)
+    owners = plan._input_owners
+    owner_artifacts = tuple(artifact for owner in owners for artifact in owner.artifacts.values())
+    plan_artifacts = tuple(plan._artifacts.values())
+    bundle = plan.phase6_contract_bundle_evidence
+    bundle_artifacts = bundle.artifacts
+
+    route_module._PLAN_REGISTRY.pop(id(plan))
+    with pytest.raises(GateBV2RouteError, match="close provenance"):
+        close_gate_b_v2_execution_plan(plan)
+
+    assert all(owner._closed and not owner.artifacts for owner in owners)
+    assert all(artifact.raw == b"" for artifact in owner_artifacts)
+    assert all(artifact.raw == b"" for artifact in plan_artifacts)
+    assert all(artifact.raw == b"" for artifact in bundle_artifacts)
+    assert bundle.root_manifest_raw == b"" and not bundle.artifacts
+    assert plan.request is None and not plan._artifacts and not plan._input_owners
+
+
+@WINDOWS_PRODUCTION
+def test_input_owner_registry_loss_reports_tamper_after_releasing_bytes_and_handles(
+    tmp_path: Path,
+) -> None:
+    _source, chain, _request, _spec, kwargs = _production_plan_fixture(tmp_path)
+    plan = build_gate_b_v2_execution_plan(chain, **kwargs)
+    owner = plan._input_owners[0]
+    artifacts = tuple(owner.artifacts.values())
+    directories = tuple(owner.directories.values())
+
+    route_module._INPUT_OWNER_REGISTRY.pop(id(owner))
+    with pytest.raises(GateBV2RouteError, match="close failed closed"):
+        close_gate_b_v2_execution_plan(plan)
+
+    assert owner._closed and not owner.artifacts and not owner.directories
+    assert all(artifact.raw == b"" and artifact.size_bytes == 0 for artifact in artifacts)
+    assert all(directory._closed for directory in directories)
+    assert plan.request is None and not plan._input_owners
+
+
+@WINDOWS_PRODUCTION
+def test_prepared_registry_loss_reports_tamper_after_releasing_route_graph(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _source, chain, _request, _spec, kwargs = _production_plan_fixture(tmp_path)
+    plan = build_gate_b_v2_execution_plan(chain, **kwargs)
+    owners = plan._input_owners
+    route, roots = _prepare_with_fake_roots(plan, chain, monkeypatch)
+    executor = route.executor
+
+    route_module._PREPARED_REGISTRY.pop(id(route))
+    with pytest.raises(GateBV2RouteError, match="close provenance"):
+        close_gate_b_v2_execution_route(route)
+
+    assert all(root.closed for root in roots.values())
+    assert all(owner._closed and not owner.artifacts for owner in owners)
+    assert executor._phase6_contract_bundle_evidence is None and not executor._manifest
+    assert route.plan is None and route.executor is None and not route._directories
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows storage classification")
+@pytest.mark.parametrize(("nested", "drive_type"), [(True, 3), (False, 4)])
+def test_fixed_local_path_rejects_nested_mount_and_nonfixed_target_volume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    nested: bool,
+    drive_type: int,
+) -> None:
+    candidate = (tmp_path / "candidate.json").resolve()
+    drive_root = f"{candidate.drive}\\"
+    mount = f"{candidate.drive}\\nested\\" if nested else drive_root
+    monkeypatch.setattr(route_module, "_windows_volume_mount_path", lambda _path: mount)
+    monkeypatch.setattr(route_module, "_windows_drive_type", lambda _mount: drive_type)
+    with pytest.raises(GateBV2RouteError, match="fixed local volume"):
+        route_module.validate_gate_b_v2_fixed_local_path(candidate, "fixture")
 
 
 @WINDOWS_PRODUCTION
@@ -881,6 +1193,7 @@ def test_production_bootstrap_reference_prepares_with_all_parent_identities_reta
     by_path = {root["absolute_path"]: role for role, root in _plain(chain.roots).items()}
     real_open = route_module.open_gate_b_v2_pinned_directory
     real_verify = route_module.verify_gate_b_v2_pinned_directory
+    projection_registry_before = set(route_module.gate_b_contracts_module._V2_PROJECTION_REGISTRY)
 
     def selective_open(path, **kwargs):
         role = by_path.get(str(path))
@@ -903,6 +1216,7 @@ def test_production_bootstrap_reference_prepares_with_all_parent_identities_reta
         lambda request, _context: _evidence(request),
     )
     route = prepare_gate_b_v2_execution_route_from_reference(reference)
+    owners = route.plan._input_owners
     assert type(route.executor) is GateBProductionExecutor
     assert len(route.plan._input_owners) == 2
     assert all(not owner._closed for owner in route.plan._input_owners)
@@ -912,20 +1226,68 @@ def test_production_bootstrap_reference_prepares_with_all_parent_identities_reta
         for directory in owner.directories.values()
     )
     close_gate_b_v2_execution_route(route)
-    assert all(owner._closed for owner in route.plan._input_owners)
+    assert all(owner._closed and not owner.artifacts for owner in owners)
+    assert route.plan is None
+    assert route.executor is None
     assert all(root.closed for root in roots.values())
+    assert (
+        set(route_module.gate_b_contracts_module._V2_PROJECTION_REGISTRY)
+        == projection_registry_before
+    )
 
 
 @WINDOWS_PRODUCTION
-def test_public_production_reference_runs_existing_one_shot_call_graph_without_real_writes(
+def test_unsafe_interpreter_startup_rejects_before_bootstrap_artifact_read(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _source, chain, _request, _spec, _kwargs, reference = _production_bootstrap_reference(tmp_path)
+    _source, _chain, _request, _spec, _kwargs, reference = _production_bootstrap_reference(tmp_path)
+    reads: list[str] = []
+    monkeypatch.setattr(
+        route_module,
+        "require_gate_b_v2_source_only_startup",
+        lambda: (_ for _ in ()).throw(RuntimeError("unsafe startup")),
+    )
+    monkeypatch.setattr(
+        route_module,
+        "_read_v2_bootstrap_reference",
+        lambda *_args: reads.append("read"),
+    )
+    with pytest.raises(GateBV2RouteError, match="source-only startup"):
+        prepare_gate_b_v2_execution_route_from_reference(reference)
+    assert reads == []
+
+
+@WINDOWS_PRODUCTION
+def test_public_production_reference_runs_real_lifecycle_with_fixture_storage_adapter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, chain, request_payload, spec, kwargs, reference = _production_bootstrap_reference(
+        tmp_path
+    )
+    expected_receipt = {
+        "projection_sha256": chain.projection.sha256,
+        "execution_binding_sha256": sha256_bytes(kwargs["one_shot_spec_raw"]),
+        "loader_request_sha256": sha256_bytes(kwargs["loader_request_raw"]),
+        "execution_context_sha256": sha256_bytes(kwargs["execution_context_raw"]),
+        "execution_route_attestation_sha256": spec["execution_route_attestation_sha256"],
+    }
+    assert expected_receipt["loader_request_sha256"] == sha256_bytes(
+        canonical_json_bytes(request_payload)
+    )
     roots: dict[str, _FakePinnedRoot] = {}
     by_path = {root["absolute_path"]: role for role, root in _plain(chain.roots).items()}
     real_open = route_module.open_gate_b_v2_pinned_directory
     real_verify = route_module.verify_gate_b_v2_pinned_directory
+    real_ledger_root = ledger_module._verify_root_ref
+    real_pinned_root = ledger_module._verify_pinned_root_descriptor
+    real_loader_root = loader_module._validate_root_ref
+    real_open_quarantine = orchestrator_module._open_quarantine
+    source_roots = {
+        role: _plain(source.request.roots[role])
+        for role in ("ledger_base", "quarantine_base", "test_root")
+    }
 
     def selective_open(path, **kwargs):
         role = by_path.get(str(path))
@@ -947,30 +1309,80 @@ def test_public_production_reference_runs_existing_one_shot_call_graph_without_r
         "verify_gate_b_v2_runtime_execution_environment",
         lambda request, _context: _evidence(request),
     )
-    call_order: list[str] = []
 
-    def reserve(*_args, **_kwargs):
-        call_order.append("reserve")
-        return object()
+    def mapped_ledger_root(_ref, role):
+        return real_ledger_root(source_roots[role], role)
 
-    def prepare(*_args, **_kwargs):
-        call_order.append("prepare")
-        return object()
+    def mapped_pinned_root(_ref, role, descriptor):
+        return real_pinned_root(source_roots[role], role, descriptor)
 
-    def open_input(*_args, **_kwargs):
-        call_order.append("open")
-        return object()
+    def mapped_loader_root(_ref, role):
+        return real_loader_root(source_roots[role], role)
 
-    def receipt(*_args, **_kwargs):
-        call_order.append("receipt")
-        return MappingProxyType({"status": "sealed"})
+    def mapped_open_quarantine(request, _path, expected_sha256):
+        path = (
+            Path(source_roots["quarantine_base"]["absolute_path"])
+            / request.batch.test_batch_hash
+            / f"attempt-{request.attempt_ordinal:06d}"
+            / "quarantine-manifest.json"
+        )
+        return real_open_quarantine(request, path, expected_sha256)
 
-    monkeypatch.setattr(loader_module, "_reserve_attempt", reserve)
-    monkeypatch.setattr(orchestrator_module, "prepare_gate_b_test_open", prepare)
-    monkeypatch.setattr(orchestrator_module, "_open_with_callback_classification", open_input)
-    monkeypatch.setattr(orchestrator_module, "_gate_b_v2_execution_receipt", receipt)
-    assert execute_gate_b_v2_once(reference)["status"] == "sealed"
-    assert call_order == ["reserve", "prepare", "open", "receipt"]
+    drain = _DrainExecutor(source)
+    monkeypatch.setattr(ledger_module, "_verify_root_ref", mapped_ledger_root)
+    monkeypatch.setattr(
+        ledger_module,
+        "_verify_pinned_root_descriptor",
+        mapped_pinned_root,
+    )
+    monkeypatch.setattr(loader_module, "_validate_root_ref", mapped_loader_root)
+    monkeypatch.setattr(orchestrator_module, "_open_quarantine", mapped_open_quarantine)
+    monkeypatch.setattr(
+        GateBProductionExecutor,
+        "execute",
+        lambda _self, input_capability, quarantine_outputs: drain.execute(
+            input_capability,
+            quarantine_outputs,
+        ),
+    )
+
+    receipt = execute_gate_b_v2_once(reference)
+    assert receipt["schema_version"] == "phase6-gate-b-cli-execution-receipt-v2"
+    assert receipt["operation"] == "execute-once-v2"
+    assert receipt["status"] == "sealed"
+    assert receipt["attempt_ordinal"] == 1
+    assert receipt["state"] == "SEALED"
+    assert all(receipt[name] == value for name, value in expected_receipt.items())
+    store = GateBLedgerStore(source.request)
+    records = []
+    previous = None
+    retry_catalog = ledger_module._retry_catalog(source.request.batch)
+    readiness_hash = sha256_bytes(kwargs["readiness_authorization_raw"])
+    for sequence, path in enumerate(sorted(store.directory.glob("record-*.json")), 1):
+        previous = ledger_module._record_from(
+            path,
+            ledger_module._read_pinned(path, "production reference ledger record"),
+            previous,
+            sequence,
+            readiness_hash,
+            retry_catalog,
+        )
+        records.append(previous)
+    assert tuple(record.to_state for record in records) == ("RESERVED", "STARTED", "SEALED")
+    assert receipt["sealed_record_sha256"] == records[-1].record_sha256
+    assert (
+        receipt["quarantine_manifest_sha256"] == records[-1].payload["quarantine_manifest_sha256"]
+    )
+    for name in (
+        "projection_sha256",
+        "execution_binding_sha256",
+        "loader_request_sha256",
+        "execution_context_sha256",
+        "execution_route_attestation_sha256",
+        "sealed_record_sha256",
+        "quarantine_manifest_sha256",
+    ):
+        assert type(receipt[name]) is str and len(receipt[name]) == 64
     assert all(root.closed for root in roots.values())
 
 
@@ -1349,6 +1761,22 @@ def test_disposable_v2_dispatcher_runs_one_mock_lifecycle_and_stops_at_sealed(
         "quarantine_manifest_sha256",
     ):
         assert len(receipt[name]) == 64
+    roots_hash = sha256_bytes(canonical_json_bytes(_plain(source.request.roots)))
+    binding_hash = sha256_bytes(
+        canonical_json_bytes(
+            {
+                "projection_sha256": roots_hash,
+                "loader_request_sha256": source.request.request_sha256,
+                "execution_context_sha256": source.request.execution_context.sha256,
+                "batch_manifest_sha256": source.request.batch.sha256,
+            }
+        )
+    )
+    assert receipt["projection_sha256"] == roots_hash
+    assert receipt["execution_binding_sha256"] == binding_hash
+    assert receipt["loader_request_sha256"] == source.request.request_sha256
+    assert receipt["execution_context_sha256"] == source.request.execution_context.sha256
+    assert receipt["execution_route_attestation_sha256"] == binding_hash
     chain_records = GateBLedgerStore(source.request).load_chain()
     assert [record.to_state for record in chain_records] == ["RESERVED", "STARTED", "SEALED"]
     assert receipt["sealed_record_sha256"] == chain_records[-1].record_sha256
@@ -1366,6 +1794,9 @@ def test_disposable_v2_dispatcher_runs_one_mock_lifecycle_and_stops_at_sealed(
     assert receipt["quarantine_manifest_sha256"] == sha256_bytes(manifest_raw)
     assert route._closed is True
     assert route._consumed is True
+    assert id(route) not in route_module._DISPOSABLE_ROUTE_REGISTRY
+    assert route.request is None and route.executor is None and route.authority is None
+    close_gate_b_v2_execution_route(route)
     with pytest.raises(GateBV2RouteError):
         route.consume()
     with pytest.raises(GateBV2RouteError):
@@ -1446,7 +1877,7 @@ def test_post_seal_manifest_byte_tamper_is_rejected_before_public_receipt(
         "_open_with_callback_classification",
         open_then_tamper,
     )
-    with pytest.raises(GateBLedgerError):
+    with pytest.raises(GateBPostSealValidationError):
         execute_gate_b_v2_once(route)
     assert GateBLedgerStore(source.request).load_chain()[-1].to_state == "SEALED"
     assert route._closed is True

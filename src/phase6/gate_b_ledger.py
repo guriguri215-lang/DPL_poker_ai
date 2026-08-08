@@ -11,6 +11,7 @@ import json
 import os
 import re
 import stat
+import weakref
 from collections.abc import Mapping
 from contextlib import AbstractContextManager, suppress
 from dataclasses import dataclass, field
@@ -1193,7 +1194,7 @@ def _verify_windows_pinned_chain(
                 _fail("Windows retained ancestor topology changed")
 
 
-@dataclass(frozen=True, slots=True, init=False, eq=False)
+@dataclass(frozen=True, slots=True, init=False, eq=False, weakref_slot=True)
 class GateBPinnedArtifact:
     """Immutable bytes and physical identity from a pinned child operation."""
 
@@ -1242,10 +1243,9 @@ class GateBPinnedArtifact:
         )
 
 
-_PINNED_ARTIFACT_REGISTRY: dict[
-    int,
-    tuple[GateBPinnedArtifact, bytes, str, int, str, str],
-] = {}
+_PINNED_ARTIFACT_REGISTRY: weakref.WeakValueDictionary[int, GateBPinnedArtifact] = (
+    weakref.WeakValueDictionary()
+)
 
 
 def _validated_pinned_artifact_snapshot(
@@ -1264,10 +1264,8 @@ def _validated_pinned_artifact_snapshot(
     except (AttributeError, TypeError):
         _fail("pinned artifact loader provenance mismatch")
     if (
-        registered is None
-        or registered[0] is not artifact
+        registered is not artifact
         or loader_token is not _PINNED_ARTIFACT_LOADER_TOKEN
-        or current != registered[1:]
         or type(current[0]) is not bytes
         or sha256_bytes(current[0]) != current[1]
         or len(current[0]) != current[2]
@@ -1289,14 +1287,7 @@ def _new_pinned_artifact(raw: bytes, metadata: os.stat_result) -> GateBPinnedArt
     object.__setattr__(artifact, "_volume_id_hex", volume_id)
     object.__setattr__(artifact, "_file_id_hex", file_id)
     object.__setattr__(artifact, "_loader_token", _PINNED_ARTIFACT_LOADER_TOKEN)
-    _PINNED_ARTIFACT_REGISTRY[id(artifact)] = (
-        artifact,
-        bytes(raw),
-        digest,
-        len(raw),
-        volume_id,
-        file_id,
-    )
+    _PINNED_ARTIFACT_REGISTRY[id(artifact)] = artifact
     return artifact
 
 
@@ -2529,6 +2520,19 @@ class GateBLedgerStore:
     def reserve_attempt(
         request: GateBRequestLike, *, expected_latest_record_sha256: str | None
     ) -> GateBAttemptReservation:
+        # This is a public reservation entry point in its own right.  Keep the
+        # v2 one-shot capability check here so callers cannot bypass the
+        # loader facade by invoking the store directly.
+        from phase6.gate_b_v2_route import (
+            claim_gate_b_v2_reservation_authorization,
+            is_gate_b_v2_runtime_request,
+        )
+
+        if is_gate_b_v2_runtime_request(request):
+            try:
+                claim_gate_b_v2_reservation_authorization(request)
+            except Exception:
+                _fail("v2 reservation is not authorized by a consumed route")
         return _reserve_attempt(
             request,
             expected_latest_record_sha256=expected_latest_record_sha256,

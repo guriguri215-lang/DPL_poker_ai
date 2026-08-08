@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import gc
 import json
 import multiprocessing
 import os
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
@@ -1994,6 +1996,20 @@ def test_host_pinned_directory_create_read_list_and_close(tmp_path: Path) -> Non
     object.__setattr__(created, "_raw", b"retained-mutation")
     with pytest.raises(GateBLedgerError, match="provenance"):
         _ = created.sha256
+
+
+def test_pinned_artifact_registry_is_weak_and_retains_no_raw_bytes(tmp_path: Path) -> None:
+    path = tmp_path / "weak-artifact.json"
+    raw = b'{"fixture":"weak"}\n'
+    path.write_bytes(raw)
+    artifact = ledger_module._new_pinned_artifact(raw, path.stat())
+    artifact_id = id(artifact)
+    retained = weakref.ref(artifact)
+    assert ledger_module._PINNED_ARTIFACT_REGISTRY[artifact_id] is artifact
+    del artifact
+    gc.collect()
+    assert retained() is None
+    assert artifact_id not in ledger_module._PINNED_ARTIFACT_REGISTRY
 
 
 @pytest.mark.parametrize(

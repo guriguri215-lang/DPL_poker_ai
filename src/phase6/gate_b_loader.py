@@ -7,11 +7,16 @@ It never discovers a Test root from defaults, environment, home, or CWD.
 
 from __future__ import annotations
 
+import ast
+import builtins
 import ctypes
 import hashlib
 import importlib.machinery
 import importlib.metadata
+import importlib.util
+import inspect
 import json
+import marshal
 import os
 import platform
 import re
@@ -20,6 +25,7 @@ import struct
 import subprocess
 import sys
 import sysconfig
+import tomllib
 import unicodedata
 from collections.abc import Mapping
 from contextlib import ExitStack, suppress
@@ -27,9 +33,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
-from types import MappingProxyType
+from types import CodeType, FunctionType, MappingProxyType, ModuleType
 from typing import Any, BinaryIO, Protocol
 
+import phase6.gate_b_contracts as gate_b_contracts_module
 from phase6.contracts import canonical_json_bytes, sha256_bytes
 from phase6.gate_b_contracts import (
     ACTIVE_MODULE_PATHS,
@@ -68,21 +75,83 @@ from phase6.gate_b_ledger import (
     verify_gate_b_v2_retained_root_topology,
 )
 
-# This is the closed execution-route inventory, separate from the unchanged
-# v1 science-module inventory in gate_b_contracts.ACTIVE_MODULE_PATHS.  The
-# commit is supplied by the approved v2 execution context; no source file
-# embeds (and therefore cannot self-reference) a commit hash.
-GATE_B_V2_ROUTE_MODULE_PATHS = (
+# ACTIVE_MODULE_PATHS is the approved science baseline at science_commit.
+# This separate complete inventory is the code Python executes and is bound to
+# execution_route_commit, so neither evidence hash is ambiguous.
+GATE_B_V2_RUNTIME_MODULE_PATHS = (
+    ("opponents", "src/opponents/__init__.py"),
+    ("opponents._canonical", "src/opponents/_canonical.py"),
+    ("opponents.catalog", "src/opponents/catalog.py"),
+    ("opponents.equilibrium", "src/opponents/equilibrium.py"),
+    ("opponents.ground_truth", "src/opponents/ground_truth.py"),
+    ("opponents.model", "src/opponents/model.py"),
+    ("opponents.synthesis", "src/opponents/synthesis.py"),
+    ("phase6", "src/phase6/__init__.py"),
+    ("phase6.calibration", "src/phase6/calibration.py"),
     ("phase6.contracts", "src/phase6/contracts.py"),
+    ("phase6.exact_ev", "src/phase6/exact_ev.py"),
     ("phase6.gate_b_contracts", "src/phase6/gate_b_contracts.py"),
+    ("phase6.gate_b_executor", "src/phase6/gate_b_executor.py"),
     ("phase6.gate_b_ledger", "src/phase6/gate_b_ledger.py"),
     ("phase6.gate_b_loader", "src/phase6/gate_b_loader.py"),
-    ("phase6.gate_b_executor", "src/phase6/gate_b_executor.py"),
-    ("phase6.gate_b_v2_route", "src/phase6/gate_b_v2_route.py"),
     ("phase6.gate_b_orchestrator", "src/phase6/gate_b_orchestrator.py"),
     ("phase6.gate_b_v2_cli", "src/phase6/gate_b_v2_cli.py"),
+    ("phase6.gate_b_v2_route", "src/phase6/gate_b_v2_route.py"),
+    ("phase6.p6_10", "src/phase6/p6_10.py"),
+    ("phase6.p6_10_freeze", "src/phase6/p6_10_freeze.py"),
+    ("phase6.p6_10b", "src/phase6/p6_10b.py"),
+    ("phase6.p6_10b_freeze", "src/phase6/p6_10b_freeze.py"),
+    ("phase6.p6_7", "src/phase6/p6_7.py"),
+    ("phase6.production_inputs", "src/phase6/production_inputs.py"),
+    ("phase6.training_backend", "src/phase6/training_backend.py"),
+    ("phase6.training_cli", "src/phase6/training_cli.py"),
+    ("phase6.training_runner", "src/phase6/training_runner.py"),
+    ("phase6.validation_backend", "src/phase6/validation_backend.py"),
+    ("phase6.validation_cli", "src/phase6/validation_cli.py"),
+    ("phase6.validation_execution", "src/phase6/validation_execution.py"),
+    ("phase6.validation_freeze", "src/phase6/validation_freeze.py"),
+    ("phase6.validation_runner", "src/phase6/validation_runner.py"),
+    ("poker_ai", "src/poker_ai/__init__.py"),
+    ("poker_ai.actions", "src/poker_ai/actions.py"),
+    ("poker_ai.baseline_strategy", "src/poker_ai/baseline_strategy.py"),
+    ("poker_ai.decision", "src/poker_ai/decision.py"),
+    ("poker_ai.exploit", "src/poker_ai/exploit.py"),
+    ("poker_ai.hand_bucket", "src/poker_ai/hand_bucket.py"),
+    ("poker_ai.leak", "src/poker_ai/leak.py"),
+    ("poker_ai.mixer", "src/poker_ai/mixer.py"),
+    ("poker_ai.observation", "src/poker_ai/observation.py"),
+    ("poker_ai.opponent", "src/poker_ai/opponent.py"),
+    ("poker_ai.posterior_bundle", "src/poker_ai/posterior_bundle.py"),
+    ("poker_ai.scenario", "src/poker_ai/scenario.py"),
+    ("poker_ai.session", "src/poker_ai/session.py"),
+    ("poker_core", "src/poker_core/__init__.py"),
+    ("poker_core.card", "src/poker_core/card.py"),
+    ("poker_core.combo", "src/poker_core/combo.py"),
+    ("poker_core.dpl_schema", "src/poker_core/dpl_schema.py"),
+    ("poker_core.hand_evaluator", "src/poker_core/hand_evaluator.py"),
+    ("poker_core.range_model", "src/poker_core/range_model.py"),
+    ("poker_core.reason_ontology", "src/poker_core/reason_ontology.py"),
+    ("poker_core.run_manifest", "src/poker_core/run_manifest.py"),
+    ("poker_core.showdown_ev", "src/poker_core/showdown_ev.py"),
+    ("poker_core.state_cluster", "src/poker_core/state_cluster.py"),
+    ("poker_core.strategy_table", "src/poker_core/strategy_table.py"),
+    ("poker_solver", "src/poker_solver/__init__.py"),
+    ("poker_solver.best_response", "src/poker_solver/best_response.py"),
+    ("poker_solver.cfr", "src/poker_solver/cfr.py"),
+    ("poker_solver.cfr_metrics", "src/poker_solver/cfr_metrics.py"),
+    ("poker_solver.cfr_plus", "src/poker_solver/cfr_plus.py"),
+    ("poker_solver.evaluate", "src/poker_solver/evaluate.py"),
+    ("poker_solver.game", "src/poker_solver/game.py"),
+    ("poker_solver.nodelock", "src/poker_solver/nodelock.py"),
+    ("poker_solver.reach", "src/poker_solver/reach.py"),
+    ("poker_solver.river_solve", "src/poker_solver/river_solve.py"),
+    ("poker_solver.river_tree", "src/poker_solver/river_tree.py"),
+    ("poker_solver.strategy", "src/poker_solver/strategy.py"),
 )
+# Compatibility alias for callers that consumed the R3 constant.
+GATE_B_V2_ROUTE_MODULE_PATHS = GATE_B_V2_RUNTIME_MODULE_PATHS
 GATE_B_V2_ROUTE_ALLOWED_CHANGE_PATHS = (
+    "src/phase6/gate_b_contracts.py",
     "src/phase6/gate_b_ledger.py",
     "src/phase6/gate_b_loader.py",
     "src/phase6/gate_b_v2_route.py",
@@ -280,6 +349,78 @@ class GateBCapabilityClosed(GateBExecutorFailure):
 
 class GateBPartialEvidenceError(GateBLoaderError):
     """A storage or indeterminate failure retained incomplete evidence."""
+
+
+def require_gate_b_v2_source_only_startup() -> None:
+    """Require an immutable CPython startup that cannot address a project pyc."""
+    try:
+        import _testinternalcapi
+
+        spec = _testinternalcapi.__spec__
+        getter = _testinternalcapi.get_configs
+        expected_origin = Path(sys.base_prefix) / "DLLs" / "_testinternalcapi.pyd"
+        if (
+            type(_testinternalcapi) is not ModuleType
+            or type(spec.loader) is not importlib.machinery.ExtensionFileLoader
+            or Path(spec.origin).resolve() != expected_origin.resolve()
+            or not inspect.isbuiltin(getter)
+            or getter.__self__ is not _testinternalcapi
+            or getter.__name__ != "get_configs"
+        ):
+            raise GateBExecutionEnvironmentFailure(
+                "CPython startup configuration provider mismatch"
+            )
+        config = getter()["config"]
+        executable = Path(sys.executable).resolve()
+        startup_prefix = Path(config["pycache_prefix"]).resolve()
+        source_root = Path(__file__).resolve().parents[1]
+        python_path = tuple(
+            Path(value).resolve()
+            for value in os.environ.get("PYTHONPATH", "").split(os.pathsep)
+            if value
+        )
+        executable_metadata = executable.lstat()
+        from phase6.gate_b_v2_route import validate_gate_b_v2_fixed_local_path
+
+        validate_gate_b_v2_fixed_local_path(executable, "v2 source-only pycache barrier")
+        validate_gate_b_v2_fixed_local_path(expected_origin, "CPython startup provider")
+        if (
+            config["write_bytecode"] != 0
+            or config["safe_path"] != 1
+            or config["user_site_directory"] != 0
+            or sys.flags.dont_write_bytecode != 1
+            or sys.flags.safe_path != 1
+            or sys.flags.no_user_site != 1
+            or not sys.dont_write_bytecode
+            or sys.pycache_prefix is None
+            or Path(sys.pycache_prefix).resolve() != startup_prefix
+            or startup_prefix != executable
+            or type(executable_metadata.st_nlink) is not int
+            or executable_metadata.st_nlink != 1
+            or not stat.S_ISREG(executable_metadata.st_mode)
+            or stat.S_ISLNK(executable_metadata.st_mode)
+            or _reparse(executable_metadata)
+            or python_path != (source_root,)
+            or os.environ.get("PYTHONDONTWRITEBYTECODE") != "1"
+            or os.environ.get("PYTHONNOUSERSITE") != "1"
+        ):
+            raise GateBExecutionEnvironmentFailure("v2 source-only interpreter startup mismatch")
+        impossible_cache = Path(
+            importlib.util.cache_from_source(
+                str(Path(__file__).resolve()),
+                optimization=None if sys.flags.optimize == 0 else str(sys.flags.optimize),
+            )
+        )
+        if impossible_cache == executable or executable not in impossible_cache.parents:
+            raise GateBExecutionEnvironmentFailure(
+                "v2 source cache did not remain below the executable barrier"
+            )
+    except GateBExecutionEnvironmentFailure:
+        raise
+    except Exception as exc:
+        raise GateBExecutionEnvironmentFailure(
+            "v2 source-only startup verification failed closed"
+        ) from exc
 
 
 def _sanitized_api(function):
@@ -638,6 +779,11 @@ def _verify_directory(path: Path, label: str) -> os.stat_result:
         descriptor = _open_directory_descriptor(path)
         try:
             opened = os.fstat(descriptor)
+            from phase6.gate_b_v2_route import (
+                validate_gate_b_v2_open_descriptor_fixed_local,
+            )
+
+            validate_gate_b_v2_open_descriptor_fixed_local(descriptor, path, label)
         finally:
             os.close(descriptor)
         if (
@@ -671,6 +817,12 @@ def _read_pinned(path: Path, label: str) -> bytes:
         descriptor = _open_existing_descriptor(path)
         try:
             opened = os.fstat(descriptor)
+            if os.name == "nt":
+                from phase6.gate_b_v2_route import (
+                    validate_gate_b_v2_open_descriptor_fixed_local,
+                )
+
+                validate_gate_b_v2_open_descriptor_fixed_local(descriptor, path, label)
             if (
                 not stat.S_ISREG(opened.st_mode)
                 or stat.S_ISLNK(opened.st_mode)
@@ -1293,7 +1445,7 @@ def build_gate_b_retained_loader_bundle(
     return _validated_retained_bundle(bundle)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class GateBLoaderRequest:
     """Strict loader request with all external identities already joined."""
 
@@ -1307,6 +1459,24 @@ class GateBLoaderRequest:
     attempt_ordinal: int
     _payload: Mapping[str, Any] = field(repr=False)
     _path: Path = field(repr=False)
+    _v2_reservation_origin: object | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    _v2_reservation_state: str = field(
+        default="legacy",
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    _v2_reservation_authorization: object | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __repr__(self) -> str:
         return (
@@ -1327,6 +1497,7 @@ class PreparedGateBV2CompatibilityPreflight(GateBV2CompatibilityObject):
     _directories: Mapping[str, GateBPinnedDirectory] = field(repr=False, compare=False)
     _closed: bool = field(repr=False, compare=False)
     _token: object = field(repr=False, compare=False)
+    _close_tombstone: tuple[object, ...] | None = field(repr=False, compare=False)
 
     def __new__(
         cls,
@@ -1361,17 +1532,64 @@ class PreparedGateBV2CompatibilityPreflight(GateBV2CompatibilityObject):
 
     @_sanitized_api
     def close(self) -> None:
-        validate_gate_b_v2_compatibility_preflight(self)
-        if self._closed:
-            return
+        registered = _V2_PREPARED_REGISTRY.get(id(self))
+        expected_tombstone = (
+            self.projection_sha256,
+            self.loader_request_sha256,
+            _V2_PREPARED_TOKEN,
+        )
+        if registered is None:
+            if (
+                type(self) is PreparedGateBV2CompatibilityPreflight
+                and self._closed
+                and self._token is _V2_PREPARED_TOKEN
+                and self._close_tombstone == expected_tombstone
+                and self._chain is None
+                and not self._directories
+                and not self.roots
+            ):
+                return
+            _fail("v2 compatibility prepared-object close provenance mismatch")
+        expected_tombstone = (registered[1], registered[2], _V2_PREPARED_TOKEN)
+        validation_error: BaseException | None = None
+        try:
+            validate_gate_b_v2_compatibility_preflight(self)
+        except BaseException as exc:
+            validation_error = exc
         first_error: BaseException | None = None
+        registered_directories = dict(registered[5])
         for role in ("test_root", "quarantine_base", "ledger_base"):
             try:
-                self._directories[role].close()
+                registered_directories[role].close()
             except BaseException as exc:
                 if first_error is None:
                     first_error = exc
+        registered_chain = registered[4]
+        registered_projection = registered_chain.projection
+        gate_b_contracts_module._V2_TRUST_CHAIN_REGISTRY.pop(
+            id(registered_chain),
+            None,
+        )
+        gate_b_contracts_module._V2_PROJECTION_REGISTRY.pop(
+            id(registered_projection),
+            None,
+        )
+        object.__setattr__(registered_chain, "projection", None)
+        object.__setattr__(registered_chain, "descriptor", MappingProxyType({}))
+        object.__setattr__(registered_chain, "roots", MappingProxyType({}))
+        object.__setattr__(registered_chain, "artifact_hashes", MappingProxyType({}))
+        object.__setattr__(registered_chain, "request_payload", MappingProxyType({}))
+        object.__setattr__(registered_chain, "_artifact_raws", MappingProxyType({}))
+        object.__setattr__(registered_projection, "payload", MappingProxyType({}))
+        object.__setattr__(registered_projection, "canonical_bytes", b"")
+        object.__setattr__(self, "roots", MappingProxyType({}))
+        object.__setattr__(self, "_chain", None)
+        object.__setattr__(self, "_directories", MappingProxyType({}))
         object.__setattr__(self, "_closed", True)
+        object.__setattr__(self, "_close_tombstone", expected_tombstone)
+        _V2_PREPARED_REGISTRY.pop(id(self), None)
+        if validation_error is not None:
+            _fail("v2 compatibility prepared-object close provenance mismatch")
         if first_error is not None:
             raise GateBLoaderError("v2 retained-root close failed closed") from first_error
 
@@ -1403,7 +1621,9 @@ def validate_gate_b_v2_compatibility_preflight(
                 (role, prepared._directories[role])
                 for role in ("ledger_base", "quarantine_base", "test_root")
             ),
+            prepared._closed,
             prepared._token,
+            prepared._close_tombstone,
         )
     except Exception:
         _fail("v2 compatibility prepared-object provenance mismatch")
@@ -1411,7 +1631,7 @@ def validate_gate_b_v2_compatibility_preflight(
         registered is None
         or registered[0] is not prepared
         or current != registered
-        or current[6] is not _V2_PREPARED_TOKEN
+        or current[7] is not _V2_PREPARED_TOKEN
     ):
         _fail("v2 compatibility prepared-object provenance mismatch")
     validate_gate_b_v2_compatibility_trust_chain(prepared._chain)
@@ -1465,6 +1685,7 @@ def prepare_gate_b_v2_compatibility_preflight(
             "_directories": MappingProxyType(dict(opened)),
             "_closed": False,
             "_token": _V2_PREPARED_TOKEN,
+            "_close_tombstone": None,
         }
         for name, value in values.items():
             object.__setattr__(prepared, name, value)
@@ -1475,7 +1696,9 @@ def prepare_gate_b_v2_compatibility_preflight(
             canonical_json_bytes(roots),
             validated,
             tuple((role, opened[role]) for role in ("ledger_base", "quarantine_base", "test_root")),
+            False,
             _V2_PREPARED_TOKEN,
+            None,
         )
         _V2_PREPARED_REGISTRY[id(prepared)] = snapshot
         return prepared
@@ -1946,20 +2169,26 @@ class GateBExecutionEvidence:
     active_module_sources_sha256: str
     dependency_lock_sha256: str
     runtime_fingerprint_sha256: str
+    execution_route_commit: str | None = None
+    runtime_module_sources_sha256: str | None = None
 
 
 def _execution_evidence_sha256(evidence: GateBExecutionEvidence) -> str:
-    return sha256_bytes(
-        canonical_json_bytes(
+    payload = {
+        "execution_context_sha256": evidence.execution_context_sha256,
+        "implementation_commit": evidence.implementation_commit,
+        "active_module_sources_sha256": evidence.active_module_sources_sha256,
+        "dependency_lock_sha256": evidence.dependency_lock_sha256,
+        "runtime_fingerprint_sha256": evidence.runtime_fingerprint_sha256,
+    }
+    if evidence.execution_route_commit is not None:
+        payload.update(
             {
-                "execution_context_sha256": evidence.execution_context_sha256,
-                "implementation_commit": evidence.implementation_commit,
-                "active_module_sources_sha256": evidence.active_module_sources_sha256,
-                "dependency_lock_sha256": evidence.dependency_lock_sha256,
-                "runtime_fingerprint_sha256": evidence.runtime_fingerprint_sha256,
+                "execution_route_commit": evidence.execution_route_commit,
+                "runtime_module_sources_sha256": evidence.runtime_module_sources_sha256,
             }
         )
-    )
+    return sha256_bytes(canonical_json_bytes(payload))
 
 
 def _git_command(root: Path, *arguments: str) -> list[str]:
@@ -2148,17 +2377,579 @@ def _verify_loaded_route_module(module_name: str, expected_path: Path) -> None:
         if module_name in _OPTIONAL_V2_ROUTE_MODULES:
             return
         raise GateBExecutionEnvironmentFailure("active v2 route module is unavailable")
-    if module.__name__ != module_name or module.__package__ != "phase6":
+    expected_package = (
+        module_name if expected_path.name == "__init__.py" else module_name.rpartition(".")[0]
+    )
+    if module.__name__ != module_name or module.__package__ != expected_package:
         raise GateBExecutionEnvironmentFailure("active v2 route module identity mismatch")
     spec = getattr(module, "__spec__", None)
     loader = getattr(spec, "loader", None)
-    if not isinstance(loader, importlib.machinery.SourceFileLoader):
+    if type(module) is not ModuleType:
+        raise GateBExecutionEnvironmentFailure("active v2 route module nominal type mismatch")
+    if type(loader) is not importlib.machinery.SourceFileLoader:
         raise GateBExecutionEnvironmentFailure("active v2 route module loader is not source-only")
     expected = os.path.normcase(os.path.abspath(str(expected_path)))
     origin = os.path.normcase(os.path.abspath(str(getattr(spec, "origin", ""))))
     module_file = os.path.normcase(os.path.abspath(str(getattr(module, "__file__", ""))))
     if origin != expected or module_file != expected:
         raise GateBExecutionEnvironmentFailure("active v2 route module origin mismatch")
+
+
+def _normalized_code_object(code: CodeType, expected_path: Path) -> CodeType:
+    expected = os.path.normcase(os.path.abspath(str(expected_path)))
+    filename = os.path.normcase(os.path.abspath(code.co_filename))
+    if filename != expected:
+        raise GateBExecutionEnvironmentFailure("executed code filename differs from source")
+    constants = tuple(
+        _normalized_code_object(value, expected_path) if type(value) is CodeType else value
+        for value in code.co_consts
+    )
+    return code.replace(co_consts=constants, co_filename="<gate-b-repository-source>")
+
+
+def _code_object_sha256(code: CodeType, expected_path: Path) -> str:
+    def constant_payload(value: object) -> object:
+        if type(value) is CodeType:
+            return {"type": "code", "value": code_payload(value)}
+        if value is None or type(value) in {bool, int, str}:
+            return {"type": type(value).__name__, "value": value}
+        if type(value) is bytes:
+            return {"type": "bytes", "value": value.hex()}
+        if type(value) is float:
+            return {"type": "float", "value": value.hex()}
+        if type(value) is complex:
+            return {
+                "type": "complex",
+                "real": value.real.hex(),
+                "imag": value.imag.hex(),
+            }
+        if type(value) is tuple:
+            return {"type": "tuple", "value": [constant_payload(item) for item in value]}
+        if type(value) is frozenset:
+            values = [constant_payload(item) for item in value]
+            values.sort(key=lambda item: canonical_json_bytes(item))
+            return {"type": "frozenset", "value": values}
+        if value is Ellipsis:
+            return {"type": "ellipsis"}
+        raise GateBExecutionEnvironmentFailure("code constant cannot be fingerprinted")
+
+    def code_payload(value: CodeType) -> dict[str, object]:
+        return {
+            "argcount": value.co_argcount,
+            "posonlyargcount": value.co_posonlyargcount,
+            "kwonlyargcount": value.co_kwonlyargcount,
+            "nlocals": value.co_nlocals,
+            "stacksize": value.co_stacksize,
+            "flags": value.co_flags,
+            "code": value.co_code.hex(),
+            "consts": [constant_payload(item) for item in value.co_consts],
+            "names": list(value.co_names),
+            "varnames": list(value.co_varnames),
+            "filename": value.co_filename,
+            "name": value.co_name,
+            "qualname": value.co_qualname,
+            "firstlineno": value.co_firstlineno,
+            "linetable": value.co_linetable.hex(),
+            "exceptiontable": value.co_exceptiontable.hex(),
+            "freevars": list(value.co_freevars),
+            "cellvars": list(value.co_cellvars),
+        }
+
+    try:
+        normalized = _normalized_code_object(code, expected_path)
+        return sha256_bytes(canonical_json_bytes(code_payload(normalized)))
+    except GateBExecutionEnvironmentFailure:
+        raise
+    except Exception as exc:
+        raise GateBExecutionEnvironmentFailure("executed code cannot be fingerprinted") from exc
+
+
+def _nested_code_hashes(code: CodeType, expected_path: Path) -> set[str]:
+    values = {_code_object_sha256(code, expected_path)}
+    for constant in code.co_consts:
+        if type(constant) is CodeType:
+            values.update(_nested_code_hashes(constant, expected_path))
+    return values
+
+
+def _live_module_functions(
+    module: ModuleType,
+) -> tuple[tuple[type | None, str, FunctionType], ...]:
+    found: dict[int, tuple[type | None, str, FunctionType]] = {}
+    visited_classes: set[int] = set()
+
+    def add(value: object, owner: type | None, binding_name: str) -> None:
+        if type(value) is FunctionType:
+            found[id(value)] = (owner, binding_name, value)
+            return
+        if isinstance(value, staticmethod | classmethod):
+            add(value.__func__, owner, binding_name)
+            return
+        if isinstance(value, property):
+            for accessor in (value.fget, value.fset, value.fdel):
+                if accessor is not None:
+                    add(accessor, owner, binding_name)
+            return
+        if isinstance(value, type) and value.__module__ == module.__name__:
+            if id(value) in visited_classes:
+                return
+            visited_classes.add(id(value))
+            for name, member in vars(value).items():
+                add(member, value, name)
+
+    for name, value in vars(module).items():
+        if isinstance(value, FunctionType | type) and value.__module__ == module.__name__:
+            add(value, None, name)
+    return tuple(found.values())
+
+
+_DATACLASS_GENERATED_METHODS = {
+    "__delattr__",
+    "__eq__",
+    "__ge__",
+    "__getstate__",
+    "__gt__",
+    "__hash__",
+    "__init__",
+    "__le__",
+    "__lt__",
+    "__repr__",
+    "__setattr__",
+    "__setstate__",
+}
+_PROTOCOL_GENERATED_METHODS = {"__init__", "__subclasshook__"}
+
+
+def _source_code_hashes_by_qualname(
+    code: CodeType,
+    expected_path: Path,
+) -> dict[str, set[str]]:
+    values = {
+        code.co_qualname: {_code_object_sha256(code, expected_path)},
+    }
+    for constant in code.co_consts:
+        if type(constant) is CodeType:
+            for qualname, hashes in _source_code_hashes_by_qualname(
+                constant,
+                expected_path,
+            ).items():
+                values.setdefault(qualname, set()).update(hashes)
+    return values
+
+
+def _verify_import_bindings(
+    module: ModuleType,
+    source_tree: ast.Module,
+) -> dict[str, object]:
+    expected_bindings: dict[str, object] = {}
+    for node in source_tree.body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imported_name = alias.name
+                binding_name = alias.asname or imported_name.split(".", 1)[0]
+                expected_name = imported_name if alias.asname else binding_name
+                expected = sys.modules.get(expected_name)
+                if (
+                    type(expected) is not ModuleType
+                    or vars(module).get(binding_name) is not expected
+                ):
+                    raise GateBExecutionEnvironmentFailure(
+                        "live module import binding differs from verified source"
+                    )
+                expected_bindings[binding_name] = expected
+        elif isinstance(node, ast.ImportFrom) and node.module != "__future__":
+            relative_name = "." * node.level + (node.module or "")
+            try:
+                imported_name = importlib.util.resolve_name(relative_name, module.__package__)
+            except (ImportError, ValueError) as exc:
+                raise GateBExecutionEnvironmentFailure(
+                    "project import binding cannot be resolved"
+                ) from exc
+            imported = sys.modules.get(imported_name)
+            if type(imported) is not ModuleType:
+                raise GateBExecutionEnvironmentFailure(
+                    "imported module is unavailable during attestation"
+                )
+            for alias in node.names:
+                if alias.name == "*":
+                    raise GateBExecutionEnvironmentFailure(
+                        "runtime modules may not use wildcard imports"
+                    )
+                binding_name = alias.asname or alias.name
+                expected = getattr(imported, alias.name, None)
+                if expected is None or vars(module).get(binding_name) is not expected:
+                    raise GateBExecutionEnvironmentFailure(
+                        "live imported symbol binding differs from verified source"
+                    )
+                expected_bindings[binding_name] = expected
+    return expected_bindings
+
+
+def _module_state_equal(observed: object, expected: object) -> bool:
+    if type(expected) is object:
+        return type(observed) is object
+    if isinstance(expected, re.Pattern):
+        return (
+            isinstance(observed, re.Pattern)
+            and observed.pattern == expected.pattern
+            and observed.flags == expected.flags
+        )
+    if type(expected) is MappingProxyType:
+        return type(observed) is MappingProxyType and _module_state_equal(
+            dict(observed),
+            dict(expected),
+        )
+    if type(expected) is dict:
+        return (
+            type(observed) is dict
+            and tuple(observed) == tuple(expected)
+            and all(_module_state_equal(observed[key], value) for key, value in expected.items())
+        )
+    if type(expected) in {tuple, list}:
+        return (
+            type(observed) is type(expected)
+            and len(observed) == len(expected)
+            and all(
+                _module_state_equal(left, right)
+                for left, right in zip(observed, expected, strict=True)
+            )
+        )
+    if type(expected) in {set, frozenset}:
+        return type(observed) is type(expected) and observed == expected
+    if isinstance(expected, Path):
+        return type(observed) is type(expected) and observed == expected
+    if type(expected) is FunctionType:
+        if type(observed) is not FunctionType:
+            return False
+        expected_source = Path(expected.__code__.co_filename)
+        return (
+            _code_object_sha256(observed.__code__, expected_source)
+            == _code_object_sha256(expected.__code__, expected_source)
+            and _module_state_equal(
+                observed.__defaults__ or (),
+                expected.__defaults__ or (),
+            )
+            and _module_state_equal(
+                observed.__kwdefaults__ or {},
+                expected.__kwdefaults__ or {},
+            )
+        )
+    if isinstance(expected, type):
+        return observed is expected
+    if type(expected).__module__ in {"types", "typing", "typing_extensions"}:
+        return type(observed) is type(expected) and repr(observed) == repr(expected)
+    if type(expected).__module__ in {"_thread", "weakref"}:
+        return type(observed) is type(expected)
+    try:
+        return type(observed) is type(expected) and bool(observed == expected)
+    except Exception:
+        return False
+
+
+def _verify_module_assignment_state(
+    module: ModuleType,
+    source_tree: ast.Module,
+    expected_path: Path,
+    import_bindings: Mapping[str, object],
+    compiler_flags: int,
+) -> None:
+    reference: dict[str, object] = {
+        "__builtins__": builtins.__dict__,
+        "__file__": str(expected_path),
+        "__name__": module.__name__,
+        "__package__": module.__package__,
+        **import_bindings,
+    }
+    for node in source_tree.body:
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            reference[node.name] = vars(module)[node.name]
+
+    object_sentinels: list[object] = []
+    for node in source_tree.body:
+        targets: list[ast.expr]
+        value_node: ast.expr | None
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+            value_node = node.value
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+            value_node = node.value
+        else:
+            continue
+        if value_node is None:
+            continue
+        try:
+            expected = eval(
+                compile(
+                    ast.Expression(value_node),
+                    str(expected_path),
+                    "eval",
+                    flags=compiler_flags,
+                    dont_inherit=True,
+                    optimize=sys.flags.optimize,
+                ),
+                reference,
+            )
+        except Exception as exc:
+            raise GateBExecutionEnvironmentFailure(
+                "verified module state cannot be reconstructed"
+            ) from exc
+        for target in targets:
+            if isinstance(target, ast.Name):
+                observed = vars(module).get(target.id, object())
+                if not _module_state_equal(observed, expected):
+                    raise GateBExecutionEnvironmentFailure(
+                        f"live module state differs from verified source: {target.id}"
+                    )
+                reference[target.id] = expected
+                if type(expected) is object:
+                    object_sentinels.append(observed)
+            else:
+                raise GateBExecutionEnvironmentFailure(
+                    "module assignment target cannot be attested"
+                )
+    if len({id(value) for value in object_sentinels}) != len(object_sentinels):
+        raise GateBExecutionEnvironmentFailure("module sentinel bindings alias")
+
+
+def _verify_source_function_defaults(
+    module: ModuleType,
+    source_tree: ast.Module,
+    expected_path: Path,
+    expected_code: Mapping[str, set[str]],
+) -> None:
+    def verify(
+        function: object,
+        node: ast.FunctionDef | ast.AsyncFunctionDef,
+        expected_qualname: str,
+    ) -> None:
+        if isinstance(function, property):
+            decorator_names = {
+                decorator.attr
+                for decorator in node.decorator_list
+                if isinstance(decorator, ast.Attribute)
+            }
+            function = (
+                function.fset
+                if "setter" in decorator_names
+                else function.fdel
+                if "deleter" in decorator_names
+                else function.fget
+            )
+        if isinstance(function, staticmethod | classmethod):
+            function = function.__func__
+        if function is not None:
+            function = inspect.unwrap(function)
+        if not isinstance(function, FunctionType):
+            raise GateBExecutionEnvironmentFailure("source callable binding is missing")
+        expected_hashes = expected_code.get(expected_qualname)
+        if (
+            not expected_hashes
+            or function.__code__.co_qualname != expected_qualname
+            or os.path.normcase(os.path.abspath(function.__code__.co_filename))
+            != os.path.normcase(os.path.abspath(str(expected_path)))
+            or _code_object_sha256(function.__code__, expected_path) not in expected_hashes
+        ):
+            raise GateBExecutionEnvironmentFailure(
+                "source callable binding differs from its verified definition"
+            )
+        observed_defaults = function.__defaults__ or ()
+        for offset, value_node in enumerate(reversed(node.args.defaults), 1):
+            try:
+                expected = ast.literal_eval(value_node)
+            except (ValueError, TypeError):
+                continue
+            if len(observed_defaults) < offset:
+                raise GateBExecutionEnvironmentFailure("source callable default is missing")
+            observed = observed_defaults[-offset]
+            if type(observed) is not type(expected) or observed != expected:
+                raise GateBExecutionEnvironmentFailure(
+                    "live function default differs from verified source"
+                )
+        observed_keywords = function.__kwdefaults__ or {}
+        for argument, value_node in zip(
+            node.args.kwonlyargs,
+            node.args.kw_defaults,
+            strict=True,
+        ):
+            if value_node is None:
+                continue
+            try:
+                expected = ast.literal_eval(value_node)
+            except (ValueError, TypeError):
+                continue
+            observed = observed_keywords.get(argument.arg, object())
+            if type(observed) is not type(expected) or observed != expected:
+                raise GateBExecutionEnvironmentFailure(
+                    "live keyword default differs from verified source"
+                )
+
+    for node in source_tree.body:
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            verify(vars(module).get(node.name), node, node.name)
+        elif isinstance(node, ast.ClassDef):
+            owner = vars(module).get(node.name)
+            if (
+                not isinstance(owner, type)
+                or owner.__module__ != module.__name__
+                or owner.__qualname__ != node.name
+            ):
+                raise GateBExecutionEnvironmentFailure("source class binding is missing")
+            for member in node.body:
+                if isinstance(member, ast.FunctionDef | ast.AsyncFunctionDef):
+                    verify(
+                        vars(owner).get(member.name),
+                        member,
+                        f"{node.name}.{member.name}",
+                    )
+
+
+def _verify_executed_source_code(
+    module_name: str,
+    expected_path: Path,
+    raw: bytes,
+) -> str:
+    """Join live functions and any timestamp-valid pyc to verified source bytes."""
+    module = sys.modules.get(module_name)
+    if type(module) is not ModuleType:
+        raise GateBExecutionEnvironmentFailure("active module nominal type mismatch")
+    spec = module.__spec__
+    loader = spec.loader
+    if type(loader) is not importlib.machinery.SourceFileLoader:
+        raise GateBExecutionEnvironmentFailure("active module loader is not exact source loader")
+    try:
+        compiled = compile(
+            raw,
+            str(expected_path),
+            "exec",
+            dont_inherit=True,
+            optimize=sys.flags.optimize,
+        )
+        source_tree = ast.parse(raw, filename=str(expected_path))
+    except (SyntaxError, ValueError, TypeError) as exc:
+        raise GateBExecutionEnvironmentFailure("verified source cannot be compiled") from exc
+    expected_hash = _code_object_sha256(compiled, expected_path)
+    loaded_code = loader.get_code(module_name)
+    if (
+        type(loaded_code) is not CodeType
+        or _code_object_sha256(loaded_code, expected_path) != expected_hash
+    ):
+        raise GateBExecutionEnvironmentFailure("loader code differs from verified source")
+
+    cached_text = getattr(module, "__cached__", None)
+    if type(cached_text) is not str or not cached_text:
+        raise GateBExecutionEnvironmentFailure("active source cache declaration is unavailable")
+    optimization = None if sys.flags.optimize == 0 else str(sys.flags.optimize)
+    expected_cached = importlib.util.cache_from_source(
+        str(expected_path),
+        optimization=optimization,
+    )
+    if os.path.normcase(os.path.abspath(cached_text)) != os.path.normcase(
+        os.path.abspath(expected_cached)
+    ):
+        raise GateBExecutionEnvironmentFailure("active source cache path escaped repository")
+    cached_path = Path(cached_text)
+    if _path_entry_present_no_follow(cached_path):
+        try:
+            metadata = _lstat(cached_path)
+            cached_raw = _read_pinned(cached_path, "active module bytecode cache")
+            cached_code = marshal.loads(cached_raw[16:])
+        except (OSError, ValueError, EOFError, TypeError, GateBLedgerError) as exc:
+            raise GateBExecutionEnvironmentFailure("bytecode cache cannot be attested") from exc
+        if (
+            len(cached_raw) < 16
+            or cached_raw[:4] != importlib.util.MAGIC_NUMBER
+            or not stat.S_ISREG(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or _reparse(metadata)
+            or metadata.st_nlink != 1
+            or type(cached_code) is not CodeType
+            or _code_object_sha256(cached_code, expected_path) != expected_hash
+        ):
+            raise GateBExecutionEnvironmentFailure("bytecode cache differs from verified source")
+
+    expected_nested = _nested_code_hashes(compiled, expected_path)
+    expected_code = _source_code_hashes_by_qualname(compiled, expected_path)
+    for owner, binding_name, function in _live_module_functions(module):
+        expected_binding = binding_name if owner is None else f"{owner.__qualname__}.{binding_name}"
+        code_filename = os.path.normcase(os.path.abspath(function.__code__.co_filename))
+        source_filename = os.path.normcase(os.path.abspath(str(expected_path)))
+        if code_filename != source_filename:
+            generated = owner is not None and (
+                (
+                    hasattr(owner, "__dataclass_fields__")
+                    and binding_name in _DATACLASS_GENERATED_METHODS
+                    and function.__code__.co_filename == "<string>"
+                )
+                or (
+                    owner is not None
+                    and hasattr(owner, "__dataclass_fields__")
+                    and binding_name in {"__repr__", "__getstate__", "__setstate__"}
+                    and Path(function.__code__.co_filename).name == "dataclasses.py"
+                )
+                or (
+                    bool(getattr(owner, "_is_protocol", False))
+                    and binding_name in _PROTOCOL_GENERATED_METHODS
+                    and Path(function.__code__.co_filename).name == "typing.py"
+                )
+                or (
+                    binding_name == "__hash__"
+                    and any(base.__module__ == "pydantic.main" for base in owner.__mro__)
+                    and Path(function.__code__.co_filename).name == "_model_construction.py"
+                )
+                or (
+                    any(
+                        base.__module__ == "enum" and base.__name__ == "Enum"
+                        for base in owner.__mro__
+                    )
+                    and binding_name in {"_generate_next_value_", "__new__"}
+                    and Path(function.__code__.co_filename).name == "enum.py"
+                )
+            )
+            if expected_binding in expected_code or not generated:
+                raise GateBExecutionEnvironmentFailure(
+                    "live source callable was replaced by dynamic code"
+                )
+            continue
+        if _code_object_sha256(function.__code__, expected_path) not in expected_nested:
+            raise GateBExecutionEnvironmentFailure("live function differs from verified source")
+        wrapped = getattr(function, "__wrapped__", None)
+        if (
+            type(wrapped) is FunctionType
+            and _code_object_sha256(
+                wrapped.__code__,
+                expected_path,
+            )
+            not in expected_nested
+        ):
+            raise GateBExecutionEnvironmentFailure(
+                "wrapped live function differs from verified source"
+            )
+        for cell in function.__closure__ or ():
+            closed_value = cell.cell_contents
+            if (
+                type(closed_value) is FunctionType
+                and closed_value.__module__ == module_name
+                and _code_object_sha256(closed_value.__code__, expected_path) not in expected_nested
+            ):
+                raise GateBExecutionEnvironmentFailure(
+                    "live function closure differs from verified source"
+                )
+    import_bindings = _verify_import_bindings(module, source_tree)
+    _verify_source_function_defaults(
+        module,
+        source_tree,
+        expected_path,
+        expected_code,
+    )
+    _verify_module_assignment_state(
+        module,
+        source_tree,
+        expected_path,
+        import_bindings,
+        compiled.co_flags,
+    )
+    return expected_hash
 
 
 def _working_tree_source_matches_git_blob(raw: bytes, blob: bytes) -> bool:
@@ -2196,10 +2987,10 @@ def _v2_science_module_sources(
     return verified
 
 
-def _v2_route_module_sources(root: Path, route_commit: str) -> list[dict[str, str]]:
+def _v2_runtime_module_sources(root: Path, route_commit: str) -> list[dict[str, str]]:
     verified = []
     identities: set[tuple[int, int]] = set()
-    for module_name, relative_path in GATE_B_V2_ROUTE_MODULE_PATHS:
+    for module_name, relative_path in GATE_B_V2_RUNTIME_MODULE_PATHS:
         expected_path = root / Path(relative_path)
         _verify_source_parent_chain(root, expected_path)
         _verify_loaded_route_module(module_name, expected_path)
@@ -2234,6 +3025,8 @@ def _v2_route_module_sources(root: Path, route_commit: str) -> list[dict[str, st
             before.st_size,
         ):
             raise GateBExecutionEnvironmentFailure("v2 route source commit evidence mismatch")
+        if sys.modules.get(module_name) is not None:
+            _verify_executed_source_code(module_name, expected_path, raw)
         verified.append(
             {
                 "module_name": module_name,
@@ -2243,6 +3036,11 @@ def _v2_route_module_sources(root: Path, route_commit: str) -> list[dict[str, st
         )
     _verify_helper_bindings()
     return verified
+
+
+def _v2_route_module_sources(root: Path, route_commit: str) -> list[dict[str, str]]:
+    """Compatibility name for the complete execution-commit inventory."""
+    return _v2_runtime_module_sources(root, route_commit)
 
 
 def _runtime_fingerprint() -> dict[str, str]:
@@ -2266,6 +3064,7 @@ def _normalize_distribution_name(value: str) -> str:
 
 def _installed_distributions(local_project: str) -> list[dict[str, str]]:
     local_name = _normalize_distribution_name(local_project)
+    purelib = Path(sysconfig.get_path("purelib")).resolve()
     values = []
     for distribution in importlib.metadata.distributions():
         raw_name = distribution.metadata.get("Name")
@@ -2273,6 +3072,10 @@ def _installed_distributions(local_project: str) -> list[dict[str, str]]:
             raise GateBExecutionEnvironmentFailure("installed distribution lacks a name")
         name = _normalize_distribution_name(raw_name)
         if name != local_name:
+            if Path(distribution.locate_file("")).resolve() != purelib:
+                raise GateBExecutionEnvironmentFailure(
+                    "installed distribution escaped the locked site-packages directory"
+                )
             values.append({"name": name, "version": distribution.version})
     values.sort(key=lambda item: item["name"])
     if len(values) != len({item["name"] for item in values}):
@@ -2295,9 +3098,28 @@ def _canonical_repository_relative_path(value: object, label: str) -> Path:
     return Path(*parts)
 
 
+def _locked_dependency_path(root: Path, value: object, label: str) -> Path:
+    if not isinstance(value, str) or not value:
+        raise GateBExecutionEnvironmentFailure(f"{label} is invalid")
+    candidate = Path(value)
+    if candidate.is_absolute():
+        if ".." in candidate.parts or str(candidate) != os.path.abspath(value):
+            raise GateBExecutionEnvironmentFailure(f"{label} is not canonical absolute")
+        return candidate
+    relative = _canonical_repository_relative_path(value, label)
+    target = (root / relative).resolve()
+    if root not in target.parents:
+        raise GateBExecutionEnvironmentFailure("locked path escapes repository")
+    return target
+
+
 def _verify_dependency_lock_unchecked(root: Path, context: GateBExecutionContext) -> str:
     lock_ref = context.payload["dependency_lock"]
     path = Path(lock_ref["absolute_path"])
+    if os.name == "nt":
+        from phase6.gate_b_v2_route import validate_gate_b_v2_fixed_local_path
+
+        validate_gate_b_v2_fixed_local_path(path, "dependency lock")
     metadata = path.lstat()
     if (
         not stat.S_ISREG(metadata.st_mode)
@@ -2333,12 +3155,6 @@ def _verify_dependency_lock_unchecked(root: Path, context: GateBExecutionContext
         or project["git_commit"] != context.payload["expected_implementation_commit"]
     ):
         raise GateBExecutionEnvironmentFailure("locked project provenance mismatch")
-    try:
-        installed_version = importlib.metadata.version(project["name"])
-    except importlib.metadata.PackageNotFoundError as exc:
-        raise GateBExecutionEnvironmentFailure("locked project is not installed") from exc
-    if installed_version != project["version"]:
-        raise GateBExecutionEnvironmentFailure("locked project version mismatch")
     distributions = lock["distributions"]
     if not isinstance(distributions, list):
         raise GateBExecutionEnvironmentFailure("locked distribution inventory is invalid")
@@ -2346,8 +3162,6 @@ def _verify_dependency_lock_unchecked(root: Path, context: GateBExecutionContext
         _closed(entry, {"name", "version"}, "locked distribution")
         _ascii(entry["name"], "locked distribution name")
         _ascii(entry["version"], "locked distribution version")
-    if distributions != _installed_distributions(project["name"]):
-        raise GateBExecutionEnvironmentFailure("installed distribution inventory drifted")
     python = _closed(
         lock["python"],
         {
@@ -2365,27 +3179,66 @@ def _verify_dependency_lock_unchecked(root: Path, context: GateBExecutionContext
         },
         "locked Python",
     )
-    relative_fields = ("pyvenv_cfg_path", "site_packages_path", "venv_executable_path")
+    path_fields = ("pyvenv_cfg_path", "site_packages_path", "venv_executable_path")
     resolved = {}
-    for name in relative_fields:
-        relative = _canonical_repository_relative_path(python[name], f"locked {name}")
-        target = (root / relative).resolve()
-        if root not in target.parents:
-            raise GateBExecutionEnvironmentFailure("locked path escapes repository")
-        resolved[name] = target
+    for name in path_fields:
+        resolved[name] = _locked_dependency_path(root, python[name], f"locked {name}")
     base_executable_text = python["base_executable_path"]
     if not isinstance(base_executable_text, str) or not base_executable_text:
         raise GateBExecutionEnvironmentFailure("locked base executable path is invalid")
     locked_base_executable = Path(base_executable_text)
-    if (
-        not locked_base_executable.is_absolute()
-        or str(locked_base_executable.resolve()) != base_executable_text
+    if not locked_base_executable.is_absolute() or str(locked_base_executable) != os.path.abspath(
+        base_executable_text
     ):
         raise GateBExecutionEnvironmentFailure("locked base executable path is not canonical")
-    executable = Path(sys.executable).resolve()
-    base_executable = Path(getattr(sys, "_base_executable", sys.executable)).resolve()
-    purelib = Path(sysconfig.get_path("purelib")).resolve()
-    pyvenv = (Path(sys.prefix) / "pyvenv.cfg").resolve()
+    # Validate every storage target, including the external base executable,
+    # before the first executable/config artifact read.  In particular this
+    # rejects UNC/device/ADS paths and a non-fixed nested mount under C:\\.
+    active_paths = {
+        "venv executable": Path(sys.executable),
+        "base executable": Path(getattr(sys, "_base_executable", sys.executable)),
+        "site-packages": Path(sysconfig.get_path("purelib")),
+        "pyvenv configuration": Path(sys.prefix) / "pyvenv.cfg",
+    }
+    if os.name == "nt":
+        for label, target in (
+            ("locked venv executable", resolved["venv_executable_path"]),
+            ("locked site-packages", resolved["site_packages_path"]),
+            ("locked pyvenv configuration", resolved["pyvenv_cfg_path"]),
+            ("locked base executable", locked_base_executable),
+            *((f"active {label}", target) for label, target in active_paths.items()),
+        ):
+            validate_gate_b_v2_fixed_local_path(target, label)
+    executable = active_paths["venv executable"].resolve()
+    base_executable = active_paths["base executable"].resolve()
+    purelib = active_paths["site-packages"].resolve()
+    pyvenv = active_paths["pyvenv configuration"].resolve()
+    locked_base_executable = locked_base_executable.resolve()
+    if (
+        executable != resolved["venv_executable_path"]
+        or purelib != resolved["site_packages_path"]
+        or pyvenv != resolved["pyvenv_cfg_path"]
+        or base_executable != locked_base_executable
+    ):
+        raise GateBExecutionEnvironmentFailure("active Python path topology drifted")
+    project_name = _ascii(project["name"], "locked project name")
+    project_version = _ascii(project["version"], "locked project version")
+    try:
+        project_metadata = tomllib.loads(
+            _commit_blob(root, project["git_commit"], "pyproject.toml").decode("utf-8")
+        )["project"]
+    except (KeyError, TypeError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise GateBExecutionEnvironmentFailure(
+            "locked project metadata cannot be verified"
+        ) from exc
+    if (
+        type(project_metadata) is not dict
+        or project_metadata.get("name") != project_name
+        or project_metadata.get("version") != project_version
+    ):
+        raise GateBExecutionEnvironmentFailure("locked project metadata mismatch")
+    if distributions != _installed_distributions(project["name"]):
+        raise GateBExecutionEnvironmentFailure("installed distribution inventory drifted")
     try:
         executable_hash = sha256_bytes(_read_pinned(executable, "venv executable"))
         base_executable_hash = sha256_bytes(_read_pinned(base_executable, "base executable"))
@@ -2396,11 +3249,7 @@ def _verify_dependency_lock_unchecked(root: Path, context: GateBExecutionContext
             "active Python topology verification failed"
         ) from exc
     if (
-        executable != resolved["venv_executable_path"]
-        or purelib != resolved["site_packages_path"]
-        or pyvenv != resolved["pyvenv_cfg_path"]
-        or base_executable != locked_base_executable
-        or executable_hash != python["venv_executable_sha256"]
+        executable_hash != python["venv_executable_sha256"]
         or base_executable_hash != python["base_executable_sha256"]
         or pyvenv_hash != python["pyvenv_cfg_sha256"]
         or python["compiler"] != platform.python_compiler()
@@ -2441,12 +3290,24 @@ def gate_b_v2_route_attestation_sha256(science_commit: str, route_commit: str) -
     return sha256_bytes(
         canonical_json_bytes(
             {
-                "schema_version": "phase6-gate-b-v2-route-attestation-v1",
+                "schema_version": "phase6-gate-b-v2-runtime-attestation-v2",
                 "science_commit": science_commit,
                 "execution_route_commit": route_commit,
-                "route_modules": [
-                    {"module_name": module_name, "repository_relative_path": relative_path}
-                    for module_name, relative_path in GATE_B_V2_ROUTE_MODULE_PATHS
+                "science_baseline_modules": [
+                    {
+                        "module_name": module_name,
+                        "repository_relative_path": relative_path,
+                        "reported_hash": "active_module_sources_sha256",
+                    }
+                    for module_name, relative_path in ACTIVE_MODULE_PATHS
+                ],
+                "runtime_modules": [
+                    {
+                        "module_name": module_name,
+                        "repository_relative_path": relative_path,
+                        "source_commit": "execution_route_commit",
+                    }
+                    for module_name, relative_path in GATE_B_V2_RUNTIME_MODULE_PATHS
                 ],
                 "allowed_change_paths": list(GATE_B_V2_ROUTE_ALLOWED_CHANGE_PATHS),
             }
@@ -2462,6 +3323,7 @@ def _verify_gate_b_v2_execution_environment_unchecked(
     execution_route_commit: str,
 ) -> tuple[GateBExecutionEvidence, str]:
     """Verify the approved science object and the active route object separately."""
+    require_gate_b_v2_source_only_startup()
     if context is not request.execution_context:
         raise GateBExecutionEnvironmentFailure("execution context object mismatch")
     if context.payload["expected_implementation_commit"] != science_commit:
@@ -2497,7 +3359,7 @@ def _verify_gate_b_v2_execution_environment_unchecked(
     ):
         raise GateBExecutionEnvironmentFailure("v2 route repository state drifted")
     science_modules = _v2_science_module_sources(root, context, science_commit)
-    _v2_route_module_sources(root, execution_route_commit)
+    runtime_modules = _v2_runtime_module_sources(root, execution_route_commit)
     runtime = _runtime_fingerprint()
     if runtime != _plain(context.payload["runtime_fingerprint"]):
         raise GateBExecutionEnvironmentFailure("runtime fingerprint drifted")
@@ -2511,6 +3373,8 @@ def _verify_gate_b_v2_execution_environment_unchecked(
             sha256_bytes(canonical_json_bytes(science_modules)),
             dependency_hash,
             sha256_bytes(canonical_json_bytes(runtime)),
+            execution_route_commit,
+            sha256_bytes(canonical_json_bytes(runtime_modules)),
         ),
         attestation_sha256,
     )
@@ -2637,14 +3501,10 @@ def reserve_gate_b_attempt(
     """Create the one durable reservation path before any Test-child open."""
     if is_gate_b_v2_compatibility_object(request):
         _fail("legacy reservation rejects v2 compatibility objects")
-    from phase6.gate_b_v2_route import (
-        claim_gate_b_v2_reservation_authorization,
-        is_gate_b_v2_runtime_request,
+    return GateBLedgerStore.reserve_attempt(
+        request,
+        expected_latest_record_sha256=expected_latest_record_sha256,
     )
-
-    if is_gate_b_v2_runtime_request(request):
-        claim_gate_b_v2_reservation_authorization(request)
-    return _reserve_attempt(request, expected_latest_record_sha256=expected_latest_record_sha256)
 
 
 @dataclass(slots=True)
@@ -2656,6 +3516,7 @@ class PreparedGateBTestOpen:
     _store: GateBLedgerStore = field(repr=False)
     _lock: Any = field(repr=False)
     _root_descriptors: dict[str, int] = field(repr=False)
+    _root_paths: dict[str, Path] = field(repr=False)
     _consumed: bool = field(default=False, repr=False)
     _closed: bool = field(default=False, repr=False)
 
@@ -2703,18 +3564,20 @@ def prepare_gate_b_test_open(
     lock = store.lock()
     lock.__enter__()
     root_descriptors: dict[str, int] = {}
+    root_paths: dict[str, Path] = {}
     try:
         for role in ("ledger_base", "quarantine_base", "test_root"):
-            _ref, root = _validate_root_ref(_plain(request.roots[role]), role)
+            ref, root = _validate_root_ref(_plain(request.roots[role]), role)
             descriptor = _open_directory_descriptor(root)
             metadata = os.fstat(descriptor)
             if (
-                format(metadata.st_ino, "x") != request.roots[role]["file_id_hex"]
-                or format(metadata.st_dev, "x") != request.roots[role]["volume_id_hex"]
+                format(metadata.st_ino, "x") != ref["file_id_hex"]
+                or format(metadata.st_dev, "x") != ref["volume_id_hex"]
             ):
                 os.close(descriptor)
                 _fail("prepared root handle identity mismatch")
             root_descriptors[role] = descriptor
+            root_paths[role] = root
         chain = store.load_chain()
         latest = chain[-1] if chain else None
         if (
@@ -2728,7 +3591,14 @@ def prepare_gate_b_test_open(
             os.close(descriptor)
         lock.__exit__(*sys.exc_info())
         raise
-    return PreparedGateBTestOpen(request, reservation, store, lock, root_descriptors)
+    return PreparedGateBTestOpen(
+        request,
+        reservation,
+        store,
+        lock,
+        root_descriptors,
+        root_paths,
+    )
 
 
 def _open_child_from_root(
@@ -3757,7 +4627,7 @@ def open_gate_b_test_input(
             handles.extend(components.values())
             handles.extend(handle for _ref, handle in comparators)
             handles.extend(handle for _ref, handle in ablations)
-            test_root = Path(request.roots["test_root"]["absolute_path"])
+            test_root = prepared._root_paths["test_root"]
             prepared._lock.verify_identity()
             first_payload = _PinnedInput.open_first_unverified_at(
                 prepared._root_descriptors["test_root"],
@@ -3819,7 +4689,7 @@ def open_gate_b_test_input(
             if first_payload.identity in known_identities:
                 raise GateBTestInputFailure("opponent payload physical alias detected")
             known_identities.add(first_payload.identity)
-            test_root = Path(request.roots["test_root"]["absolute_path"])
+            test_root = prepared._root_paths["test_root"]
             for ref in opponent_refs[1:]:
                 handle = _PinnedInput.open_unread_at(
                     prepared._root_descriptors["test_root"],

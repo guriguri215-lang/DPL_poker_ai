@@ -185,6 +185,7 @@ def test_non_windows_cli_imports_and_fails_closed_before_reference_open(
     [
         ("spec", "gate_b_invalid_spec", 1),
         ("preflight", "gate_b_invalid_preflight", 1),
+        ("post_seal", "gate_b_invalid_preflight", 1),
         ("contract", "gate_b_contract_error", 1),
         ("ledger", "gate_b_ledger_error", 1),
         ("loader", "gate_b_loader_error", 1),
@@ -215,6 +216,10 @@ def test_v2_cli_exception_mapping_is_canonical_and_closed(
             from phase6.gate_b_orchestrator import GateBPreflightError
 
             raise GateBPreflightError
+        if exception == "post_seal":
+            from phase6.gate_b_orchestrator import GateBPostSealValidationError
+
+            raise GateBPostSealValidationError
         if exception == "contract":
             from phase6.gate_b_contracts import GateBContractError
 

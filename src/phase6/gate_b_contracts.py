@@ -1903,7 +1903,15 @@ def build_gate_b_v2_compatibility_trust_chain(
         anchor_hashes=anchor_hashes,
     )
     rebuilt = build_gate_b_preapproval_root_identity_projection_v2(roots)
-    if rebuilt.canonical_bytes != projection.canonical_bytes or rebuilt.sha256 != projection.sha256:
+    rebuilt_mismatch = (
+        rebuilt.canonical_bytes != projection.canonical_bytes or rebuilt.sha256 != projection.sha256
+    )
+    rebuilt_snapshot = _V2_PROJECTION_REGISTRY.pop(id(rebuilt), None)
+    if rebuilt_snapshot is None or rebuilt_snapshot[0] is not rebuilt:
+        _fail("v2 rebuilt projection registry identity changed")
+    object.__setattr__(rebuilt, "payload", MappingProxyType({}))
+    object.__setattr__(rebuilt, "canonical_bytes", b"")
+    if rebuilt_mismatch:
         _fail("v2 loader roots differ from the approved projection")
     paths = {role: Path(root["absolute_path"]) for role, root in roots.items()}
     if len({os.path.normcase(str(path)) for path in paths.values()}) != 3:

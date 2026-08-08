@@ -173,6 +173,10 @@ class GateBPreflightError(GateBOrchestratorError):
     """A one-shot pre-reservation trust gate failed."""
 
 
+class GateBPostSealValidationError(GateBPreflightError):
+    """The sealed receipt, ledger, or manifest failed its public contract join."""
+
+
 class _CliUsageError(ValueError):
     pass
 
@@ -1748,8 +1752,15 @@ def _execute_prepared_gate_b_v2_once(route: object) -> Mapping[str, Any]:
         receipt = _open_with_callback_classification(prepared, executor)
         try:
             return _gate_b_v2_execution_receipt(route, request, receipt)
-        except GateBV2RouteError:
-            _raise_sanitized(GateBPreflightError)
+        except (
+            GateBV2RouteError,
+            GateBLedgerError,
+            GateBLoaderError,
+            OSError,
+            TypeError,
+            ValueError,
+        ):
+            _raise_sanitized(GateBPostSealValidationError)
     except BaseException as exc:
         primary_error = exc
         raise

@@ -51,6 +51,11 @@ The packaged Windows-only Gate B v2 route is exposed as
 local volume and stops after the initial attempt is durably `SEALED`:
 
 ```powershell
+$python = (Get-Command python.exe).Source
+$env:PYTHONDONTWRITEBYTECODE = '1'
+$env:PYTHONNOUSERSITE = '1'
+$env:PYTHONSAFEPATH = '1'
+$env:PYTHONPYCACHEPREFIX = $python
 poker-xai-gate-b-v2 execute-once-v2 `
   --spec-parent 'D:\gate-b\approved' `
   --spec-parent-identity-scheme windows-volume-file-id-v1 `
@@ -62,10 +67,32 @@ poker-xai-gate-b-v2 execute-once-v2 `
   --expected-spec-size-bytes <positive-size>
 ```
 
-UNC paths, device paths, alternate data streams, and non-fixed volumes are
-rejected before artifact open. The parent volume/file identity, exact bootstrap
-bytes, two approved Git commits, and active route sources must all match. A
-prepared route is single-consume; replay fails closed. Replace the placeholders
+The four interpreter variables above are part of the v2 authorization
+boundary. `PYTHONPYCACHEPREFIX` must resolve to the exact running `python.exe`,
+which is a regular file rather than a cache directory. Together with disabled
+bytecode writes, safe-path mode, and disabled user-site discovery, this makes
+every repository `__pycache__` (including an ignored timestamp-valid cache)
+unaddressable from process startup. The same boundary can be expressed for a
+module launch as `python -B -P -s -X pycache_prefix=<exact-python.exe> -m
+phase6.gate_b_v2_cli ...`. A process started without this source-only boundary
+is rejected before the first v2 artifact read or reservation; it is never
+re-executed implicitly.
+
+UNC paths, device paths, alternate data streams, nested volume mounts, and
+non-fixed target volumes are rejected before artifact open. Storage checks use
+the mount that actually contains each target, not only its drive-letter root.
+The parent volume/file identity, exact bootstrap bytes, two approved Git
+commits, and the complete runtime source inventory must all match.
+
+The console metadata may be packaged in a wheel, but production preflight is
+deliberately repository-source-only: every executed Gate B module (including
+the executor's calibration, exact-EV, sampling, and production-input helpers)
+must originate from the approved checkout and match its declared Git commit.
+A wheel or `site-packages` module origin therefore fails closed. Use an
+editable/repository-source installation when invoking the packaged command.
+
+A prepared route is single-consume; replay and either public reserve entry
+point without its one-shot authorization fail closed. Replace the placeholders
 only with independently approved evidence, and do not use this example against
 production data.
 
