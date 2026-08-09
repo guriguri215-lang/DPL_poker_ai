@@ -1389,7 +1389,7 @@ def _authorization_entry_matches(
             and registered_route[6]
             and registered_route == _prepared_snapshot(route)
             and route.plan is plan
-            and route.request is request
+            and plan.request is request
             and route._consumed
             and not route._closed
         )
@@ -2450,7 +2450,7 @@ def validate_gate_b_v2_reservation_entry(request: GateBLoaderRequest) -> bool:
                 else None,
             )
             and type(registered_route) is PreparedGateBV2ExecutionRoute
-            and registered_route.request is request
+            and registered_route.plan.request is request
             and registered_route._consumed
             and not registered_route._closed
             and request._v2_reservation_origin is _V2_RUNTIME_REQUEST_TOKEN

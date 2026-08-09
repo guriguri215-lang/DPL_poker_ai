@@ -1514,11 +1514,6 @@ def test_consume_returns_the_locked_snapshot_without_post_authorization_reread(
         property(guarded_request),
     )
     result = route.consume()
-    monkeypatch.setattr(
-        route_module.PreparedGateBV2ExecutionRoute,
-        "request",
-        request_property,
-    )
     close_gate_b_v2_execution_route(route)
 
     assert result == (expected_request, expected_executor)
