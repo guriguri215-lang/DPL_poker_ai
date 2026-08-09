@@ -49,6 +49,8 @@ jobs:
   test-windows:
     name: Windows / Python 3.12.10
     runs-on: windows-2022
+    env:
+      POKER_XAI_OFFLINE_BUILD_BACKEND_PATH: ${{ github.workspace }}\.venv\Lib\site-packages
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Set up Python 3.12.10

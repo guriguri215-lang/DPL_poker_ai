@@ -2053,13 +2053,13 @@ def test_v2_root_projection_exact_golden_vectors_and_source_binding() -> None:
         b'],"schema_version":"phase6-gate-b-preapproval-root-identity-projection-v2","serializatio'
         b'n_profile":"windows-volume8-file16-lowerhex-v1","source_materialization_projection":{"sc'
         b'hema_version":"phase6-gate-b-preapproval-root-identity-projection-v1","serialization_pro'
-        b'file":"windows-volume8-file16-lowerhex-v1","sha256":"134f7169a949b41de3bb0b6de8f9c80c3e6'
-        b'5cab477d31bae2581281df8c57a09","size_bytes":1111}}\n'
+        b'file":"windows-volume8-file16-lowerhex-v1","sha256":"94f80575ad801a9d98175eeae668d11d5bb'
+        b'4f1b9da8369808fc84159cef375d0","size_bytes":868}}\n'
     )
     assert fixture.projection.canonical_bytes == expected
-    assert len(expected) == 1195
+    assert len(expected) == 1194
     assert fixture.projection.sha256 == (
-        "ec7e4b0d06ccbc562c904a570991239dd186c2e222d69db2c418966ad9d01686"
+        "a21b2ba8630267c4ae59ff30a7304e478982537926e8c5282d9f7e338bc49a26"
     )
     assert fixture.descriptor == {
         "schema_version": ROOT_IDENTITY_PROJECTION_DESCRIPTOR_V2_SCHEMA_VERSION,
@@ -2078,9 +2078,9 @@ def test_v2_root_projection_exact_golden_vectors_and_source_binding() -> None:
         ),
         "source_materialization_projection_sha256": (SOURCE_MATERIALIZATION_PROJECTION_SHA256),
     }
-    assert len(canonical_json_bytes(fixture.descriptor)) == 732
+    assert len(canonical_json_bytes(fixture.descriptor)) == 731
     assert sha256_bytes(canonical_json_bytes(fixture.descriptor)) == (
-        "ed31edde3f62c99271223e2885d857f006c6b6d7bb344446295bc25335319ee5"
+        "1eb5c3ac9a6e7b966e33ffbb103acce38f2771b7224d726ebb32ee8cf0983e14"
     )
 
 

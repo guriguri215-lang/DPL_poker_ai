@@ -4503,13 +4503,13 @@ def test_v2_materialization_specs_join_exact_hashes_without_materializing(
         (
             "readiness",
             lambda value: value["projection_descriptor"].__setitem__(
-                "source_materialization_projection_size_bytes", 1111.0
+                "source_materialization_projection_size_bytes", 868.0
             ),
         ),
         (
             "request",
             lambda value: value["projection_descriptor"].__setitem__(
-                "source_materialization_projection_size_bytes", 1111.0
+                "source_materialization_projection_size_bytes", 868.0
             ),
         ),
         (
@@ -4564,7 +4564,7 @@ def test_v2_materialization_specs_reject_noncanonical_bytes_and_private_tamper()
 def test_v2_materialization_spec_provenance_rejects_int_float_equivalence() -> None:
     fixture = _v2_specs_fixture()
     descriptor = copy.deepcopy(fixture.chain_fixture.descriptor)
-    descriptor["source_materialization_projection_size_bytes"] = 1111.0
+    descriptor["source_materialization_projection_size_bytes"] = 868.0
     object.__setattr__(
         fixture.specs,
         "projection_descriptor",
