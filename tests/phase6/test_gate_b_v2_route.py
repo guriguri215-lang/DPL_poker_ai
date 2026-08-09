@@ -2234,8 +2234,8 @@ def test_repeated_trust_chain_failure_retires_projection_bytes_registry_and_obje
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _source, _chain, _request, _spec, _kwargs, first_reference = (
-        _production_bootstrap_reference(tmp_path)
+    _source, _chain, _request, _spec, _kwargs, first_reference = _production_bootstrap_reference(
+        tmp_path
     )
     reference_values = {
         name: getattr(first_reference, name)
@@ -2287,13 +2287,9 @@ def test_repeated_trust_chain_failure_retires_projection_bytes_registry_and_obje
         projection = captured.pop()
         assert projection.canonical_bytes == b"" and not projection.payload
         assert (
-            set(route_module.gate_b_contracts_module._V2_PROJECTION_REGISTRY)
-            == projection_baseline
+            set(route_module.gate_b_contracts_module._V2_PROJECTION_REGISTRY) == projection_baseline
         )
-        assert (
-            set(route_module.gate_b_contracts_module._V2_TRUST_CHAIN_REGISTRY)
-            == chain_baseline
-        )
+        assert set(route_module.gate_b_contracts_module._V2_TRUST_CHAIN_REGISTRY) == chain_baseline
         assert set(route_module._PINNED_SPEC_REGISTRY) == pinned_baseline
         projection_id = id(projection)
         del projection
