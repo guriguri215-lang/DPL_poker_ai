@@ -2119,10 +2119,10 @@ def test_previous_reviewer_request_hash_pair_cannot_reach_a_full_v2_chain() -> N
     original = _rejected_synthetic_v2_request_raw(requested_at_utc="2026-08-01T00:04:00Z")
     substituted = _rejected_synthetic_v2_request_raw(requested_at_utc="2026-08-01T00:05:00Z")
     assert sha256_bytes(original) == (
-        "6f2c9a59dce7fd8a6d75ac2b5a5cb86984b001529a11159ef62af8b7819e9bf2"
+        "e79a44c2aba921699f3a54e1cbfc0c838597a4e0ac12ca8788b6bdc344e3c39b"
     )
     assert sha256_bytes(substituted) == (
-        "fc73e83f693b087c1d6a0acfd6caa19772266f1fba9cd28863355067670ec523"
+        "dd1474212192dc6d433279df7c0b40a3a8900421c84319432628f98939da94a8"
     )
     with pytest.raises(GateBContractError):
         build_gate_b_preapproval_root_identity_projection_v2(
@@ -2211,16 +2211,16 @@ def test_v2_trust_chain_exact_stored_byte_hash_join_and_golden_hashes() -> None:
     fixture = _v2_chain_fixture()
     assert validate_gate_b_v2_compatibility_trust_chain(fixture.chain) is fixture.chain
     assert fixture.chain.artifact_hashes == {
-        "approval_record": "86cf4c0372a4c7906dc76256879543cd3a889b5edfb2cf0648d465d567e389f0",
-        "signature_record": "b621f392ee60331b2effa786791af66c4abf16d2d444088918b853cd02c66a08",
+        "approval_record": "44ef3bab33f8f0c69b56d39531018ecb403dc512dce49db33bcdd304e72ddf22",
+        "signature_record": "f67932eba6f37d88b8bbb6b2b5c682fc9f032875b8872ea1ecf568c57992411a",
         "readiness_authorization": (
-            "dc2135cfc7429082456eaed05cb2d4530f9d78681d03c94214d54601237daee7"
+            "e24a8d079b8b314caca01a76270c480242a15919fbe78b7628125ddfe88429b6"
         ),
-        "ledger_root_anchor": "0fb77a8b1861fd2db73be46be6957ff893a007df940ee28b1158ecdfb5dd8961",
+        "ledger_root_anchor": "89a04f7a54368112540d75d1be94c37c64679f186d2196b171d10c555f323146",
         "quarantine_root_anchor": (
-            "2b35c1425fa7d0c5b5b3a57e8f03065f3c8cbbbcac5aea4b56afc199f0feefe9"
+            "f9e1d26b04deaeb71540d1e50b3668a0f0e0526a2eca262d7020a9069054fe6f"
         ),
-        "loader_request": "cbbd3ee39e8e63afac0b2f01c75d15aec7980a30576a383e216db58a13eb51cb",
+        "loader_request": "45a304f1322e5aea823e14403a10c0de2a610a671a570ab5f54e30e53e6fdab2",
     }
     assert tuple(fixture.chain.roots) == PREAPPROVAL_ROOT_ROLE_ORDER
     assert fixture.chain.request_payload["operation"] == "compatibility_preflight_only"

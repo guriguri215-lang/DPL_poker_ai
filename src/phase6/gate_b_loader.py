@@ -3200,7 +3200,12 @@ def _locked_dependency_path(root: Path, value: object, label: str) -> Path:
     return target
 
 
-def _verify_dependency_lock_unchecked(root: Path, context: GateBExecutionContext) -> str:
+def _verify_dependency_lock_unchecked(
+    root: Path,
+    context: GateBExecutionContext,
+    *,
+    active_topology: tuple[Path, Path] | None = None,
+) -> str:
     lock_ref = context.payload["dependency_lock"]
     path = Path(lock_ref["absolute_path"])
     if os.name == "nt":
@@ -3281,7 +3286,11 @@ def _verify_dependency_lock_unchecked(root: Path, context: GateBExecutionContext
     # Validate every storage target, including the external base executable,
     # before the first executable/config artifact read.  In particular this
     # rejects UNC/device/ADS paths and a non-fixed nested mount under C:\\.
-    venv_root, dependency_path = require_gate_b_v2_bootstrap_topology()
+    if active_topology is None:
+        venv_root = Path(sys.prefix)
+        dependency_path = Path(sysconfig.get_path("purelib"))
+    else:
+        venv_root, dependency_path = active_topology
     active_paths = {
         "venv executable": Path(sys.executable),
         "base executable": Path(getattr(sys, "_base_executable", sys.executable)),
@@ -3356,9 +3365,18 @@ def _verify_dependency_lock_unchecked(root: Path, context: GateBExecutionContext
     return sha256_bytes(raw)
 
 
-def _verify_dependency_lock(root: Path, context: GateBExecutionContext) -> str:
+def _verify_dependency_lock(
+    root: Path,
+    context: GateBExecutionContext,
+    *,
+    active_topology: tuple[Path, Path] | None = None,
+) -> str:
     try:
-        return _verify_dependency_lock_unchecked(root, context)
+        return _verify_dependency_lock_unchecked(
+            root,
+            context,
+            active_topology=active_topology,
+        )
     except GateBExecutionEnvironmentFailure:
         raise
     except BaseException as exc:
@@ -3451,7 +3469,11 @@ def _verify_gate_b_v2_execution_environment_unchecked(
     runtime = _runtime_fingerprint()
     if runtime != _plain(context.payload["runtime_fingerprint"]):
         raise GateBExecutionEnvironmentFailure("runtime fingerprint drifted")
-    dependency_hash = _verify_dependency_lock(root, context)
+    dependency_hash = _verify_dependency_lock(
+        root,
+        context,
+        active_topology=require_gate_b_v2_bootstrap_topology(),
+    )
     if _file_snapshot(index_path) != before_index:
         raise GateBExecutionEnvironmentFailure("repository index changed during read-only probe")
     return (

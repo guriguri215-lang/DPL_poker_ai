@@ -2610,10 +2610,11 @@ def test_dependency_lock_binds_complete_runtime_and_rejects_unknown_field(
     )
     monkeypatch.setattr(loader_module.sys, "executable", str(venv_executable))
     monkeypatch.setattr(loader_module.sys, "_base_executable", str(base_executable))
+    monkeypatch.setattr(loader_module.sys, "prefix", str(root))
     monkeypatch.setattr(
-        loader_module,
-        "require_gate_b_v2_bootstrap_topology",
-        lambda: (root, site_packages),
+        loader_module.sysconfig,
+        "get_path",
+        lambda name: str(site_packages) if name == "purelib" else None,
     )
     monkeypatch.setattr(loader_module.platform, "python_compiler", lambda: runtime["compiler"])
     monkeypatch.setattr(
