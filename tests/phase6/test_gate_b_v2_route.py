@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import gc
 import os
 import subprocess
 import threading
@@ -843,6 +844,152 @@ def _prepare_with_fake_roots(
 
 
 @WINDOWS_PRODUCTION
+def test_initial_prewrite_failure_repeatedly_releases_every_registered_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registries = {
+        "plans": route_module._PLAN_REGISTRY,
+        "plan_routes": route_module._PLAN_ROUTE_OWNERS,
+        "prepared": route_module._PREPARED_REGISTRY,
+        "artifacts": route_module._ARTIFACT_REGISTRY,
+        "root_refs": route_module._ROOT_REF_REGISTRY,
+        "input_owners": route_module._INPUT_OWNER_REGISTRY,
+        "origins": route_module._V2_RUNTIME_REQUEST_ORIGINS,
+        "runtime_plans": route_module._V2_RUNTIME_REQUEST_PLANS,
+        "authorizations": route_module._V2_RESERVATION_AUTHORIZATIONS,
+    }
+    baselines = {name: set(registry) for name, registry in registries.items()}
+    captured_routes = []
+    captured_executors = []
+    executor_references = []
+    request_references = []
+
+    monkeypatch.setattr(route_module, "verify_gate_b_v2_pinned_directory", lambda *_a, **_k: None)
+    monkeypatch.setattr(route_module, "verify_gate_b_v2_retained_root_topology", lambda *_a: None)
+
+    def reject_runtime(request, _context):
+        route = next(
+            snapshot[0]
+            for snapshot in route_module._PREPARED_REGISTRY.values()
+            if snapshot[1].request is request
+        )
+        captured_routes.append(route)
+        captured_executors.append(route.executor)
+        executor_references.append(weakref.ref(route.executor))
+        request_references.append(weakref.ref(request))
+        raise ValueError("forced initial pre-write failure")
+
+    monkeypatch.setattr(
+        route_module,
+        "verify_gate_b_v2_runtime_execution_environment",
+        reject_runtime,
+    )
+
+    for attempt in range(3):
+        _source, chain, _request, _spec, kwargs = _production_plan_fixture(tmp_path / str(attempt))
+        plan = build_gate_b_v2_execution_plan(chain, **kwargs)
+        artifacts = tuple(plan._artifacts.values())
+        owners = plan._input_owners
+        root_references = tuple(plan.request.roots.values())
+        bundle = plan.phase6_contract_bundle_evidence
+        bundle_artifacts = bundle.artifacts
+        projection = chain.projection
+        roots = []
+        by_path = {root["absolute_path"]: role for role, root in _plain(chain.roots).items()}
+
+        def fake_open(
+            path,
+            _by_path=by_path,
+            _chain=chain,
+            _roots=roots,
+            **_kwargs,
+        ):
+            root = _FakePinnedRoot(_by_path[path], _chain)
+            _roots.append(root)
+            return root
+
+        monkeypatch.setattr(route_module, "open_gate_b_v2_pinned_directory", fake_open)
+        with pytest.raises(GateBV2RouteError, match="environment failed before reservation"):
+            prepare_gate_b_v2_execution_route(plan)
+
+        failed_route = captured_routes[-1]
+        failed_executor = captured_executors[-1]
+        assert failed_route._closed
+        assert failed_route.plan is None and failed_route.executor is None
+        assert not failed_route._directories and failed_route._executor_provenance == ()
+        assert failed_executor._phase6_contract_bundle_evidence is None
+        assert not failed_executor._manifest
+        assert plan._closed and plan.request is None
+        assert all(artifact.raw == b"" and artifact.size_bytes == 0 for artifact in artifacts)
+        assert all(
+            owner._closed and not owner.artifacts and not owner.directories for owner in owners
+        )
+        assert all(
+            reference._anchor_raw is None and not reference._payload
+            for reference in root_references
+        )
+        assert bundle.root_manifest_raw == b"" and not bundle.artifacts
+        assert all(artifact.raw == b"" for artifact in bundle_artifacts)
+        assert chain.projection is None and not chain._artifact_raws
+        assert projection.canonical_bytes == b""
+        assert all(root.closed for root in roots)
+        for name, registry in registries.items():
+            assert set(registry) == baselines[name]
+
+    captured_routes.clear()
+    captured_executors.clear()
+    del failed_executor, failed_route, plan
+    gc.collect()
+    assert all(reference() is None for reference in executor_references)
+    assert all(reference() is None for reference in request_references)
+
+
+@WINDOWS_PRODUCTION
+def test_plan_prepare_has_exclusive_route_ownership(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _source, chain, _request, _spec, kwargs = _production_plan_fixture(tmp_path)
+    plan = build_gate_b_v2_execution_plan(chain, **kwargs)
+    route, roots = _prepare_with_fake_roots(plan, chain, monkeypatch)
+    registered_routes = set(route_module._PREPARED_REGISTRY)
+
+    with pytest.raises(GateBV2RouteError, match="execution plan is already prepared"):
+        prepare_gate_b_v2_execution_route(plan)
+
+    assert set(route_module._PREPARED_REGISTRY) == registered_routes
+    owner = route_module._PLAN_ROUTE_OWNERS[id(plan)]
+    assert owner[0] is plan and owner[1] is route
+    assert not route._closed and not any(root.closed for root in roots.values())
+    close_gate_b_v2_execution_route(route)
+
+
+@WINDOWS_PRODUCTION
+def test_prepared_plan_direct_close_owns_route_and_retained_root_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _source, chain, _request, _spec, kwargs = _production_plan_fixture(tmp_path)
+    plan = build_gate_b_v2_execution_plan(chain, **kwargs)
+    route, roots = _prepare_with_fake_roots(plan, chain, monkeypatch)
+    executor = route.executor
+    plan_id = id(plan)
+    route_id = id(route)
+
+    close_gate_b_v2_execution_plan(plan)
+
+    assert all(root.closed for root in roots.values())
+    assert plan_id not in route_module._PLAN_ROUTE_OWNERS
+    assert plan_id not in route_module._PLAN_REGISTRY
+    assert route_id not in route_module._PREPARED_REGISTRY
+    assert route._closed and route.plan is None and route.executor is None
+    assert executor._phase6_contract_bundle_evidence is None and not executor._manifest
+    close_gate_b_v2_execution_route(route)
+    close_gate_b_v2_execution_plan(plan)
+
+
+@WINDOWS_PRODUCTION
 def test_unprepared_plan_has_explicit_idempotent_close_and_unregisters_request(
     tmp_path: Path,
 ) -> None:
@@ -1053,6 +1200,8 @@ def test_consume_then_close_cleans_request_lifecycle_and_rejects_reuse(
     route, _roots = _prepare_with_fake_roots(plan, chain, monkeypatch)
     request, _executor = route.consume()
     request_id = id(request)
+    plan_id = id(plan)
+    route_id = id(route)
     lower_reserve_calls: list[str] = []
     monkeypatch.setattr(
         ledger_module,
@@ -1068,10 +1217,14 @@ def test_consume_then_close_cleans_request_lifecycle_and_rejects_reuse(
     assert request_id not in route_module._V2_RESERVATION_AUTHORIZATIONS
     assert request_id not in route_module._V2_RUNTIME_REQUEST_PLANS
     assert request_id not in route_module._V2_RUNTIME_REQUEST_COPY_PROVENANCE
+    assert plan_id not in route_module._PLAN_ROUTE_OWNERS
+    assert route_id not in route_module._PREPARED_REGISTRY
     for call in (loader_module.reserve_gate_b_attempt, GateBLedgerStore.reserve_attempt):
         with pytest.raises(GateBLedgerError):
             call(request, expected_latest_record_sha256=None)
     assert lower_reserve_calls == []
+    with pytest.raises(GateBV2RouteError):
+        route.consume()
 
 
 @WINDOWS_PRODUCTION
@@ -1374,6 +1527,7 @@ def test_route_close_releases_registries_object_graph_and_artifact_bytes(
     plan_id = id(plan)
     close_gate_b_v2_execution_route(route)
     assert route_id not in route_module._PREPARED_REGISTRY
+    assert plan_id not in route_module._PLAN_ROUTE_OWNERS
     assert plan_id not in route_module._PLAN_REGISTRY
     assert all(id(artifact) not in route_module._ARTIFACT_REGISTRY for artifact in artifacts)
     assert all(artifact.raw == b"" and artifact.size_bytes == 0 for artifact in artifacts)

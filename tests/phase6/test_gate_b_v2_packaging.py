@@ -4,9 +4,12 @@ import importlib
 import importlib.metadata
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import sysconfig
+import tempfile
 import tomllib
 from pathlib import Path
 
@@ -23,6 +26,8 @@ def test_readme_documents_the_exact_packaged_invocation() -> None:
     root = Path(__file__).resolve().parents[2]
     readme = (root / "README.md").read_text(encoding="utf-8")
     assert "poker-xai-gate-b-v2 execute-once-v2" in readme
+    assert "$env:PYTHONPATH = (Resolve-Path .\\src).Path" in readme
+    assert "PYTHONPATH` must\ncontain exactly that checkout's resolved `src` directory" in readme
     assert "PYTHONPYCACHEPREFIX" in readme
     assert "-B -P -s -X pycache_prefix=<exact-python.exe>" in readme
     for option in (
@@ -110,23 +115,40 @@ def test_real_python_m_entrypoint_emits_the_fixed_invalid_argument_contract() ->
     }
 
 
-def test_console_metadata_survives_offline_target_install_without_mutating_venv(
-    tmp_path: Path,
-) -> None:
+def test_console_metadata_survives_isolated_offline_target_install() -> None:
+    root = Path(__file__).resolve().parents[2]
+    project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    build_requirements = project["build-system"]["requires"]
+    dev_requirements = project["project"]["optional-dependencies"]["dev"]
+    build_setuptools = [value for value in build_requirements if value.startswith("setuptools")]
+    dev_setuptools = [value for value in dev_requirements if value.startswith("setuptools")]
+    assert build_setuptools == dev_setuptools
+    assert len(build_setuptools) == 1
+    match = re.fullmatch(r"setuptools==([0-9]+\.[0-9]+\.[0-9]+)", build_setuptools[0])
+    assert match is not None, "the build backend must use one complete setuptools pin"
+    required_setuptools_version = match.group(1)
+
     scheme = sysconfig.get_preferred_scheme("prefix")
+    configured_backend = os.environ.get("POKER_XAI_OFFLINE_BUILD_BACKEND_PATH")
     candidate_paths = tuple(
         dict.fromkeys(
-            Path(
-                sysconfig.get_path(
-                    "purelib",
-                    scheme=scheme,
-                    vars={"base": prefix, "platbase": prefix},
-                )
-            ).resolve()
-            for prefix in (sys.prefix, sys.base_prefix)
+            (
+                *((Path(configured_backend).resolve(),) if configured_backend else ()),
+                *(
+                    Path(
+                        sysconfig.get_path(
+                            "purelib",
+                            scheme=scheme,
+                            vars={"base": prefix, "platbase": prefix},
+                        )
+                    ).resolve()
+                    for prefix in (sys.prefix, sys.base_prefix)
+                ),
+            )
         )
     )
-    backend: tuple[Path, str] | None = None
+    backend_path: Path | None = None
+    discovered_versions = []
     for path in candidate_paths:
         matches = tuple(
             distribution
@@ -135,72 +157,105 @@ def test_console_metadata_survives_offline_target_install_without_mutating_venv(
         )
         if matches:
             assert len(matches) == 1, "approved local setuptools backend path is ambiguous"
-            backend = path, matches[0].version
-            break
-    if backend is None:
+            discovered_versions.append(matches[0].version)
+            if matches[0].version == required_setuptools_version:
+                backend_path = path
+                break
+    if backend_path is None:
         raise AssertionError(
-            "offline packaging evidence is incomplete: provision setuptools>=77 in the "
+            "offline packaging evidence is incomplete: provision "
+            f"setuptools=={required_setuptools_version} in the "
             "approved exact Python from an approved local environment or offline wheelhouse; "
-            "network download is forbidden"
+            f"found {discovered_versions or ['none']}; network download is forbidden"
         ) from None
-    backend_path, setuptools_version = backend
-    assert int(setuptools_version.split(".", 1)[0]) >= 77, (
-        "offline packaging evidence is incomplete: upgrade the approved exact Python to "
-        f"setuptools>=77 from an approved local environment or offline wheelhouse; found "
-        f"{setuptools_version}; network download is forbidden"
-    )
-    root = Path(__file__).resolve().parents[2]
-    target = tmp_path / "offline-target"
-    environment = os.environ.copy()
-    backend_python_path = os.pathsep.join(
-        value for value in (environment.get("PYTHONPATH"), str(backend_path)) if value
-    )
-    environment.update(
-        {
-            "PYTHONDONTWRITEBYTECODE": "1",
-            "PYTHONNOUSERSITE": "1",
-            "PIP_NO_INDEX": "1",
-            "PYTHONPATH": backend_python_path,
-        }
-    )
-    installed = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pip",
-            "install",
-            "--no-index",
-            "--no-cache-dir",
-            "--no-deps",
-            "--no-build-isolation",
-            "--target",
-            str(target),
-            str(root),
-        ],
-        cwd=tmp_path,
-        check=False,
-        capture_output=True,
-        text=True,
-        env=environment,
-        timeout=120,
-    )
-    assert installed.returncode == 0, installed.stderr
-    entry_points = tuple(target.glob("poker_xai-*.dist-info/entry_points.txt"))
-    assert len(entry_points) == 1
-    assert "poker-xai-gate-b-v2 = phase6.gate_b_v2_cli:main" in entry_points[0].read_text(
-        encoding="utf-8"
-    )
-    outside = tmp_path / "outside-repository"
-    outside.mkdir()
-    run_environment = environment.copy()
-    run_environment.update(
-        {
-            "PYTHONPATH": str(target),
-            "PYTHONSAFEPATH": "1",
-            "PYTHONPYCACHEPREFIX": str(Path(sys.executable).resolve()),
-        }
-    )
-    script = f"""
+
+    with tempfile.TemporaryDirectory(prefix="gbp-") as temporary_directory:
+        work = Path(temporary_directory)
+        isolated_source = work / "source"
+        target = work / "target"
+        outside = work / "run"
+        isolated_source.mkdir()
+        outside.mkdir()
+        for name in ("pyproject.toml", "README.md", "LICENSE"):
+            shutil.copy2(root / name, isolated_source / name)
+        shutil.copytree(
+            root / "src",
+            isolated_source / "src",
+            ignore=shutil.ignore_patterns(
+                "__pycache__",
+                "*.py[cod]",
+                "*.egg-info",
+                "build",
+                "dist",
+            ),
+        )
+        assert not tuple(isolated_source.rglob("__pycache__"))
+        assert not tuple(isolated_source.rglob("*.egg-info"))
+        assert not (isolated_source / "build").exists()
+
+        environment = os.environ.copy()
+        for name in (
+            "PYTHONHOME",
+            "PYTHONPATH",
+            "PIP_CONFIG_FILE",
+            "PIP_INDEX_URL",
+            "PIP_EXTRA_INDEX_URL",
+            "PIP_FIND_LINKS",
+            "PIP_REQUIRE_VIRTUALENV",
+            "PIP_TARGET",
+        ):
+            environment.pop(name, None)
+        environment.update(
+            {
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "PYTHONNOUSERSITE": "1",
+                "PYTHONPATH": str(backend_path),
+            }
+        )
+        installed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "--isolated",
+                "install",
+                "--disable-pip-version-check",
+                "--no-index",
+                "--no-cache-dir",
+                "--no-compile",
+                "--no-deps",
+                "--no-build-isolation",
+                "--use-pep517",
+                "--target",
+                str(target),
+                str(isolated_source),
+            ],
+            cwd=work,
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+            timeout=120,
+        )
+        assert installed.returncode == 0, installed.stderr
+        entry_points = tuple(target.glob("poker_xai-*.dist-info/entry_points.txt"))
+        assert len(entry_points) == 1
+        assert "poker-xai-gate-b-v2 = phase6.gate_b_v2_cli:main" in entry_points[0].read_text(
+            encoding="utf-8"
+        )
+
+        run_environment = os.environ.copy()
+        run_environment.pop("PYTHONHOME", None)
+        run_environment.update(
+            {
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "PYTHONNOUSERSITE": "1",
+                "PYTHONPATH": str(target),
+                "PYTHONSAFEPATH": "1",
+                "PYTHONPYCACHEPREFIX": str(Path(sys.executable).resolve()),
+            }
+        )
+        script = f"""
 import importlib.metadata
 from phase6.gate_b_loader import require_gate_b_v2_source_only_startup
 
@@ -216,19 +271,28 @@ matches = [
 assert len(matches) == 1
 raise SystemExit(matches[0].load()())
 """
-    invoked = subprocess.run(
-        [sys.executable, "-c", script],
-        cwd=outside,
-        check=False,
-        capture_output=True,
-        env=run_environment,
-        timeout=30,
-    )
-    assert invoked.returncode == 2
-    assert invoked.stdout == b""
-    assert json.loads(invoked.stderr) == {
-        "schema_version": "phase6-gate-b-v2-cli-error-v1",
-        "operation": "pre-dispatch",
-        "status": "failed",
-        "error_code": "gate_b_invalid_arguments",
-    }
+        invoked = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                "-P",
+                "-s",
+                "-X",
+                f"pycache_prefix={Path(sys.executable).resolve()}",
+                "-c",
+                script,
+            ],
+            cwd=outside,
+            check=False,
+            capture_output=True,
+            env=run_environment,
+            timeout=30,
+        )
+        assert invoked.returncode == 2
+        assert invoked.stdout == b""
+        assert json.loads(invoked.stderr) == {
+            "schema_version": "phase6-gate-b-v2-cli-error-v1",
+            "operation": "pre-dispatch",
+            "status": "failed",
+            "error_code": "gate_b_invalid_arguments",
+        }

@@ -56,6 +56,7 @@ $env:PYTHONDONTWRITEBYTECODE = '1'
 $env:PYTHONNOUSERSITE = '1'
 $env:PYTHONSAFEPATH = '1'
 $env:PYTHONPYCACHEPREFIX = $python
+$env:PYTHONPATH = (Resolve-Path .\src).Path
 poker-xai-gate-b-v2 execute-once-v2 `
   --spec-parent 'D:\gate-b\approved' `
   --spec-parent-identity-scheme windows-volume-file-id-v1 `
@@ -67,8 +68,10 @@ poker-xai-gate-b-v2 execute-once-v2 `
   --expected-spec-size-bytes <positive-size>
 ```
 
-The four interpreter variables above are part of the v2 authorization
-boundary. `PYTHONPYCACHEPREFIX` must resolve to the exact running `python.exe`,
+The five interpreter variables above are part of the v2 authorization
+boundary. Run this command from the approved checkout root: `PYTHONPATH` must
+contain exactly that checkout's resolved `src` directory and no other entry.
+`PYTHONPYCACHEPREFIX` must resolve to the exact running `python.exe`,
 which is a regular file rather than a cache directory. Together with disabled
 bytecode writes, safe-path mode, and disabled user-site discovery, this makes
 every repository `__pycache__` (including an ignored timestamp-valid cache)

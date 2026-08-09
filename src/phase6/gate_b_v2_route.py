@@ -116,6 +116,7 @@ _ARTIFACT_HASH_FIELDS = {
     "batch_manifest_sha256",
 }
 _PLAN_TOKEN = object()
+_PLAN_PREPARING_TOKEN = object()
 _PREPARED_TOKEN = object()
 _ARTIFACT_TOKEN = object()
 _ROOT_REF_TOKEN = object()
@@ -127,6 +128,7 @@ _V2_RUNTIME_REQUEST_TOKEN = object()
 _V2_RESERVATION_AUTHORIZATION_TOKEN = object()
 _ANCHOR_NOT_PROVIDED = object()
 _PLAN_REGISTRY: dict[int, tuple[object, ...]] = {}
+_PLAN_ROUTE_OWNERS: dict[int, tuple[object, object]] = {}
 _PREPARED_REGISTRY: dict[int, tuple[object, ...]] = {}
 _ARTIFACT_REGISTRY: dict[int, tuple[object, ...]] = {}
 _ROOT_REF_REGISTRY: dict[int, tuple[object, ...]] = {}
@@ -1430,8 +1432,17 @@ def close_gate_b_v2_execution_plan(
     *,
     _allow_unregistered_runtime_plan: bool = False,
 ) -> None:
-    """Close a plan while excluding an in-flight durable reservation."""
+    """Close a plan and any prepared route while excluding a durable reservation."""
     with _V2_RESERVATION_AUTHORIZATION_LOCK:
+        owner = _PLAN_ROUTE_OWNERS.get(id(plan))
+        if (
+            type(owner) is tuple
+            and len(owner) == 2
+            and owner[0] is plan
+            and type(owner[1]) is PreparedGateBV2ExecutionRoute
+        ):
+            owner[1]._close_locked()
+            return
         _close_gate_b_v2_execution_plan_locked(
             plan,
             allow_unregistered_runtime_plan=_allow_unregistered_runtime_plan,
@@ -1444,8 +1455,20 @@ def _close_gate_b_v2_execution_plan_locked(
     allow_unregistered_runtime_plan: bool,
 ) -> None:
     """Close an unprepared plan, using only its registered owner snapshot."""
+    route_owner = _PLAN_ROUTE_OWNERS.pop(
+        id(plan),
+        _V2_LIFECYCLE_REGISTRY_MISSING,
+    )
     registered_entry = _PLAN_REGISTRY.get(id(plan))
-    validation_error = False
+    validation_error = not (
+        route_owner is _V2_LIFECYCLE_REGISTRY_MISSING
+        or (
+            type(route_owner) is tuple
+            and len(route_owner) == 2
+            and route_owner[0] is plan
+            and route_owner[1] is _PLAN_PREPARING_TOKEN
+        )
+    )
     try:
         closed_tombstone_matches = (
             type(plan) is GateBV2ExecutionPlan
@@ -2471,6 +2494,19 @@ class PreparedGateBV2ExecutionRoute:
                     first_error = exc
         registered_plan = registered[1] if registered[0] is self else None
         if type(registered_plan) is GateBV2ExecutionPlan:
+            owner = _PLAN_ROUTE_OWNERS.pop(
+                id(registered_plan),
+                _V2_LIFECYCLE_REGISTRY_MISSING,
+            )
+            if not (
+                type(owner) is tuple
+                and len(owner) == 2
+                and owner[0] is registered_plan
+                and owner[1] is self
+            ):
+                validation_error = GateBV2RouteError(
+                    "v2 retained-root close provenance failed closed"
+                )
             try:
                 close_gate_b_v2_execution_plan(registered_plan)
             except BaseException as exc:
@@ -2546,6 +2582,12 @@ def validate_prepared_gate_b_v2_execution_route(
         or fresh_executor != route._executor_provenance
         or route.executor._phase6_contract_bundle_evidence
         is not route.plan.phase6_contract_bundle_evidence
+        or not (
+            type(_PLAN_ROUTE_OWNERS.get(id(route.plan))) is tuple
+            and len(_PLAN_ROUTE_OWNERS[id(route.plan)]) == 2
+            and _PLAN_ROUTE_OWNERS[id(route.plan)][0] is route.plan
+            and _PLAN_ROUTE_OWNERS[id(route.plan)][1] is route
+        )
         or route._token is not _PREPARED_TOKEN
     ):
         _fail("v2 prepared-route provenance mismatch")
@@ -2558,7 +2600,18 @@ def prepare_gate_b_v2_execution_route(
 ) -> PreparedGateBV2ExecutionRoute:
     """Build the exact executor, then retain exact roots without any write."""
     _require_v2_source_only_startup()
-    validated = validate_gate_b_v2_execution_plan(plan)
+    with _V2_RESERVATION_AUTHORIZATION_LOCK:
+        validated = validate_gate_b_v2_execution_plan(plan)
+        if id(validated) in _PLAN_ROUTE_OWNERS:
+            _fail("v2 execution plan is already prepared")
+        _PLAN_ROUTE_OWNERS[id(validated)] = (validated, _PLAN_PREPARING_TOKEN)
+        return _prepare_owned_gate_b_v2_execution_route(validated)
+
+
+def _prepare_owned_gate_b_v2_execution_route(
+    validated: GateBV2ExecutionPlan,
+) -> PreparedGateBV2ExecutionRoute:
+    """Prepare one exclusively owned plan while the lifecycle lock is held."""
     try:
         executor = GateBProductionExecutor.from_request(
             validated.request,
@@ -2568,14 +2621,17 @@ def prepare_gate_b_v2_execution_route(
         )
         executor_provenance = _executor_snapshot(executor)
     except GateBV2RouteError:
+        _PLAN_ROUTE_OWNERS.pop(id(validated), None)
         with suppress(Exception):
             close_gate_b_v2_execution_plan(validated)
         raise
     except Exception:
+        _PLAN_ROUTE_OWNERS.pop(id(validated), None)
         with suppress(Exception):
             close_gate_b_v2_execution_plan(validated)
         _fail("v2 production executor construction failed closed")
     opened: dict[str, GateBPinnedDirectory] = {}
+    route: PreparedGateBV2ExecutionRoute | None = None
     try:
         for role in _ROOT_ROLES:
             root = validated.roots[role]
@@ -2599,16 +2655,24 @@ def prepare_gate_b_v2_execution_route(
         for name, value in values.items():
             object.__setattr__(route, name, value)
         _PREPARED_REGISTRY[id(route)] = _prepared_snapshot(route)
+        _PLAN_ROUTE_OWNERS[id(validated)] = (validated, route)
         route.verify_pre_write()
         return route
     except BaseException:
-        for role in reversed(_ROOT_ROLES):
-            directory = opened.get(role)
-            if directory is not None:
-                with suppress(Exception):
-                    directory.close()
-        with suppress(Exception):
-            close_gate_b_v2_execution_plan(validated)
+        if route is not None:
+            with suppress(BaseException):
+                route._close_locked()
+        else:
+            for role in reversed(_ROOT_ROLES):
+                directory = opened.get(role)
+                if directory is not None:
+                    with suppress(Exception):
+                        directory.close()
+            _PLAN_ROUTE_OWNERS.pop(id(validated), None)
+            object.__setattr__(executor, "_manifest", MappingProxyType({}))
+            object.__setattr__(executor, "_phase6_contract_bundle_evidence", None)
+            with suppress(Exception):
+                close_gate_b_v2_execution_plan(validated)
         raise
 
 
