@@ -2059,7 +2059,7 @@ def test_v2_root_projection_exact_golden_vectors_and_source_binding() -> None:
     assert fixture.projection.canonical_bytes == expected
     assert len(expected) == 1195
     assert fixture.projection.sha256 == (
-        'ec7e4b0d06ccbc562c904a570991239dd186c2e222d69db2c418966ad9d01686'
+        "ec7e4b0d06ccbc562c904a570991239dd186c2e222d69db2c418966ad9d01686"
     )
     assert fixture.descriptor == {
         "schema_version": ROOT_IDENTITY_PROJECTION_DESCRIPTOR_V2_SCHEMA_VERSION,

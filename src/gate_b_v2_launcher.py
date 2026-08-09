@@ -16,9 +16,12 @@ def _startup_error() -> int:
         "status": "failed",
         "error_code": "gate_b_invalid_preflight",
     }
-    raw = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode(
-        "ascii"
-    ) + b"\n"
+    raw = (
+        json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode(
+            "ascii"
+        )
+        + b"\n"
+    )
     try:
         sys.stderr.buffer.write(raw)
         sys.stderr.buffer.flush()

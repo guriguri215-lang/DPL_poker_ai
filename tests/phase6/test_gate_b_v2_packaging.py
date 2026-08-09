@@ -142,9 +142,7 @@ def test_exact_startup_blocks_pth_and_sitecustomize_before_bootstrap(tmp_path: P
     side_effect = tmp_path / "startup-hook-ran.txt"
     hook = f"from pathlib import Path; Path({str(side_effect)!r}).write_text('ran')\n"
     (site_packages / "sitecustomize.py").write_text(hook, encoding="utf-8")
-    (site_packages / "malicious-startup.pth").write_text(
-        "import sitecustomize\n", encoding="utf-8"
-    )
+    (site_packages / "malicious-startup.pth").write_text("import sitecustomize\n", encoding="utf-8")
     environment = os.environ.copy()
     environment.pop("PYTHONHOME", None)
     environment.update(

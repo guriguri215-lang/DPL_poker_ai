@@ -129,14 +129,11 @@ def bootstrap_gate_b_v2_source_only_startup() -> Path:
             if value
         )
         startup_paths = tuple(
-            Path(value).resolve()
-            for value in sys.path
-            if value and Path(value).exists()
+            Path(value).resolve() for value in sys.path if value and Path(value).exists()
         )
         startup_prefix = Path(config["pycache_prefix"]).resolve()
         if os.name == "nt" and (
-            not executable.drive
-            or str(executable).startswith(("\\\\", "\\\\?\\", "\\\\.\\"))
+            not executable.drive or str(executable).startswith(("\\\\", "\\\\?\\", "\\\\.\\"))
         ):
             raise GateBV2StartupError("Gate B v2 startup requires a fixed local executable")
         if (
@@ -156,9 +153,7 @@ def bootstrap_gate_b_v2_source_only_startup() -> Path:
             or python_path != (source_root,)
             or startup_paths.count(source_root) != 1
             or "" in sys.path
-            or any(
-                path.name in {"site-packages", "dist-packages"} for path in startup_paths
-            )
+            or any(path.name in {"site-packages", "dist-packages"} for path in startup_paths)
             or os.environ.get("PYTHONDONTWRITEBYTECODE") != "1"
             or os.environ.get("PYTHONNOUSERSITE") != "1"
             or os.environ.get("PYTHONSAFEPATH") != "1"
