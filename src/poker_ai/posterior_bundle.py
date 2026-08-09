@@ -299,7 +299,7 @@ def _validate_estimator_payload(payload: dict[str, Any]) -> None:
         if payload.get(key) != expected:
             raise ValueError(f"unsupported estimator artifact field {key!r}")
     tau = payload.get("tau")
-    if not isinstance(tau, (int, float)) or not math.isfinite(tau) or not 0.0 < tau < 1.0:
+    if not isinstance(tau, int | float) or not math.isfinite(tau) or not 0.0 < tau < 1.0:
         raise ValueError("estimator artifact tau must be finite and in (0, 1)")
     floor = payload.get("min_effective_sample_size")
     if isinstance(floor, bool) or not isinstance(floor, int) or floor <= 0:
@@ -310,7 +310,7 @@ def _validate_estimator_payload(payload: dict[str, Any]) -> None:
         "nodelock_exploit_min_confidence",
     ):
         value = payload.get(key)
-        if not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 1:
+        if not isinstance(value, int | float) or not math.isfinite(value) or not 0 <= value <= 1:
             raise ValueError(f"estimator artifact {key!r} must be in [0, 1]")
 
 
@@ -398,7 +398,7 @@ def _validate_snapshot_join(
         if record.get("tau") != tau or record.get("q") != q:
             raise ValueError("terminal snapshot tau/q do not match estimator and baseline")
         recorded_confidence = record.get("posterior_confidence")
-        if not isinstance(recorded_confidence, (int, float)) or not math.isclose(
+        if not isinstance(recorded_confidence, int | float) or not math.isclose(
             recorded_confidence,
             confidence,
             rel_tol=0.0,

@@ -2122,7 +2122,7 @@ def _retry_catalog(batch: GateBBatchManifest) -> dict[str, tuple[str, ...]]:
         reasons = batch.payload["governance"]["technical_retry_reasons"]
     except (KeyError, TypeError) as exc:
         raise GateBLedgerError("technical retry catalog is unavailable") from exc
-    if not isinstance(reasons, (list, tuple)) or not reasons:
+    if not isinstance(reasons, list | tuple) or not reasons:
         _fail("technical retry catalog is invalid")
     catalog: dict[str, tuple[str, ...]] = {}
     for item in reasons:
@@ -2134,7 +2134,7 @@ def _retry_catalog(batch: GateBBatchManifest) -> dict[str, tuple[str, ...]]:
         reason_id = _atom(item["reason_id"], "technical retry reason")
         states = item["eligible_from_states"]
         if (
-            not isinstance(states, (list, tuple))
+            not isinstance(states, list | tuple)
             or not states
             or tuple(states) != tuple(state for state in ("RESERVED", "STARTED") if state in states)
         ):

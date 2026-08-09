@@ -52,6 +52,7 @@ from phase6.gate_b_v2_route import (
     build_gate_b_v2_pinned_spec_reference,
     close_gate_b_v2_execution_plan,
     close_gate_b_v2_execution_route,
+    consume_gate_b_v2_execution_route,
     prepare_gate_b_v2_execution_route,
     prepare_gate_b_v2_execution_route_from_reference,
     validate_gate_b_v2_execution_plan,

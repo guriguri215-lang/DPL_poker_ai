@@ -1035,7 +1035,7 @@ def _json_ready(value: object) -> object:
         return {item.name: _json_ready(getattr(value, item.name)) for item in fields(value)}
     if isinstance(value, dict):
         return {str(key): _json_ready(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, list | tuple):
         return [_json_ready(item) for item in value]
     return value
 
