@@ -359,10 +359,18 @@ def require_gate_b_v2_source_only_startup() -> None:
         spec = _testinternalcapi.__spec__
         getter = _testinternalcapi.get_configs
         expected_origin = Path(sys.base_prefix) / "DLLs" / "_testinternalcapi.pyd"
+        if os.name == "nt":
+            trusted_provider = (
+                type(spec.loader) is importlib.machinery.ExtensionFileLoader
+                and Path(spec.origin).resolve() == expected_origin.resolve()
+            )
+        else:
+            trusted_provider = (
+                spec.loader is importlib.machinery.BuiltinImporter and spec.origin == "built-in"
+            )
         if (
             type(_testinternalcapi) is not ModuleType
-            or type(spec.loader) is not importlib.machinery.ExtensionFileLoader
-            or Path(spec.origin).resolve() != expected_origin.resolve()
+            or not trusted_provider
             or not inspect.isbuiltin(getter)
             or getter.__self__ is not _testinternalcapi
             or getter.__name__ != "get_configs"
@@ -382,8 +390,9 @@ def require_gate_b_v2_source_only_startup() -> None:
         executable_metadata = executable.lstat()
         from phase6.gate_b_v2_route import validate_gate_b_v2_fixed_local_path
 
-        validate_gate_b_v2_fixed_local_path(executable, "v2 source-only pycache barrier")
-        validate_gate_b_v2_fixed_local_path(expected_origin, "CPython startup provider")
+        if os.name == "nt":
+            validate_gate_b_v2_fixed_local_path(executable, "v2 source-only pycache barrier")
+            validate_gate_b_v2_fixed_local_path(expected_origin, "CPython startup provider")
         if (
             config["write_bytecode"] != 0
             or config["safe_path"] != 1

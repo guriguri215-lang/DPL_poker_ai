@@ -2348,6 +2348,19 @@ def _source_only_python_command(code: str) -> list[str]:
     ]
 
 
+def _source_only_python_environment(source_root: Path) -> dict[str, str]:
+    environment = os.environ.copy()
+    environment.pop("PYTHONPYCACHEPREFIX", None)
+    environment.update(
+        {
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONPATH": str(source_root.resolve()),
+        }
+    )
+    return environment
+
+
 def test_source_only_startup_attests_every_clean_runtime_module() -> None:
     root = Path(__file__).resolve().parents[2]
     code = (
@@ -2363,7 +2376,7 @@ def test_source_only_startup_attests_every_clean_runtime_module() -> None:
     result = subprocess.run(
         _source_only_python_command(code),
         cwd=root,
-        env={**os.environ, "PYTHONPATH": str((root / "src").resolve())},
+        env=_source_only_python_environment(root / "src"),
         check=True,
         capture_output=True,
         text=True,
@@ -2376,7 +2389,11 @@ def test_source_only_startup_ignores_self_deleting_default_pyc_side_effect(
     tmp_path: Path,
 ) -> None:
     copied_src = tmp_path / "src"
-    shutil.copytree(Path(__file__).resolve().parents[2] / "src", copied_src)
+    shutil.copytree(
+        Path(__file__).resolve().parents[2] / "src",
+        copied_src,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+    )
     source = copied_src / "phase6" / "gate_b_v2_cli.py"
     trusted = source.read_bytes()
     payload = (
@@ -2390,7 +2407,7 @@ def test_source_only_startup_ignores_self_deleting_default_pyc_side_effect(
     source.write_bytes(malicious)
     malicious_metadata = source.stat()
     cached = source.parent / "__pycache__" / f"{source.stem}.{sys.implementation.cache_tag}.pyc"
-    cached.parent.mkdir()
+    cached.parent.mkdir(parents=True, exist_ok=True)
     py_compile.compile(str(source), cfile=str(cached), doraise=True)
     source.write_bytes(trusted)
     os.utime(
@@ -2407,7 +2424,7 @@ def test_source_only_startup_ignores_self_deleting_default_pyc_side_effect(
     )
     result = subprocess.run(
         _source_only_python_command(code),
-        env={**os.environ, "PYTHONPATH": str(copied_src.resolve())},
+        env=_source_only_python_environment(copied_src),
         check=True,
         capture_output=True,
         text=True,
@@ -2419,6 +2436,15 @@ def test_source_only_startup_ignores_self_deleting_default_pyc_side_effect(
 
 def test_v2_source_only_guard_rejects_an_ordinary_existing_process() -> None:
     root = Path(__file__).resolve().parents[2]
+    environment = os.environ.copy()
+    for name in (
+        "PYTHONDONTWRITEBYTECODE",
+        "PYTHONNOUSERSITE",
+        "PYTHONPYCACHEPREFIX",
+        "PYTHONSAFEPATH",
+    ):
+        environment.pop(name, None)
+    environment["PYTHONPATH"] = str((root / "src").resolve())
     result = subprocess.run(
         [
             sys.executable,
@@ -2429,7 +2455,7 @@ def test_v2_source_only_guard_rejects_an_ordinary_existing_process() -> None:
             ),
         ],
         cwd=root,
-        env={**os.environ, "PYTHONPATH": str((root / "src").resolve())},
+        env=environment,
         check=False,
         capture_output=True,
         text=True,
@@ -2550,20 +2576,21 @@ def test_dependency_lock_binds_complete_runtime_and_rejects_unknown_field(
     monkeypatch.setattr(route_module, "validate_gate_b_v2_fixed_local_path", validate_path)
     monkeypatch.setattr(loader_module, "_read_pinned", read_pinned)
     assert loader_module._verify_dependency_lock(root, context) == lock_hash
-    assert events.index(("validate", "locked base executable")) < events.index(
-        ("read", "base executable")
-    )
-    assert events.index(("validate", "active base executable")) < events.index(
-        ("metadata", "distributions")
-    )
+    if os.name == "nt":
+        assert events.index(("validate", "locked base executable")) < events.index(
+            ("read", "base executable")
+        )
+        assert events.index(("validate", "active base executable")) < events.index(
+            ("metadata", "distributions")
+        )
 
-    events.clear()
-    monkeypatch.setattr(loader_module.sys, "_base_executable", r"\\server\share\python.exe")
-    with pytest.raises(GateBExecutionEnvironmentFailure):
-        loader_module._verify_dependency_lock(root, context)
-    assert ("read", "base executable") not in events
-    assert ("metadata", "distributions") not in events
-    monkeypatch.setattr(loader_module.sys, "_base_executable", str(base_executable))
+        events.clear()
+        monkeypatch.setattr(loader_module.sys, "_base_executable", r"\\server\share\python.exe")
+        with pytest.raises(GateBExecutionEnvironmentFailure):
+            loader_module._verify_dependency_lock(root, context)
+        assert ("read", "base executable") not in events
+        assert ("metadata", "distributions") not in events
+        monkeypatch.setattr(loader_module.sys, "_base_executable", str(base_executable))
 
     bad = copy.deepcopy(lock_payload)
     bad["unknown"] = True

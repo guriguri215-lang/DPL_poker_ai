@@ -18,7 +18,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import wraps
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import MappingProxyType
 from typing import Any
 
@@ -1502,7 +1502,7 @@ def build_gate_b_preapproval_root_identity_projection_v2(
             or any(unicodedata.category(character) in {"Cc", "Cf"} for character in absolute_path)
         ):
             _fail(f"{role} v2 preapproval root path mismatch")
-        path = Path(absolute_path)
+        path = PureWindowsPath(absolute_path)
         if not path.is_absolute() or ".." in path.parts or str(path) != absolute_path:
             _fail(f"{role} v2 preapproval root path must be canonical and absolute")
         if raw["identity_scheme"] != "windows-volume-file-id-v1":
