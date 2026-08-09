@@ -2554,14 +2554,21 @@ class GateBLedgerStore:
         # v2 one-shot capability check here so callers cannot bypass the
         # loader facade by invoking the store directly.
         from phase6.gate_b_v2_route import (
+            GateBV2RouteError,
             claim_gate_b_v2_reservation_authorization,
             is_gate_b_v2_runtime_request,
         )
 
         if is_gate_b_v2_runtime_request(request):
             try:
-                claim_gate_b_v2_reservation_authorization(request)
-            except Exception:
+                return claim_gate_b_v2_reservation_authorization(
+                    request,
+                    lambda: _reserve_attempt(
+                        request,
+                        expected_latest_record_sha256=expected_latest_record_sha256,
+                    ),
+                )
+            except GateBV2RouteError:
                 _fail("v2 reservation is not authorized by a consumed route")
         return _reserve_attempt(
             request,

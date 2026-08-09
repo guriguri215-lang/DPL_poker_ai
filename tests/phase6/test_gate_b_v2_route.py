@@ -5,6 +5,7 @@ import copy
 import os
 import subprocess
 import threading
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext, suppress
 from pathlib import Path
@@ -904,6 +905,7 @@ def test_runtime_request_marker_tamper_cannot_forge_reserve_authorization(
 ) -> None:
     _source, chain, _request, _spec, kwargs = _production_plan_fixture(tmp_path)
     plan = build_gate_b_v2_execution_plan(chain, **kwargs)
+    request = plan.request
     writes: list[str] = []
     monkeypatch.setattr(
         ledger_module,
@@ -920,9 +922,10 @@ def test_runtime_request_marker_tamper_cannot_forge_reserve_authorization(
     with pytest.raises(GateBLedgerError):
         GateBLedgerStore.reserve_attempt(plan.request, expected_latest_record_sha256=None)
     assert writes == []
-    with pytest.raises(GateBV2RouteError) if attack == "combined" else nullcontext():
+    with pytest.raises(GateBV2RouteError, match="v2 execution-plan close provenance mismatch"):
         close_gate_b_v2_execution_plan(plan)
     assert id(plan) not in route_module._PLAN_REGISTRY
+    assert plan.request is None and request._v2_reservation_state == "closed"
 
 
 @WINDOWS_PRODUCTION
@@ -1153,6 +1156,182 @@ def test_reserve_authorization_is_atomic_across_public_entrypoints(
 
 
 @WINDOWS_PRODUCTION
+@pytest.mark.parametrize("entrypoint", ["loader", "store"])
+def test_reserve_transaction_excludes_close_before_and_during_lower_reserve(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    entrypoint: str,
+) -> None:
+    _source, chain, _request, _spec, kwargs = _production_plan_fixture(tmp_path)
+    plan = build_gate_b_v2_execution_plan(chain, **kwargs)
+    route, roots = _prepare_with_fake_roots(plan, chain, monkeypatch)
+    request, _executor = route.consume()
+    request_id = id(request)
+    batch = request.batch
+    readiness = request.readiness
+    execution_context = request.execution_context
+    root_references = dict(request.roots)
+    owners = plan._input_owners
+    artifacts = tuple(plan._artifacts.values())
+    reservation = object()
+    authorization_checked = threading.Event()
+    allow_lower_start = threading.Event()
+    lower_started = threading.Event()
+    allow_lower_finish = threading.Event()
+    close_started = threading.Event()
+    lower_reserve_calls: list[object] = []
+    match_calls = 0
+    transaction_match_call = 2 if entrypoint == "loader" else 1
+    real_authorization_matches = route_module._authorization_entry_matches
+
+    def ordered_authorization_matches(entry, observed_request, observed_plan):
+        nonlocal match_calls
+        matches = real_authorization_matches(entry, observed_request, observed_plan)
+        if observed_request is request and matches:
+            match_calls += 1
+            if match_calls == transaction_match_call:
+                authorization_checked.set()
+                assert allow_lower_start.wait(30)
+        return matches
+
+    def assert_request_graph_is_live() -> None:
+        assert route.plan is plan and not route._closed
+        assert plan.request is request and not plan._closed
+        assert request.batch is batch
+        assert request.readiness is readiness
+        assert request.execution_context is execution_context
+        assert dict(request.roots) == root_references
+        assert request._v2_reservation_state == "authorized"
+        assert request_id in route_module._V2_RUNTIME_REQUEST_ORIGINS
+        assert request_id in route_module._V2_RESERVATION_AUTHORIZATIONS
+        assert route_module._V2_RUNTIME_REQUEST_PLANS[request_id] is plan
+        assert all(not owner._closed for owner in owners)
+        assert all(artifact.raw for artifact in artifacts)
+        assert all(not root.closed for root in roots.values())
+
+    def lower_reserve(observed_request, *, expected_latest_record_sha256):
+        assert observed_request is request
+        assert expected_latest_record_sha256 is None
+        assert_request_graph_is_live()
+        lower_reserve_calls.append(observed_request)
+        lower_started.set()
+        assert allow_lower_finish.wait(30)
+        assert_request_graph_is_live()
+        return reservation
+
+    monkeypatch.setattr(
+        route_module,
+        "_authorization_entry_matches",
+        ordered_authorization_matches,
+    )
+    monkeypatch.setattr(ledger_module, "_reserve_attempt", lower_reserve)
+    reserve = (
+        loader_module.reserve_gate_b_attempt
+        if entrypoint == "loader"
+        else GateBLedgerStore.reserve_attempt
+    )
+
+    def reserve_worker():
+        return reserve(request, expected_latest_record_sha256=None)
+
+    def close_worker():
+        close_started.set()
+        close_gate_b_v2_execution_route(route)
+        return "closed"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        reserve_future = pool.submit(reserve_worker)
+        assert authorization_checked.wait(30)
+        close_future = pool.submit(close_worker)
+        assert close_started.wait(30)
+        assert not close_future.done()
+        assert lower_reserve_calls == []
+        assert_request_graph_is_live()
+
+        allow_lower_start.set()
+        assert lower_started.wait(30)
+        assert not close_future.done()
+        assert lower_reserve_calls == [request]
+        assert_request_graph_is_live()
+
+        allow_lower_finish.set()
+        assert reserve_future.result(timeout=45) is reservation
+        assert close_future.result(timeout=45) == "closed"
+
+    assert request._v2_reservation_state == "closed"
+    assert request._v2_reservation_authorization is None
+    assert request_id not in route_module._V2_RUNTIME_REQUEST_ORIGINS
+    assert request_id not in route_module._V2_RESERVATION_AUTHORIZATIONS
+    assert request_id not in route_module._V2_RUNTIME_REQUEST_PLANS
+    assert request_id not in route_module._V2_RUNTIME_REQUEST_COPY_PROVENANCE
+    assert route._closed and route.plan is None and route.executor is None
+    assert plan.request is None
+    assert all(root.closed for root in roots.values())
+    for retry in (loader_module.reserve_gate_b_attempt, GateBLedgerStore.reserve_attempt):
+        with pytest.raises(GateBLedgerError):
+            retry(request, expected_latest_record_sha256=None)
+    assert lower_reserve_calls == [request]
+    close_gate_b_v2_execution_route(route)
+
+
+@WINDOWS_PRODUCTION
+@pytest.mark.parametrize("entrypoint", ["loader", "store"])
+def test_lower_reserve_failure_preserves_authorization_for_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    entrypoint: str,
+) -> None:
+    _source, chain, _request, _spec, kwargs = _production_plan_fixture(tmp_path)
+    plan = build_gate_b_v2_execution_plan(chain, **kwargs)
+    route, roots = _prepare_with_fake_roots(plan, chain, monkeypatch)
+    request, _executor = route.consume()
+    request_id = id(request)
+    reservation = object()
+    lower_reserve_calls: list[object] = []
+
+    def lower_reserve(observed_request, *, expected_latest_record_sha256):
+        assert observed_request is request
+        assert expected_latest_record_sha256 is None
+        assert observed_request.batch is request.batch
+        assert observed_request.readiness is request.readiness
+        assert observed_request.execution_context is request.execution_context
+        assert dict(observed_request.roots) == dict(request.roots)
+        lower_reserve_calls.append(observed_request)
+        if len(lower_reserve_calls) == 1:
+            raise GateBLedgerError("forced lower reservation failure")
+        return reservation
+
+    monkeypatch.setattr(ledger_module, "_reserve_attempt", lower_reserve)
+    reserve = (
+        loader_module.reserve_gate_b_attempt
+        if entrypoint == "loader"
+        else GateBLedgerStore.reserve_attempt
+    )
+
+    with pytest.raises(GateBLedgerError, match="forced lower reservation failure"):
+        reserve(request, expected_latest_record_sha256=None)
+
+    assert request._v2_reservation_state == "authorized"
+    assert (
+        request._v2_reservation_authorization
+        is route_module._V2_RESERVATION_AUTHORIZATION_TOKEN
+    )
+    assert request_id in route_module._V2_RESERVATION_AUTHORIZATIONS
+    assert route_module._V2_RUNTIME_REQUEST_PLANS[request_id] is plan
+    assert route.plan is plan and plan.request is request
+    assert all(not root.closed for root in roots.values())
+
+    assert reserve(request, expected_latest_record_sha256=None) is reservation
+    assert lower_reserve_calls == [request, request]
+    assert request._v2_reservation_state == "consumed"
+    assert request._v2_reservation_authorization is None
+    assert request_id not in route_module._V2_RESERVATION_AUTHORIZATIONS
+
+    close_gate_b_v2_execution_route(route)
+    assert all(root.closed for root in roots.values())
+
+
+@WINDOWS_PRODUCTION
 def test_post_consume_route_tamper_invalidates_reserve_authorization(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1221,6 +1400,246 @@ def test_route_close_releases_registries_object_graph_and_artifact_bytes(
     assert id(projection) not in route_module.gate_b_contracts_module._V2_PROJECTION_REGISTRY
     assert route.plan is None and route.executor is None
     close_gate_b_v2_execution_route(route)
+
+
+@WINDOWS_PRODUCTION
+@pytest.mark.parametrize("entrypoint", ["loader", "store"])
+@pytest.mark.parametrize(
+    "corruption",
+    ["origin-tuple", "state-list", "origin-marker", "authorization-marker"],
+)
+def test_public_reserve_rejects_malformed_lifecycle_without_raw_error_and_closes_graph(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    entrypoint: str,
+    corruption: str,
+) -> None:
+    _source, chain, _request, _spec, kwargs = _production_plan_fixture(tmp_path)
+    plan = build_gate_b_v2_execution_plan(chain, **kwargs)
+    route, roots = _prepare_with_fake_roots(plan, chain, monkeypatch)
+    request, _executor = route.consume()
+    request_id = id(request)
+    owners = plan._input_owners
+    owner_artifacts = tuple(artifact for owner in owners for artifact in owner.artifacts.values())
+    plan_artifacts = tuple(plan._artifacts.values())
+    root_references = tuple(request.roots.values())
+    bundle = plan.phase6_contract_bundle_evidence
+    bundle_artifacts = bundle.artifacts
+    lower_reserve_calls: list[object] = []
+
+    monkeypatch.setattr(
+        ledger_module,
+        "_reserve_attempt",
+        lambda *_args, **_kwargs: lower_reserve_calls.append(request),
+    )
+    if corruption == "origin-tuple":
+        route_module._V2_RUNTIME_REQUEST_ORIGINS[request_id] = (weakref.ref(request),)
+    elif corruption == "state-list":
+        object.__setattr__(request, "_v2_reservation_state", [])
+    elif corruption == "origin-marker":
+        object.__setattr__(request, "_v2_reservation_origin", None)
+    else:
+        object.__setattr__(request, "_v2_reservation_authorization", None)
+
+    reserve = (
+        loader_module.reserve_gate_b_attempt
+        if entrypoint == "loader"
+        else GateBLedgerStore.reserve_attempt
+    )
+    with pytest.raises(
+        GateBLedgerError,
+        match="v2 reservation is not authorized by a consumed route",
+    ) as captured:
+        reserve(request, expected_latest_record_sha256=None)
+
+    assert type(captured.value) is GateBLedgerError
+    assert lower_reserve_calls == []
+    with pytest.raises(
+        GateBV2RouteError,
+        match="v2 execution-plan close provenance mismatch",
+    ) as close_error:
+        close_gate_b_v2_execution_route(route)
+
+    assert type(close_error.value) is GateBV2RouteError
+    assert close_error.value.__cause__ is None
+    assert close_error.value.__context__ is None
+    assert request._v2_reservation_state == "closed"
+    assert request._v2_reservation_authorization is None
+    assert request_id not in route_module._V2_RUNTIME_REQUEST_ORIGINS
+    assert request_id not in route_module._V2_RESERVATION_AUTHORIZATIONS
+    assert request_id not in route_module._V2_RUNTIME_REQUEST_PLANS
+    assert id(route) not in route_module._PREPARED_REGISTRY
+    assert id(plan) not in route_module._PLAN_REGISTRY
+    assert all(owner._closed and not owner.artifacts and not owner.directories for owner in owners)
+    assert all(artifact.raw == b"" and artifact.size_bytes == 0 for artifact in owner_artifacts)
+    assert all(artifact.raw == b"" and artifact.size_bytes == 0 for artifact in plan_artifacts)
+    assert all(
+        id(reference) not in route_module._ROOT_REF_REGISTRY
+        and reference._anchor_raw is None
+        and not reference._payload
+        for reference in root_references
+    )
+    assert all(artifact.raw == b"" for artifact in bundle_artifacts)
+    assert bundle.root_manifest_raw == b"" and not bundle.artifacts
+    assert chain.projection is None and not chain._artifact_raws
+    assert plan._closed and plan.request is None and not plan._artifacts and not plan._input_owners
+    assert route._closed and route.plan is None and route.executor is None
+    assert all(root.closed for root in roots.values())
+    close_gate_b_v2_execution_route(route)
+
+
+class _ForeignLifecycleEntry:
+    pass
+
+
+_LIFECYCLE_REGISTRY_CORRUPTIONS = (
+    ("planned", "origin", "missing"),
+    ("authorized", "origin", "foreign"),
+    ("consumed", "origin", "malformed"),
+    ("planned", "plan", "missing"),
+    ("authorized", "plan", "foreign"),
+    ("consumed", "plan", "malformed"),
+    ("authorized", "authorization", "missing"),
+    ("authorized", "authorization", "foreign"),
+    ("authorized", "authorization", "malformed"),
+    ("planned", "authorization", "unexpected"),
+    ("consumed", "authorization", "unexpected"),
+)
+
+
+@WINDOWS_PRODUCTION
+@pytest.mark.parametrize("state,registry_name,mutation", _LIFECYCLE_REGISTRY_CORRUPTIONS)
+def test_close_lifecycle_registry_corruption_is_canonical_and_releases_graph(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+    registry_name: str,
+    mutation: str,
+) -> None:
+    _source, chain, _request, _spec, kwargs = _production_plan_fixture(tmp_path)
+    plan = build_gate_b_v2_execution_plan(chain, **kwargs)
+    route = None
+    roots: dict[str, _FakePinnedRoot] = {}
+    request = plan.request
+    if state in {"authorized", "consumed"}:
+        route, roots = _prepare_with_fake_roots(plan, chain, monkeypatch)
+        request, _executor = route.consume()
+    if state == "consumed":
+        monkeypatch.setattr(ledger_module, "_reserve_attempt", lambda *_a, **_k: object())
+        GateBLedgerStore.reserve_attempt(request, expected_latest_record_sha256=None)
+    assert request._v2_reservation_state == state
+
+    request_id = id(request)
+    owners = plan._input_owners
+    owner_artifacts = tuple(artifact for owner in owners for artifact in owner.artifacts.values())
+    plan_artifacts = tuple(plan._artifacts.values())
+    bundle = plan.phase6_contract_bundle_evidence
+    bundle_artifacts = bundle.artifacts
+    executor = route.executor if route is not None else None
+    foreign_entries: list[object] = []
+    registries = {
+        "origin": route_module._V2_RUNTIME_REQUEST_ORIGINS,
+        "authorization": route_module._V2_RESERVATION_AUTHORIZATIONS,
+        "plan": route_module._V2_RUNTIME_REQUEST_PLANS,
+    }
+    registry = registries[registry_name]
+    if mutation == "missing":
+        registry.pop(request_id, None)
+    elif registry_name == "origin":
+        if mutation == "foreign":
+            foreign = _ForeignLifecycleEntry()
+            foreign_entries.append(foreign)
+            registry[request_id] = weakref.ref(foreign)
+        else:
+            registry[request_id] = (weakref.ref(request),)
+    elif registry_name == "plan":
+        registry[request_id] = (
+            _ForeignLifecycleEntry() if mutation == "foreign" else (plan,)
+        )
+    elif mutation == "foreign":
+        registry[request_id] = (weakref.ref(request), _ForeignLifecycleEntry())
+    else:
+        registry[request_id] = (
+            () if mutation == "malformed" else (weakref.ref(request), object())
+        )
+
+    with pytest.raises(GateBV2RouteError) as captured:
+        if route is None:
+            close_gate_b_v2_execution_plan(plan)
+        else:
+            close_gate_b_v2_execution_route(route)
+
+    assert type(captured.value) is GateBV2RouteError
+    assert str(captured.value) == "v2 execution-plan close provenance mismatch"
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
+    assert request._v2_reservation_state == "closed"
+    assert request._v2_reservation_authorization is None
+    assert request_id not in route_module._V2_RUNTIME_REQUEST_ORIGINS
+    assert request_id not in route_module._V2_RESERVATION_AUTHORIZATIONS
+    assert request_id not in route_module._V2_RUNTIME_REQUEST_PLANS
+    assert request_id not in route_module._V2_RUNTIME_REQUEST_COPY_PROVENANCE
+    assert id(plan) not in route_module._PLAN_REGISTRY
+    assert all(owner._closed and not owner.artifacts and not owner.directories for owner in owners)
+    assert all(artifact.raw == b"" and artifact.size_bytes == 0 for artifact in owner_artifacts)
+    assert all(artifact.raw == b"" and artifact.size_bytes == 0 for artifact in plan_artifacts)
+    assert all(artifact.raw == b"" for artifact in bundle_artifacts)
+    assert bundle.root_manifest_raw == b"" and not bundle.artifacts
+    assert plan._closed and plan.request is None and not plan._artifacts and not plan._input_owners
+    assert chain.projection is None and not chain._artifact_raws
+    if route is not None:
+        assert id(route) not in route_module._PREPARED_REGISTRY
+        assert route._closed and route.plan is None and route.executor is None
+        assert all(root.closed for root in roots.values())
+        assert executor._phase6_contract_bundle_evidence is None and not executor._manifest
+        close_gate_b_v2_execution_route(route)
+    else:
+        close_gate_b_v2_execution_plan(plan)
+
+
+@WINDOWS_PRODUCTION
+def test_builder_cleanup_allows_runtime_plan_registration_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _source, chain, _request, _spec, kwargs = _production_plan_fixture(tmp_path)
+    bundle = kwargs["phase6_contract_bundle_evidence"]
+    registry_baselines = {
+        "plans": set(route_module._PLAN_REGISTRY),
+        "origins": set(route_module._V2_RUNTIME_REQUEST_ORIGINS),
+        "authorizations": set(route_module._V2_RESERVATION_AUTHORIZATIONS),
+        "runtime_plans": set(route_module._V2_RUNTIME_REQUEST_PLANS),
+    }
+    closed_owners = []
+    real_close_owner = route_module._close_input_owner
+
+    def recording_close_owner(owner):
+        closed_owners.append(owner)
+        real_close_owner(owner)
+
+    def reject_final_validation(_plan):
+        route_module._fail("forced final plan validation")
+
+    monkeypatch.setattr(route_module, "_close_input_owner", recording_close_owner)
+    monkeypatch.setattr(route_module, "validate_gate_b_v2_execution_plan", reject_final_validation)
+
+    with pytest.raises(GateBV2RouteError, match="forced final plan validation"):
+        build_gate_b_v2_execution_plan(chain, **kwargs)
+
+    assert set(route_module._PLAN_REGISTRY) == registry_baselines["plans"]
+    assert set(route_module._V2_RUNTIME_REQUEST_ORIGINS) == registry_baselines["origins"]
+    assert (
+        set(route_module._V2_RESERVATION_AUTHORIZATIONS)
+        == registry_baselines["authorizations"]
+    )
+    assert set(route_module._V2_RUNTIME_REQUEST_PLANS) == registry_baselines["runtime_plans"]
+    assert closed_owners
+    assert all(
+        owner._closed and not owner.artifacts and not owner.directories
+        for owner in closed_owners
+    )
+    assert bundle.root_manifest_raw == b"" and not bundle.artifacts
+    assert chain.projection is None and not chain._artifact_raws
 
 
 @WINDOWS_PRODUCTION
