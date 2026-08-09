@@ -3555,7 +3555,13 @@ def _verify_gate_b_execution_environment_unchecked(
     runtime = _runtime_fingerprint()
     if runtime != _plain(context.payload["runtime_fingerprint"]):
         raise GateBExecutionEnvironmentFailure("runtime fingerprint drifted")
-    dependency_hash = _verify_dependency_lock(root, context)
+    dependency_hash = _verify_dependency_lock(
+        root,
+        context,
+        active_topology=(
+            require_gate_b_v2_bootstrap_topology() if sys.flags.no_site else None
+        ),
+    )
     if _file_snapshot(index_path) != before_index:
         raise GateBExecutionEnvironmentFailure("repository index changed during read-only probe")
     return GateBExecutionEvidence(
