@@ -2375,11 +2375,11 @@ def _source_only_python_command(code: str) -> list[str]:
 
 def _source_only_python_environment(source_root: Path) -> dict[str, str]:
     environment = os.environ.copy()
-    environment.pop("PYTHONPYCACHEPREFIX", None)
     environment.update(
         {
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTHONNOUSERSITE": "1",
+            "PYTHONPYCACHEPREFIX": str(Path(sys.executable).resolve()),
             "PYTHONSAFEPATH": "1",
             "PYTHONPATH": str(source_root.resolve()),
         }
@@ -2410,6 +2410,57 @@ def test_source_only_startup_attests_every_clean_runtime_module() -> None:
     assert result.returncode == 0, result.stderr
     assert result.stdout == f"{len(loader_module.GATE_B_V2_RUNTIME_MODULE_PATHS)}\n"
     assert result.stderr == ""
+
+
+def test_source_only_startup_uses_attested_venv_dependency_topology() -> None:
+    root = Path(__file__).resolve().parents[2]
+    code = (
+        "import pathlib,sys,sysconfig; "
+        "from gate_b_v2_startup import require_gate_b_v2_bootstrap_topology; "
+        "from phase6 import gate_b_loader as loader; "
+        "venv_root,dependency_path=require_gate_b_v2_bootstrap_topology(); "
+        "assert venv_root==pathlib.Path(sys.executable).resolve().parent.parent; "
+        "assert dependency_path in [pathlib.Path(value).resolve() for value in sys.path]; "
+        "assert sys.version_info >= (3,14) or "
+        "pathlib.Path(sysconfig.get_path('purelib')).resolve()!=dependency_path; "
+        "inventory=loader._installed_distributions('poker-xai',dependency_path); "
+        "assert any(item['name']=='pydantic' for item in inventory); "
+        "print('attested-topology')"
+    )
+    result = subprocess.run(
+        _source_only_python_command(code),
+        cwd=root,
+        env=_source_only_python_environment(root / "src"),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "attested-topology\n"
+    assert result.stderr == ""
+
+
+@pytest.mark.parametrize("configured", [None, "mismatch"])
+def test_source_only_startup_rejects_pycache_environment_drift(
+    configured: str | None,
+) -> None:
+    root = Path(__file__).resolve().parents[2]
+    environment = _source_only_python_environment(root / "src")
+    if configured is None:
+        environment.pop("PYTHONPYCACHEPREFIX")
+    else:
+        environment["PYTHONPYCACHEPREFIX"] = str((root / configured).resolve())
+    result = subprocess.run(
+        _source_only_python_command("print('unexpected')"),
+        cwd=root,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert "source-only startup mismatch" in result.stderr
 
 
 def test_source_only_startup_ignores_self_deleting_default_pyc_side_effect(
@@ -2559,11 +2610,10 @@ def test_dependency_lock_binds_complete_runtime_and_rejects_unknown_field(
     )
     monkeypatch.setattr(loader_module.sys, "executable", str(venv_executable))
     monkeypatch.setattr(loader_module.sys, "_base_executable", str(base_executable))
-    monkeypatch.setattr(loader_module.sys, "prefix", str(root))
     monkeypatch.setattr(
-        loader_module.sysconfig,
-        "get_path",
-        lambda name: str(site_packages) if name == "purelib" else "",
+        loader_module,
+        "require_gate_b_v2_bootstrap_topology",
+        lambda: (root, site_packages),
     )
     monkeypatch.setattr(loader_module.platform, "python_compiler", lambda: runtime["compiler"])
     monkeypatch.setattr(
@@ -2580,7 +2630,7 @@ def test_dependency_lock_binds_complete_runtime_and_rejects_unknown_field(
     monkeypatch.setattr(
         loader_module,
         "_installed_distributions",
-        lambda _name: (
+        lambda _name, _dependency_path: (
             events.append(("metadata", "distributions")),
             [
                 {"name": "fixture-a", "version": "1.0"},

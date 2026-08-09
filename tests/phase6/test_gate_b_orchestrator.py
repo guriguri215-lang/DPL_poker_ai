@@ -3179,13 +3179,17 @@ def _relative_to_repository(repository_root: Path, path: Path) -> str:
 def _real_dependency_lock(repository_root: Path) -> dict[str, object]:
     executable = Path(sys.executable).resolve()
     base_executable = Path(getattr(sys, "_base_executable", sys.executable)).resolve()
-    purelib = Path(sysconfig.get_path("purelib")).resolve()
-    pyvenv = (Path(sys.prefix) / "pyvenv.cfg").resolve()
+    if sys.flags.no_site:
+        venv_root, purelib = loader_module.require_gate_b_v2_bootstrap_topology()
+        pyvenv = (venv_root / "pyvenv.cfg").resolve()
+    else:
+        purelib = Path(sysconfig.get_path("purelib")).resolve()
+        pyvenv = (Path(sys.prefix) / "pyvenv.cfg").resolve()
     project_name = "poker-xai"
     return {
         "schema_version": DEPENDENCY_LOCK_SCHEMA_VERSION,
         "lock_scope": "complete-installed-environment-snapshot",
-        "distributions": loader_module._installed_distributions(project_name),
+        "distributions": loader_module._installed_distributions(project_name, purelib),
         "project": {
             "git_commit": COMMIT,
             "name": project_name,

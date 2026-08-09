@@ -784,6 +784,7 @@ def _open_retained_input_owner(
     opened: dict[str, GateBPinnedDirectory] = {}
     parents: dict[str, _RetainedInputParent] = {}
     artifacts: dict[str, _RetainedInputArtifact] = {}
+    owner: _GateBV2RetainedInputOwner | None = None
     try:
         physical_parents: dict[tuple[int, int], str] = {}
         for key in sorted(parent_declarations):
@@ -862,6 +863,21 @@ def _open_retained_input_owner(
         for key in reversed(tuple(opened)):
             with suppress(Exception):
                 opened[key].close()
+        for artifact in tuple(artifacts.values()):
+            with suppress(BaseException):
+                object.__setattr__(artifact, "raw", b"")
+                object.__setattr__(artifact, "size_bytes", 0)
+        if owner is not None:
+            _INPUT_OWNER_REGISTRY.pop(id(owner), None)
+            for name, value in (
+                ("parents", MappingProxyType({})),
+                ("directories", MappingProxyType({})),
+                ("artifacts", MappingProxyType({})),
+                ("_closed", True),
+                ("_close_tombstone", ("closed", _INPUT_OWNER_TOKEN)),
+            ):
+                with suppress(BaseException):
+                    object.__setattr__(owner, name, value)
         if isinstance(exc, GateBV2RouteError):
             raise
         _fail("v2 retained-input acquisition failed closed")
@@ -2640,6 +2656,7 @@ class PreparedGateBV2ExecutionRoute:
                 _fail(_V2_ROUTE_LIFECYCLE_UNAVAILABLE_ERROR)
             self.verify_pre_write()
             request = self.request
+            executor = self.executor
             if (
                 type(request._v2_reservation_state) is not str
                 or request._v2_reservation_state != "planned"
@@ -2663,7 +2680,7 @@ class PreparedGateBV2ExecutionRoute:
             )
             object.__setattr__(self, "_consumed", True)
             _PREPARED_REGISTRY[id(self)] = _prepared_snapshot(self)
-        return self.request, self.executor
+        return request, executor
 
     def close(self) -> None:
         with _V2_RESERVATION_AUTHORIZATION_LOCK:
@@ -2975,10 +2992,10 @@ def prepare_gate_b_v2_execution_route_from_reference(
             raws["compatibility:compatibility_loader_request"],
             "v2 compatibility loader request",
         )
+        registered_projection_ids = set(gate_b_contracts_module._V2_PROJECTION_REGISTRY)
         projection = build_gate_b_preapproval_root_identity_projection_v2(
             compatibility_request["roots"]
         )
-        registered_projection_ids = set(gate_b_contracts_module._V2_PROJECTION_REGISTRY)
         try:
             compatibility_chain = build_gate_b_v2_compatibility_trust_chain(
                 projection,
@@ -2997,6 +3014,8 @@ def prepare_gate_b_v2_execution_route_from_reference(
             orphan_ids = (
                 set(gate_b_contracts_module._V2_PROJECTION_REGISTRY) - registered_projection_ids
             )
+            if compatibility_chain is not None:
+                orphan_ids.discard(id(projection))
             for orphan_id in orphan_ids:
                 snapshot = gate_b_contracts_module._V2_PROJECTION_REGISTRY.pop(
                     orphan_id,

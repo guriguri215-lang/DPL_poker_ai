@@ -84,6 +84,7 @@ def test_real_python_m_entrypoint_emits_the_fixed_invalid_argument_contract() ->
         {
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTHONNOUSERSITE": "1",
+            "PYTHONPYCACHEPREFIX": str(Path(sys.executable).resolve()),
             "PYTHONSAFEPATH": "1",
             "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
             "PYTHONPATH": str(root / "src"),
@@ -149,6 +150,7 @@ def test_exact_startup_blocks_pth_and_sitecustomize_before_bootstrap(tmp_path: P
         {
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTHONNOUSERSITE": "1",
+            "PYTHONPYCACHEPREFIX": str(exact_python.resolve()),
             "PYTHONSAFEPATH": "1",
             "PYTHONPATH": str((root / "src").resolve()),
         }
@@ -323,11 +325,11 @@ def test_console_metadata_survives_isolated_offline_target_install() -> None:
             }
         )
         script = f"""
-import importlib.metadata
 import gate_b_v2_startup
-from phase6.gate_b_loader import require_gate_b_v2_source_only_startup
-
 gate_b_v2_startup.bootstrap_gate_b_v2_source_only_startup()
+
+import importlib.metadata
+from phase6.gate_b_loader import require_gate_b_v2_source_only_startup
 require_gate_b_v2_source_only_startup()
 
 distributions = tuple(importlib.metadata.distributions(path=[{str(target)!r}]))
@@ -358,7 +360,7 @@ raise SystemExit(matches[0].load()())
             env=run_environment,
             timeout=30,
         )
-        assert invoked.returncode == 2
+        assert invoked.returncode == 2, invoked.stderr
         assert invoked.stdout == b""
         assert json.loads(invoked.stderr) == {
             "schema_version": "phase6-gate-b-v2-cli-error-v1",

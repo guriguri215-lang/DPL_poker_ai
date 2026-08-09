@@ -132,6 +132,7 @@ def bootstrap_gate_b_v2_source_only_startup() -> Path:
             Path(value).resolve() for value in sys.path if value and Path(value).exists()
         )
         startup_prefix = Path(config["pycache_prefix"]).resolve()
+        environment_prefix = os.environ.get("PYTHONPYCACHEPREFIX")
         if os.name == "nt" and (
             not executable.drive or str(executable).startswith(("\\\\", "\\\\?\\", "\\\\.\\"))
         ):
@@ -149,6 +150,8 @@ def bootstrap_gate_b_v2_source_only_startup() -> Path:
             or sys.pycache_prefix is None
             or Path(sys.pycache_prefix).resolve() != startup_prefix
             or startup_prefix != executable
+            or type(environment_prefix) is not str
+            or Path(environment_prefix).resolve() != executable
             or executable_metadata.st_nlink != 1
             or python_path != (source_root,)
             or startup_paths.count(source_root) != 1
@@ -177,8 +180,8 @@ def bootstrap_gate_b_v2_source_only_startup() -> Path:
         raise GateBV2StartupError("Gate B v2 source-only startup failed closed") from exc
 
 
-def require_gate_b_v2_bootstrap() -> Path:
-    """Revalidate the in-memory proof created before dependencies were addressable."""
+def _validated_bootstrap_attestation() -> tuple[Path, Path, Path, Path]:
+    """Return the revalidated executable, venv, source, and dependency topology."""
     attestation = _BOOTSTRAP_STATE[0]()
     if (
         type(attestation) is not tuple
@@ -206,4 +209,15 @@ def require_gate_b_v2_bootstrap() -> Path:
         or sys.flags.dont_write_bytecode != 1
     ):
         raise GateBV2StartupError("Gate B v2 production bootstrap provenance mismatch")
-    return dependency_path
+    return executable, venv_root, source_root, dependency_path
+
+
+def require_gate_b_v2_bootstrap() -> Path:
+    """Revalidate the bootstrap and return its exact dependency path."""
+    return _validated_bootstrap_attestation()[3]
+
+
+def require_gate_b_v2_bootstrap_topology() -> tuple[Path, Path]:
+    """Return the already-attested venv root and dependency path."""
+    _executable, venv_root, _source_root, dependency_path = _validated_bootstrap_attestation()
+    return venv_root, dependency_path

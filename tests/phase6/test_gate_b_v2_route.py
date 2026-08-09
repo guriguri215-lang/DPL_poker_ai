@@ -1067,6 +1067,42 @@ def test_pre_registration_failure_erases_every_owned_graph_and_registry(
 
 
 @WINDOWS_PRODUCTION
+def test_retained_input_owner_post_registration_failure_rolls_back_every_resource(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _source, chain, _request, _spec, kwargs = _production_plan_fixture(tmp_path)
+    baseline = set(route_module._INPUT_OWNER_REGISTRY)
+    captured: dict[str, object] = {}
+    real_validate = route_module._validate_input_owner
+
+    def fail_after_registration(owner, *, reread):
+        if not captured:
+            captured["owner"] = owner
+            captured["artifacts"] = tuple(owner.artifacts.values())
+            captured["directories"] = tuple(owner.directories.values())
+            route_module._fail("forced retained owner post-registration failure")
+        return real_validate(owner, reread=reread)
+
+    monkeypatch.setattr(route_module, "_validate_input_owner", fail_after_registration)
+    with pytest.raises(GateBV2RouteError, match="forced retained owner post-registration"):
+        build_gate_b_v2_execution_plan(chain, **kwargs)
+
+    owner = captured["owner"]
+    artifacts = captured["artifacts"]
+    directories = captured["directories"]
+    assert set(route_module._INPUT_OWNER_REGISTRY) == baseline
+    assert owner._closed and not owner.parents and not owner.artifacts and not owner.directories
+    assert all(artifact.raw == b"" and artifact.size_bytes == 0 for artifact in artifacts)
+    assert all(directory._closed for directory in directories)
+    owner_id = id(owner)
+    captured.clear()
+    del owner
+    gc.collect()
+    assert all(id(value) != owner_id for value in gc.get_objects())
+
+
+@WINDOWS_PRODUCTION
 def test_prepared_plan_direct_close_owns_route_and_retained_root_cleanup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1449,6 +1485,37 @@ def test_consume_prewrite_through_authorization_is_atomic_against_close(
 
     assert request._v2_reservation_state == "closed"
     assert request._v2_reservation_authorization is None
+    assert route._closed and route.plan is None and route.executor is None
+    assert all(root.closed for root in roots.values())
+
+
+@WINDOWS_PRODUCTION
+def test_consume_returns_the_locked_snapshot_without_post_authorization_reread(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _source, chain, _request, _spec, kwargs = _production_plan_fixture(tmp_path)
+    plan = build_gate_b_v2_execution_plan(chain, **kwargs)
+    route, roots = _prepare_with_fake_roots(plan, chain, monkeypatch)
+    expected_request = plan.request
+    expected_executor = route.executor
+    request_property = route_module.PreparedGateBV2ExecutionRoute.request
+
+    def guarded_request(prepared):
+        if prepared._consumed:
+            raise AssertionError("request was reread after authorization")
+        return request_property.__get__(prepared, type(prepared))
+
+    monkeypatch.setattr(
+        route_module.PreparedGateBV2ExecutionRoute,
+        "request",
+        property(guarded_request),
+    )
+    result = route.consume()
+    close_gate_b_v2_execution_route(route)
+
+    assert result == (expected_request, expected_executor)
+    assert expected_request._v2_reservation_state == "closed"
     assert route._closed and route.plan is None and route.executor is None
     assert all(root.closed for root in roots.values())
 
@@ -2160,6 +2227,78 @@ def test_repeated_rejected_bootstrap_references_restore_pinned_registry_baseline
         with pytest.raises(GateBV2RouteError, match="source-only startup"):
             prepare_gate_b_v2_execution_route_from_reference(reference)
         assert set(route_module._PINNED_SPEC_REGISTRY) == baseline
+
+
+@WINDOWS_PRODUCTION
+def test_repeated_trust_chain_failure_retires_projection_bytes_registry_and_object(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _source, _chain, _request, _spec, _kwargs, first_reference = (
+        _production_bootstrap_reference(tmp_path)
+    )
+    reference_values = {
+        name: getattr(first_reference, name)
+        for name in (
+            "parent_absolute_path",
+            "parent_identity_scheme",
+            "parent_serialization_profile",
+            "parent_volume_id_hex",
+            "parent_file_id_hex",
+            "direct_child_name",
+            "expected_sha256",
+            "expected_size_bytes",
+        )
+    }
+    projection_baseline = set(route_module.gate_b_contracts_module._V2_PROJECTION_REGISTRY)
+    chain_baseline = set(route_module.gate_b_contracts_module._V2_TRUST_CHAIN_REGISTRY)
+    pinned_baseline = set(route_module._PINNED_SPEC_REGISTRY)
+    pinned_baseline.discard(id(first_reference))
+    captured = []
+    real_projection_builder = route_module.build_gate_b_preapproval_root_identity_projection_v2
+
+    def capture_projection(*args, **inner_kwargs):
+        projection = real_projection_builder(*args, **inner_kwargs)
+        captured.append(projection)
+        return projection
+
+    def reject_trust_chain(*_args, **_kwargs):
+        route_module._fail("forced bootstrap trust-chain failure")
+
+    monkeypatch.setattr(
+        route_module,
+        "build_gate_b_preapproval_root_identity_projection_v2",
+        capture_projection,
+    )
+    monkeypatch.setattr(
+        route_module,
+        "build_gate_b_v2_compatibility_trust_chain",
+        reject_trust_chain,
+    )
+
+    for attempt in range(3):
+        reference = (
+            first_reference
+            if attempt == 0
+            else build_gate_b_v2_pinned_spec_reference(**reference_values)
+        )
+        with pytest.raises(GateBV2RouteError, match="forced bootstrap trust-chain failure"):
+            prepare_gate_b_v2_execution_route_from_reference(reference)
+        projection = captured.pop()
+        assert projection.canonical_bytes == b"" and not projection.payload
+        assert (
+            set(route_module.gate_b_contracts_module._V2_PROJECTION_REGISTRY)
+            == projection_baseline
+        )
+        assert (
+            set(route_module.gate_b_contracts_module._V2_TRUST_CHAIN_REGISTRY)
+            == chain_baseline
+        )
+        assert set(route_module._PINNED_SPEC_REGISTRY) == pinned_baseline
+        projection_id = id(projection)
+        del projection
+        gc.collect()
+        assert all(id(value) != projection_id for value in gc.get_objects())
 
 
 @WINDOWS_PRODUCTION

@@ -37,7 +37,10 @@ from types import CodeType, FunctionType, MappingProxyType, ModuleType
 from typing import Any, BinaryIO, Protocol
 
 import phase6.gate_b_contracts as gate_b_contracts_module
-from gate_b_v2_startup import require_gate_b_v2_bootstrap
+from gate_b_v2_startup import (
+    require_gate_b_v2_bootstrap,
+    require_gate_b_v2_bootstrap_topology,
+)
 from phase6.contracts import canonical_json_bytes, sha256_bytes
 from phase6.gate_b_contracts import (
     ACTIVE_MODULE_PATHS,
@@ -81,6 +84,7 @@ from phase6.gate_b_ledger import (
 # execution_route_commit, so neither evidence hash is ambiguous.
 GATE_B_V2_RUNTIME_MODULE_PATHS = (
     ("gate_b_v2_startup", "src/gate_b_v2_startup.py"),
+    ("gate_b_v2_launcher", "src/gate_b_v2_launcher.py"),
     ("opponents", "src/opponents/__init__.py"),
     ("opponents._canonical", "src/opponents/_canonical.py"),
     ("opponents.catalog", "src/opponents/catalog.py"),
@@ -153,12 +157,20 @@ GATE_B_V2_RUNTIME_MODULE_PATHS = (
 # Compatibility alias for callers that consumed the R3 constant.
 GATE_B_V2_ROUTE_MODULE_PATHS = GATE_B_V2_RUNTIME_MODULE_PATHS
 GATE_B_V2_ROUTE_ALLOWED_CHANGE_PATHS = (
+    ".github/workflows/ci.yml",
+    "src/explanation/verifier.py",
+    "src/gate_b_v2_launcher.py",
+    "src/gate_b_v2_startup.py",
     "src/phase6/gate_b_contracts.py",
     "src/phase6/gate_b_ledger.py",
     "src/phase6/gate_b_loader.py",
     "src/phase6/gate_b_v2_route.py",
     "src/phase6/gate_b_orchestrator.py",
     "src/phase6/gate_b_v2_cli.py",
+    "src/phase6/p6_10b.py",
+    "src/phase6/validation_backend.py",
+    "src/poker_ai/leak.py",
+    "src/poker_ai/posterior_bundle.py",
     "README.md",
     "docs/gate_b_v2.md",
     "pyproject.toml",
@@ -3134,11 +3146,14 @@ def _normalize_distribution_name(value: str) -> str:
     return re.sub(r"[-_.]+", "-", value).lower()
 
 
-def _installed_distributions(local_project: str) -> list[dict[str, str]]:
+def _installed_distributions(
+    local_project: str,
+    dependency_path: Path,
+) -> list[dict[str, str]]:
     local_name = _normalize_distribution_name(local_project)
-    purelib = Path(sysconfig.get_path("purelib")).resolve()
+    purelib = Path(dependency_path).resolve()
     values = []
-    for distribution in importlib.metadata.distributions():
+    for distribution in importlib.metadata.distributions(path=[str(purelib)]):
         raw_name = distribution.metadata.get("Name")
         if not raw_name:
             raise GateBExecutionEnvironmentFailure("installed distribution lacks a name")
@@ -3266,11 +3281,12 @@ def _verify_dependency_lock_unchecked(root: Path, context: GateBExecutionContext
     # Validate every storage target, including the external base executable,
     # before the first executable/config artifact read.  In particular this
     # rejects UNC/device/ADS paths and a non-fixed nested mount under C:\\.
+    venv_root, dependency_path = require_gate_b_v2_bootstrap_topology()
     active_paths = {
         "venv executable": Path(sys.executable),
         "base executable": Path(getattr(sys, "_base_executable", sys.executable)),
-        "site-packages": Path(sysconfig.get_path("purelib")),
-        "pyvenv configuration": Path(sys.prefix) / "pyvenv.cfg",
+        "site-packages": dependency_path,
+        "pyvenv configuration": venv_root / "pyvenv.cfg",
     }
     if os.name == "nt":
         for label, target in (
@@ -3309,7 +3325,7 @@ def _verify_dependency_lock_unchecked(root: Path, context: GateBExecutionContext
         or project_metadata.get("version") != project_version
     ):
         raise GateBExecutionEnvironmentFailure("locked project metadata mismatch")
-    if distributions != _installed_distributions(project["name"]):
+    if distributions != _installed_distributions(project["name"], purelib):
         raise GateBExecutionEnvironmentFailure("installed distribution inventory drifted")
     try:
         executable_hash = sha256_bytes(_read_pinned(executable, "venv executable"))
