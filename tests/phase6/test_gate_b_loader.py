@@ -2377,10 +2377,11 @@ def test_source_only_startup_attests_every_clean_runtime_module() -> None:
         _source_only_python_command(code),
         cwd=root,
         env=_source_only_python_environment(root / "src"),
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
     )
+    assert result.returncode == 0, result.stderr
     assert result.stdout == f"{len(loader_module.GATE_B_V2_RUNTIME_MODULE_PATHS)}\n"
     assert result.stderr == ""
 
