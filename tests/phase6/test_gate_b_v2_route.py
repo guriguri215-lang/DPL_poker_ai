@@ -1312,10 +1312,7 @@ def test_lower_reserve_failure_preserves_authorization_for_retry(
         reserve(request, expected_latest_record_sha256=None)
 
     assert request._v2_reservation_state == "authorized"
-    assert (
-        request._v2_reservation_authorization
-        is route_module._V2_RESERVATION_AUTHORIZATION_TOKEN
-    )
+    assert request._v2_reservation_authorization is route_module._V2_RESERVATION_AUTHORIZATION_TOKEN
     assert request_id in route_module._V2_RESERVATION_AUTHORIZATIONS
     assert route_module._V2_RUNTIME_REQUEST_PLANS[request_id] is plan
     assert route.plan is plan and plan.request is request
@@ -1553,15 +1550,11 @@ def test_close_lifecycle_registry_corruption_is_canonical_and_releases_graph(
         else:
             registry[request_id] = (weakref.ref(request),)
     elif registry_name == "plan":
-        registry[request_id] = (
-            _ForeignLifecycleEntry() if mutation == "foreign" else (plan,)
-        )
+        registry[request_id] = _ForeignLifecycleEntry() if mutation == "foreign" else (plan,)
     elif mutation == "foreign":
         registry[request_id] = (weakref.ref(request), _ForeignLifecycleEntry())
     else:
-        registry[request_id] = (
-            () if mutation == "malformed" else (weakref.ref(request), object())
-        )
+        registry[request_id] = () if mutation == "malformed" else (weakref.ref(request), object())
 
     with pytest.raises(GateBV2RouteError) as captured:
         if route is None:
@@ -1628,15 +1621,11 @@ def test_builder_cleanup_allows_runtime_plan_registration_window(
 
     assert set(route_module._PLAN_REGISTRY) == registry_baselines["plans"]
     assert set(route_module._V2_RUNTIME_REQUEST_ORIGINS) == registry_baselines["origins"]
-    assert (
-        set(route_module._V2_RESERVATION_AUTHORIZATIONS)
-        == registry_baselines["authorizations"]
-    )
+    assert set(route_module._V2_RESERVATION_AUTHORIZATIONS) == registry_baselines["authorizations"]
     assert set(route_module._V2_RUNTIME_REQUEST_PLANS) == registry_baselines["runtime_plans"]
     assert closed_owners
     assert all(
-        owner._closed and not owner.artifacts and not owner.directories
-        for owner in closed_owners
+        owner._closed and not owner.artifacts and not owner.directories for owner in closed_owners
     )
     assert bundle.root_manifest_raw == b"" and not bundle.artifacts
     assert chain.projection is None and not chain._artifact_raws
