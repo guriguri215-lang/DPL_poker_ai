@@ -605,6 +605,29 @@ def _path_entry_present_no_follow(path: Path) -> bool:
     return True
 
 
+def _path_below_source_cache_barrier(path: Path) -> bool:
+    prefix = sys.pycache_prefix
+    if type(prefix) is not str:
+        return False
+    executable = Path(sys.executable).resolve()
+    if Path(prefix).resolve() != executable or executable not in path.parents:
+        return False
+    try:
+        metadata = _lstat(executable)
+    except OSError as exc:
+        raise GateBExecutionEnvironmentFailure(
+            "active source cache barrier cannot be verified"
+        ) from exc
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or _reparse(metadata)
+        or metadata.st_nlink != 1
+    ):
+        raise GateBExecutionEnvironmentFailure("active source cache barrier mismatch")
+    return True
+
+
 def _root_identity_payload(path: Path | str) -> dict[str, str]:
     candidate = Path(path).resolve()
     metadata = _lstat(candidate)
@@ -2891,7 +2914,9 @@ def _verify_executed_source_code(
     ):
         raise GateBExecutionEnvironmentFailure("active source cache path escaped repository")
     cached_path = Path(cached_text)
-    if _path_entry_present_no_follow(cached_path):
+    if not _path_below_source_cache_barrier(cached_path) and _path_entry_present_no_follow(
+        cached_path
+    ):
         try:
             metadata = _lstat(cached_path)
             cached_raw = _read_pinned(cached_path, "active module bytecode cache")

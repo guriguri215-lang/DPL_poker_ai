@@ -1950,6 +1950,25 @@ def test_index_lock_presence_uses_lstat_for_dangling_entry(
     assert loader_module._path_entry_present_no_follow(path) is False
 
 
+def test_source_cache_barrier_requires_active_regular_executable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = tmp_path / "python"
+    executable.write_bytes(b"python")
+    cached = executable / "absolute" / "module.cpython-312.pyc"
+    monkeypatch.setattr(loader_module.sys, "executable", str(executable))
+    monkeypatch.setattr(loader_module.sys, "pycache_prefix", str(executable))
+
+    assert loader_module._path_below_source_cache_barrier(cached) is True
+    assert loader_module._path_below_source_cache_barrier(tmp_path / "outside.pyc") is False
+
+    executable.unlink()
+    executable.mkdir()
+    with pytest.raises(GateBExecutionEnvironmentFailure, match="cache barrier mismatch"):
+        loader_module._path_below_source_cache_barrier(cached)
+
+
 def test_rebound_canonical_helper_is_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
