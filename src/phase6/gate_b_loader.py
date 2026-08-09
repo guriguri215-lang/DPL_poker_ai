@@ -3558,9 +3558,7 @@ def _verify_gate_b_execution_environment_unchecked(
     dependency_hash = _verify_dependency_lock(
         root,
         context,
-        active_topology=(
-            require_gate_b_v2_bootstrap_topology() if sys.flags.no_site else None
-        ),
+        active_topology=(require_gate_b_v2_bootstrap_topology() if sys.flags.no_site else None),
     )
     if _file_snapshot(index_path) != before_index:
         raise GateBExecutionEnvironmentFailure("repository index changed during read-only probe")
