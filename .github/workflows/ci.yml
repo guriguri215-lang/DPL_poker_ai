@@ -32,7 +32,7 @@ jobs:
       - name: Lint
         run: .venv/bin/python -m ruff check . --no-cache
       - name: Format check
-        run: .venv/bin/python -m ruff format --check .
+        run: .venv/bin/python -m ruff format --check --diff .
       - name: Full pytest
         env:
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
@@ -69,7 +69,7 @@ jobs:
         run: .\.venv\Scripts\python.exe -m ruff check . --no-cache
       - name: Format check
         shell: pwsh
-        run: .\.venv\Scripts\python.exe -m ruff format --check .
+        run: .\.venv\Scripts\python.exe -m ruff format --check --diff .
       - name: Exact-startup Gate B v2 suite
         shell: pwsh
         run: |
