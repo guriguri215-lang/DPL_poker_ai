@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import copy
 import gc
+import importlib
 import os
 import subprocess
 import threading
@@ -728,6 +729,7 @@ def test_route_source_attestation_hashes_the_canonical_git_blob(
 ) -> None:
     root = Path.cwd()
     blob = b"value = 1\n"
+    importlib.import_module("gate_b_v2_launcher")
     monkeypatch.setattr(loader_module, "_read_pinned", lambda *_args: b"value = 1\r\n")
     monkeypatch.setattr(loader_module, "_commit_blob", lambda *_args: blob)
     monkeypatch.setattr(loader_module, "_verify_executed_source_code", lambda *_args: "a" * 64)
@@ -1512,6 +1514,11 @@ def test_consume_returns_the_locked_snapshot_without_post_authorization_reread(
         property(guarded_request),
     )
     result = route.consume()
+    monkeypatch.setattr(
+        route_module.PreparedGateBV2ExecutionRoute,
+        "request",
+        request_property,
+    )
     close_gate_b_v2_execution_route(route)
 
     assert result == (expected_request, expected_executor)
