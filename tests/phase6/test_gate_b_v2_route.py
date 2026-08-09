@@ -32,7 +32,7 @@ import phase6.gate_b_loader as loader_module
 import phase6.gate_b_orchestrator as orchestrator_module
 import phase6.gate_b_v2_route as route_module
 from phase6.contracts import canonical_json_bytes, sha256_bytes
-from phase6.gate_b_contracts import _plain
+from phase6.gate_b_contracts import ROOT_IDENTITY_SERIALIZATION_PROFILE_V2, _plain
 from phase6.gate_b_executor import GateBProductionExecutor
 from phase6.gate_b_ledger import GateBLedgerError, GateBLedgerStore, GateBPinnedDirectory
 from phase6.gate_b_orchestrator import (
@@ -858,6 +858,9 @@ def test_initial_prewrite_failure_repeatedly_releases_every_registered_owner(
         "origins": route_module._V2_RUNTIME_REQUEST_ORIGINS,
         "runtime_plans": route_module._V2_RUNTIME_REQUEST_PLANS,
         "authorizations": route_module._V2_RESERVATION_AUTHORIZATIONS,
+        "bundle_evidence": route_module.contracts_module._BUNDLE_EVIDENCE_REGISTRY,
+        "projections": route_module.gate_b_contracts_module._V2_PROJECTION_REGISTRY,
+        "trust_chains": route_module.gate_b_contracts_module._V2_TRUST_CHAIN_REGISTRY,
     }
     baselines = {name: set(registry) for name, registry in registries.items()}
     captured_routes = []
@@ -963,6 +966,103 @@ def test_plan_prepare_has_exclusive_route_ownership(
     assert owner[0] is plan and owner[1] is route
     assert not route._closed and not any(root.closed for root in roots.values())
     close_gate_b_v2_execution_route(route)
+
+
+@WINDOWS_PRODUCTION
+@pytest.mark.parametrize("failure_stage", ["before-batch", "after-batch", "plan-snapshot"])
+def test_pre_registration_failure_erases_every_owned_graph_and_registry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str,
+) -> None:
+    _source, chain, _request, _spec, kwargs = _production_plan_fixture(tmp_path)
+    projection = chain.projection
+    bundle = kwargs["phase6_contract_bundle_evidence"]
+    bundle_artifacts = bundle.artifacts
+    registries = {
+        "plans": route_module._PLAN_REGISTRY,
+        "plan_routes": route_module._PLAN_ROUTE_OWNERS,
+        "prepared": route_module._PREPARED_REGISTRY,
+        "artifacts": route_module._ARTIFACT_REGISTRY,
+        "root_refs": route_module._ROOT_REF_REGISTRY,
+        "input_owners": route_module._INPUT_OWNER_REGISTRY,
+        "pinned_specs": route_module._PINNED_SPEC_REGISTRY,
+        "origins": route_module._V2_RUNTIME_REQUEST_ORIGINS,
+        "runtime_plans": route_module._V2_RUNTIME_REQUEST_PLANS,
+        "authorizations": route_module._V2_RESERVATION_AUTHORIZATIONS,
+        "bundle_evidence": route_module.contracts_module._BUNDLE_EVIDENCE_REGISTRY,
+        "projections": route_module.gate_b_contracts_module._V2_PROJECTION_REGISTRY,
+        "trust_chains": route_module.gate_b_contracts_module._V2_TRUST_CHAIN_REGISTRY,
+    }
+    expected = {name: set(registry) for name, registry in registries.items()}
+    expected["bundle_evidence"].discard(id(bundle))
+    expected["projections"].discard(id(projection))
+    expected["trust_chains"].discard(id(chain))
+    captured_artifacts = []
+    captured_roots = []
+    captured_owners = []
+    captured_batches = []
+    captured_request_refs = []
+    real_load_artifact = route_module._load_stored_artifact
+    real_new_root = route_module._new_runtime_root_reference
+    real_open_owner = route_module._open_retained_input_owner
+    real_load_batch = route_module.load_gate_b_batch_manifest_bytes
+    real_plan_snapshot = route_module._plan_snapshot
+
+    def load_artifact(*args, **inner_kwargs):
+        artifact, payload = real_load_artifact(*args, **inner_kwargs)
+        captured_artifacts.append(artifact)
+        return artifact, payload
+
+    def new_root(*args, **inner_kwargs):
+        root = real_new_root(*args, **inner_kwargs)
+        captured_roots.append(root)
+        return root
+
+    def open_owner(*args, **inner_kwargs):
+        owner = real_open_owner(*args, **inner_kwargs)
+        captured_owners.append(owner)
+        return owner
+
+    def load_batch(*args, **inner_kwargs):
+        if failure_stage == "before-batch":
+            route_module._fail("forced failure before batch")
+        batch = real_load_batch(*args, **inner_kwargs)
+        captured_batches.append(batch)
+        return batch
+
+    def readiness(*_args, **_kwargs):
+        route_module._fail("forced failure after batch")
+
+    def plan_snapshot(plan):
+        if failure_stage == "plan-snapshot":
+            captured_request_refs.append(weakref.ref(plan.request))
+            route_module._fail("forced failure before plan registration")
+        return real_plan_snapshot(plan)
+
+    monkeypatch.setattr(route_module, "_load_stored_artifact", load_artifact)
+    monkeypatch.setattr(route_module, "_new_runtime_root_reference", new_root)
+    monkeypatch.setattr(route_module, "_open_retained_input_owner", open_owner)
+    monkeypatch.setattr(route_module, "load_gate_b_batch_manifest_bytes", load_batch)
+    monkeypatch.setattr(route_module, "_plan_snapshot", plan_snapshot)
+    if failure_stage == "after-batch":
+        monkeypatch.setattr(route_module, "GateBReadinessAuthorization", readiness)
+
+    with pytest.raises(GateBV2RouteError, match="forced failure"):
+        build_gate_b_v2_execution_plan(chain, **kwargs)
+
+    assert all(artifact.raw == b"" and artifact.size_bytes == 0 for artifact in captured_artifacts)
+    assert all(not root._payload and root._anchor_raw is None for root in captured_roots)
+    assert all(owner._closed and not owner.artifacts for owner in captured_owners)
+    assert all(batch.raw_bytes == b"" and not batch.payload for batch in captured_batches)
+    assert bundle.root_manifest_raw == b"" and not bundle.artifacts
+    assert all(artifact.raw == b"" for artifact in bundle_artifacts)
+    assert chain.projection is None and not chain._artifact_raws
+    assert projection.canonical_bytes == b""
+    for name, registry in registries.items():
+        assert set(registry) == expected[name], name
+    gc.collect()
+    assert all(reference() is None for reference in captured_request_refs)
 
 
 @WINDOWS_PRODUCTION
@@ -1306,6 +1406,95 @@ def test_reserve_authorization_is_atomic_across_public_entrypoints(
     assert outcomes.count("rejected") == 1
     assert writes == ["reserved"]
     close_gate_b_v2_execution_route(route)
+
+
+@WINDOWS_PRODUCTION
+def test_consume_prewrite_through_authorization_is_atomic_against_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _source, chain, _request, _spec, kwargs = _production_plan_fixture(tmp_path)
+    plan = build_gate_b_v2_execution_plan(chain, **kwargs)
+    route, roots = _prepare_with_fake_roots(plan, chain, monkeypatch)
+    verification_started = threading.Event()
+    allow_verification = threading.Event()
+    close_started = threading.Event()
+
+    def blocking_verification(request, _context):
+        verification_started.set()
+        assert allow_verification.wait(30)
+        return _evidence(request)
+
+    def close_worker():
+        close_started.set()
+        close_gate_b_v2_execution_route(route)
+        return "closed"
+
+    monkeypatch.setattr(
+        route_module,
+        "verify_gate_b_v2_runtime_execution_environment",
+        blocking_verification,
+    )
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        consume_future = pool.submit(route.consume)
+        assert verification_started.wait(30)
+        close_future = pool.submit(close_worker)
+        assert close_started.wait(30)
+        assert not close_future.done()
+        assert not consume_future.done()
+        allow_verification.set()
+        request, _executor = consume_future.result(timeout=45)
+        assert close_future.result(timeout=45) == "closed"
+
+    assert request._v2_reservation_state == "closed"
+    assert request._v2_reservation_authorization is None
+    assert route._closed and route.plan is None and route.executor is None
+    assert all(root.closed for root in roots.values())
+
+
+@WINDOWS_PRODUCTION
+def test_close_winning_consume_race_uses_one_canonical_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _source, chain, _request, _spec, kwargs = _production_plan_fixture(tmp_path)
+    plan = build_gate_b_v2_execution_plan(chain, **kwargs)
+    route, roots = _prepare_with_fake_roots(plan, chain, monkeypatch)
+    close_entered = threading.Event()
+    allow_close = threading.Event()
+    consume_started = threading.Event()
+    real_close = _FakePinnedRoot.close
+    first_close = True
+
+    def blocking_close(root):
+        nonlocal first_close
+        if first_close:
+            first_close = False
+            close_entered.set()
+            assert allow_close.wait(30)
+        real_close(root)
+
+    def consume_worker():
+        consume_started.set()
+        return consume_gate_b_v2_execution_route(route)
+
+    monkeypatch.setattr(_FakePinnedRoot, "close", blocking_close)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        close_future = pool.submit(close_gate_b_v2_execution_route, route)
+        assert close_entered.wait(30)
+        consume_future = pool.submit(consume_worker)
+        assert consume_started.wait(30)
+        assert not consume_future.done()
+        allow_close.set()
+        close_future.result(timeout=45)
+        with pytest.raises(
+            GateBV2RouteError,
+            match=f"^{route_module._V2_ROUTE_LIFECYCLE_UNAVAILABLE_ERROR}$",
+        ):
+            consume_future.result(timeout=45)
+
+    assert route._closed and route.plan is None and route.executor is None
+    assert all(root.closed for root in roots.values())
 
 
 @WINDOWS_PRODUCTION
@@ -1878,6 +2067,7 @@ def test_production_bootstrap_reference_prepares_with_all_parent_identities_reta
     real_open = route_module.open_gate_b_v2_pinned_directory
     real_verify = route_module.verify_gate_b_v2_pinned_directory
     projection_registry_before = set(route_module.gate_b_contracts_module._V2_PROJECTION_REGISTRY)
+    assert id(reference) in route_module._PINNED_SPEC_REGISTRY
 
     def selective_open(path, **kwargs):
         role = by_path.get(str(path))
@@ -1914,6 +2104,7 @@ def test_production_bootstrap_reference_prepares_with_all_parent_identities_reta
     assert route.plan is None
     assert route.executor is None
     assert all(root.closed for root in roots.values())
+    assert id(reference) not in route_module._PINNED_SPEC_REGISTRY
     assert (
         set(route_module.gate_b_contracts_module._V2_PROJECTION_REGISTRY)
         == projection_registry_before
@@ -1940,6 +2131,34 @@ def test_unsafe_interpreter_startup_rejects_before_bootstrap_artifact_read(
     with pytest.raises(GateBV2RouteError, match="source-only startup"):
         prepare_gate_b_v2_execution_route_from_reference(reference)
     assert reads == []
+    assert id(reference) not in route_module._PINNED_SPEC_REGISTRY
+
+
+@WINDOWS_PRODUCTION
+def test_repeated_rejected_bootstrap_references_restore_pinned_registry_baseline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline = set(route_module._PINNED_SPEC_REGISTRY)
+    monkeypatch.setattr(
+        route_module,
+        "require_gate_b_v2_source_only_startup",
+        lambda: (_ for _ in ()).throw(RuntimeError("unsafe startup")),
+    )
+    for attempt in range(3):
+        reference = build_gate_b_v2_pinned_spec_reference(
+            parent_absolute_path=tmp_path.resolve(),
+            parent_identity_scheme="windows-volume-file-id-v1",
+            parent_serialization_profile=ROOT_IDENTITY_SERIALIZATION_PROFILE_V2,
+            parent_volume_id_hex="00000001",
+            parent_file_id_hex=f"{attempt + 1:016x}",
+            direct_child_name=f"bootstrap-{attempt}.json",
+            expected_sha256=f"{attempt + 1:064x}",
+            expected_size_bytes=1,
+        )
+        with pytest.raises(GateBV2RouteError, match="source-only startup"):
+            prepare_gate_b_v2_execution_route_from_reference(reference)
+        assert set(route_module._PINNED_SPEC_REGISTRY) == baseline
 
 
 @WINDOWS_PRODUCTION

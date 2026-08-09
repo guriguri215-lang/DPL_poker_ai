@@ -332,18 +332,9 @@ def _v2_projection_roots(
     paths: dict[str, str] | None = None,
 ) -> dict[str, dict[str, object]]:
     selected_paths = paths or {
-        "ledger_base": (
-            r"C:\synthetic\poker_xai\gate_b_v2\ledger"
-            r"\gate_b_test_v2_ledger"
-        ),
-        "quarantine_base": (
-            r"C:\synthetic\poker_xai\gate_b_v2\quarantine"
-            r"\gate_b_test_v2_quarantine"
-        ),
-        "test_root": (
-            r"C:\synthetic\poker_xai\gate_b_v2\input"
-            r"\gate_b_test_v2_input"
-        ),
+        "ledger_base": r"C:\synthetic\poker_xai\gate_b_v2\ledger",
+        "quarantine_base": r"C:\synthetic\poker_xai\gate_b_v2\quarantine",
+        "test_root": r"C:\synthetic\poker_xai\gate_b_v2\input",
     }
     identities = {
         "ledger_base": ("00355357", "008f000000277838"),
@@ -2050,36 +2041,25 @@ def test_retained_bytes_trust_mismatch_matrix_is_exact_base_and_sanitized(
 def test_v2_root_projection_exact_golden_vectors_and_source_binding() -> None:
     fixture = _v2_chain_fixture()
     expected = (
-        b'{"anchor_policy_version":"phase6-gate-b-root-anchor-policy-v1","roots":['
-        b'{"absolute_path":"C:\\\\Users\\\\gurig\\\\Desktop\\\\claude code\\\\'
-        b"\\u30dd\\u30fc\\u30ab\\u30fcAI\\u691c\\u8a0e\\\\controlled_evaluation"
-        b'\\\\gate_b_test_v2_ledger","anchor_relative_path":'
-        b'".gate-b-root-anchor.json","file_id_hex":"008f000000277838",'
-        b'"identity_scheme":"windows-volume-file-id-v1","root_role":"ledger_base",'
-        b'"volume_id_hex":"00355357"},{"absolute_path":"C:\\\\Users\\\\gurig\\\\Desktop'
-        b"\\\\claude code\\\\\\u30dd\\u30fc\\u30ab\\u30fcAI\\u691c\\u8a0e"
-        b'\\\\controlled_evaluation\\\\gate_b_test_v2_quarantine",'
-        b'"anchor_relative_path":".gate-b-root-anchor.json","file_id_hex":'
-        b'"0055000000277839","identity_scheme":"windows-volume-file-id-v1",'
-        b'"root_role":"quarantine_base","volume_id_hex":"00355357"},'
-        b'{"absolute_path":"C:\\\\Users\\\\gurig\\\\Desktop\\\\claude code\\\\'
-        b"\\u30dd\\u30fc\\u30ab\\u30fcAI\\u691c\\u8a0e\\\\controlled_evaluation"
-        b'\\\\gate_b_test_v2_input","anchor_relative_path":null,'
-        b'"file_id_hex":"0edb00000002971b","identity_scheme":'
-        b'"windows-volume-file-id-v1","root_role":"test_root","volume_id_hex":'
-        b'"00355357"}],"schema_version":'
-        b'"phase6-gate-b-preapproval-root-identity-projection-v2",'
-        b'"serialization_profile":"windows-volume8-file16-lowerhex-v1",'
-        b'"source_materialization_projection":{"schema_version":'
-        b'"phase6-gate-b-preapproval-root-identity-projection-v1",'
-        b'"serialization_profile":"windows-volume8-file16-lowerhex-v1",'
-        b'"sha256":"134f7169a949b41de3bb0b6de8f9c80c3e65cab477d31bae2581281df8c57a09",'
-        b'"size_bytes":1111}}\n'
+        b'{"anchor_policy_version":"phase6-gate-b-root-anchor-policy-v1","roots":[{"absolute_path"'
+        b':"C:\\\\synthetic\\\\poker_xai\\\\gate_b_v2\\\\ledger","anchor_relative_path":".gate-b-root-anch'
+        b'or.json","file_id_hex":"008f000000277838","identity_scheme":"windows-volume-file-id-v1",'
+        b'"root_role":"ledger_base","volume_id_hex":"00355357"},{"absolute_path":"C:\\\\synthetic\\\\p'
+        b'oker_xai\\\\gate_b_v2\\\\quarantine","anchor_relative_path":".gate-b-root-anchor.json","file'
+        b'_id_hex":"0055000000277839","identity_scheme":"windows-volume-file-id-v1","root_role":"q'
+        b'uarantine_base","volume_id_hex":"00355357"},{"absolute_path":"C:\\\\synthetic\\\\poker_xai\\\\'
+        b'gate_b_v2\\\\input","anchor_relative_path":null,"file_id_hex":"0edb00000002971b","identity'
+        b'_scheme":"windows-volume-file-id-v1","root_role":"test_root","volume_id_hex":"00355357"}'
+        b'],"schema_version":"phase6-gate-b-preapproval-root-identity-projection-v2","serializatio'
+        b'n_profile":"windows-volume8-file16-lowerhex-v1","source_materialization_projection":{"sc'
+        b'hema_version":"phase6-gate-b-preapproval-root-identity-projection-v1","serialization_pro'
+        b'file":"windows-volume8-file16-lowerhex-v1","sha256":"134f7169a949b41de3bb0b6de8f9c80c3e6'
+        b'5cab477d31bae2581281df8c57a09","size_bytes":1111}}\n'
     )
     assert fixture.projection.canonical_bytes == expected
-    assert len(expected) == 1438
+    assert len(expected) == 1195
     assert fixture.projection.sha256 == (
-        "32df0fa0fa6a09e9ecfa7e39e5441953c6aa4578300f9c942f08f0db2d756d26"
+        'ec7e4b0d06ccbc562c904a570991239dd186c2e222d69db2c418966ad9d01686'
     )
     assert fixture.descriptor == {
         "schema_version": ROOT_IDENTITY_PROJECTION_DESCRIPTOR_V2_SCHEMA_VERSION,

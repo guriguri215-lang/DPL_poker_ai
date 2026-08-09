@@ -17,19 +17,19 @@ from pathlib import Path
 def test_gate_b_v2_console_entrypoint_targets_the_closed_cli() -> None:
     root = Path(__file__).resolve().parents[2]
     project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
-    assert project["project"]["scripts"]["poker-xai-gate-b-v2"] == ("phase6.gate_b_v2_cli:main")
-    module = importlib.import_module("phase6.gate_b_v2_cli")
+    assert project["project"]["scripts"]["poker-xai-gate-b-v2"] == ("gate_b_v2_launcher:main")
+    module = importlib.import_module("gate_b_v2_launcher")
     assert callable(module.main)
 
 
 def test_readme_documents_the_exact_packaged_invocation() -> None:
     root = Path(__file__).resolve().parents[2]
     readme = (root / "README.md").read_text(encoding="utf-8")
-    assert "poker-xai-gate-b-v2 execute-once-v2" in readme
+    assert "-m gate_b_v2_launcher execute-once-v2" in readme
     assert "$env:PYTHONPATH = (Resolve-Path .\\src).Path" in readme
     assert "PYTHONPATH` must\ncontain exactly that checkout's resolved `src` directory" in readme
     assert "PYTHONPYCACHEPREFIX" in readme
-    assert "-B -P -s -X pycache_prefix=<exact-python.exe>" in readme
+    assert "-S -B -P -s -X pycache_prefix=<exact-python.exe>" in readme
     for option in (
         "--spec-parent",
         "--spec-parent-identity-scheme",
@@ -84,6 +84,7 @@ def test_real_python_m_entrypoint_emits_the_fixed_invalid_argument_contract() ->
         {
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTHONNOUSERSITE": "1",
+            "PYTHONSAFEPATH": "1",
             "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
             "PYTHONPATH": str(root / "src"),
         }
@@ -91,13 +92,14 @@ def test_real_python_m_entrypoint_emits_the_fixed_invalid_argument_contract() ->
     completed = subprocess.run(
         [
             sys.executable,
+            "-S",
             "-B",
             "-P",
             "-s",
             "-X",
             f"pycache_prefix={Path(sys.executable).resolve()}",
             "-m",
-            "phase6.gate_b_v2_cli",
+            "gate_b_v2_launcher",
         ],
         cwd=root,
         check=False,
@@ -113,6 +115,73 @@ def test_real_python_m_entrypoint_emits_the_fixed_invalid_argument_contract() ->
         "status": "failed",
         "error_code": "gate_b_invalid_arguments",
     }
+
+
+def test_exact_startup_blocks_pth_and_sitecustomize_before_bootstrap(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[2]
+    isolated_venv = tmp_path / "isolated-venv"
+    created = subprocess.run(
+        [sys.executable, "-m", "venv", "--copies", str(isolated_venv)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert created.returncode == 0, created.stderr
+    if os.name == "nt":
+        exact_python = isolated_venv / "Scripts" / "python.exe"
+        site_packages = isolated_venv / "Lib" / "site-packages"
+    else:
+        exact_python = isolated_venv / "bin" / "python"
+        site_packages = (
+            isolated_venv
+            / "lib"
+            / f"python{sys.version_info.major}.{sys.version_info.minor}"
+            / "site-packages"
+        )
+    side_effect = tmp_path / "startup-hook-ran.txt"
+    hook = f"from pathlib import Path; Path({str(side_effect)!r}).write_text('ran')\n"
+    (site_packages / "sitecustomize.py").write_text(hook, encoding="utf-8")
+    (site_packages / "malicious-startup.pth").write_text(
+        "import sitecustomize\n", encoding="utf-8"
+    )
+    environment = os.environ.copy()
+    environment.pop("PYTHONHOME", None)
+    environment.update(
+        {
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONSAFEPATH": "1",
+            "PYTHONPATH": str((root / "src").resolve()),
+        }
+    )
+    completed = subprocess.run(
+        [
+            str(exact_python.resolve()),
+            "-S",
+            "-B",
+            "-P",
+            "-s",
+            "-X",
+            f"pycache_prefix={exact_python.resolve()}",
+            "-c",
+            (
+                "import gate_b_v2_startup as startup; "
+                "startup.bootstrap_gate_b_v2_source_only_startup(); "
+                "print('guarded')"
+            ),
+        ],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == "guarded\n"
+    assert completed.stderr == ""
+    assert not side_effect.exists()
 
 
 def test_console_metadata_survives_isolated_offline_target_install() -> None:
@@ -240,7 +309,7 @@ def test_console_metadata_survives_isolated_offline_target_install() -> None:
         assert installed.returncode == 0, installed.stderr
         entry_points = tuple(target.glob("poker_xai-*.dist-info/entry_points.txt"))
         assert len(entry_points) == 1
-        assert "poker-xai-gate-b-v2 = phase6.gate_b_v2_cli:main" in entry_points[0].read_text(
+        assert "poker-xai-gate-b-v2 = gate_b_v2_launcher:main" in entry_points[0].read_text(
             encoding="utf-8"
         )
 
@@ -257,8 +326,10 @@ def test_console_metadata_survives_isolated_offline_target_install() -> None:
         )
         script = f"""
 import importlib.metadata
+import gate_b_v2_startup
 from phase6.gate_b_loader import require_gate_b_v2_source_only_startup
 
+gate_b_v2_startup.bootstrap_gate_b_v2_source_only_startup()
 require_gate_b_v2_source_only_startup()
 
 distributions = tuple(importlib.metadata.distributions(path=[{str(target)!r}]))
@@ -274,6 +345,7 @@ raise SystemExit(matches[0].load()())
         invoked = subprocess.run(
             [
                 sys.executable,
+                "-S",
                 "-B",
                 "-P",
                 "-s",

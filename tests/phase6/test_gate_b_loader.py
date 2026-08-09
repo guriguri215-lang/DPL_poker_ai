@@ -2355,15 +2355,21 @@ def test_real_temporary_git_repository_rejects_runtime_source_mismatch(
 
 def _source_only_python_command(code: str) -> list[str]:
     executable = str(Path(sys.executable).resolve())
+    bootstrapped = (
+        "import gate_b_v2_startup as startup; "
+        "startup.bootstrap_gate_b_v2_source_only_startup(); "
+        f"{code}"
+    )
     return [
         executable,
+        "-S",
         "-B",
         "-P",
         "-s",
         "-X",
         f"pycache_prefix={executable}",
         "-c",
-        code,
+        bootstrapped,
     ]
 
 
@@ -2374,6 +2380,7 @@ def _source_only_python_environment(source_root: Path) -> dict[str, str]:
         {
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTHONNOUSERSITE": "1",
+            "PYTHONSAFEPATH": "1",
             "PYTHONPATH": str(source_root.resolve()),
         }
     )

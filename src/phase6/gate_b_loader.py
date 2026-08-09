@@ -37,6 +37,7 @@ from types import CodeType, FunctionType, MappingProxyType, ModuleType
 from typing import Any, BinaryIO, Protocol
 
 import phase6.gate_b_contracts as gate_b_contracts_module
+from gate_b_v2_startup import require_gate_b_v2_bootstrap
 from phase6.contracts import canonical_json_bytes, sha256_bytes
 from phase6.gate_b_contracts import (
     ACTIVE_MODULE_PATHS,
@@ -79,6 +80,7 @@ from phase6.gate_b_ledger import (
 # This separate complete inventory is the code Python executes and is bound to
 # execution_route_commit, so neither evidence hash is ambiguous.
 GATE_B_V2_RUNTIME_MODULE_PATHS = (
+    ("gate_b_v2_startup", "src/gate_b_v2_startup.py"),
     ("opponents", "src/opponents/__init__.py"),
     ("opponents._canonical", "src/opponents/_canonical.py"),
     ("opponents.catalog", "src/opponents/catalog.py"),
@@ -354,6 +356,7 @@ class GateBPartialEvidenceError(GateBLoaderError):
 def require_gate_b_v2_source_only_startup() -> None:
     """Require an immutable CPython startup that cannot address a project pyc."""
     try:
+        require_gate_b_v2_bootstrap()
         import _testinternalcapi
 
         spec = _testinternalcapi.__spec__
@@ -406,9 +409,11 @@ def require_gate_b_v2_source_only_startup() -> None:
             config["write_bytecode"] != 0
             or config["safe_path"] != 1
             or config["user_site_directory"] != 0
+            or config["site_import"] != 0
             or sys.flags.dont_write_bytecode != 1
             or sys.flags.safe_path != 1
             or sys.flags.no_user_site != 1
+            or sys.flags.no_site != 1
             or not sys.dont_write_bytecode
             or sys.pycache_prefix is None
             or Path(sys.pycache_prefix).resolve() != startup_prefix

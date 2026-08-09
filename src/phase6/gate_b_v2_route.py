@@ -145,6 +145,7 @@ _V2_RESERVATION_AUTHORIZATIONS: dict[
 _V2_RESERVATION_AUTHORIZATION_LOCK = threading.RLock()
 _V2_LIFECYCLE_REGISTRY_MISSING = object()
 _V2_PLAN_CLOSE_PROVENANCE_ERROR = "v2 execution-plan close provenance mismatch"
+_V2_ROUTE_LIFECYCLE_UNAVAILABLE_ERROR = "v2 prepared route is not available"
 _DISPOSABLE_USED_AUTHORITIES: set[int] = set()
 
 _OID_RE = re.compile(r"[0-9a-f]{40}\Z")
@@ -445,6 +446,13 @@ def validate_gate_b_v2_pinned_spec_reference(
     ):
         _fail("v2 pinned spec-reference provenance mismatch")
     return reference
+
+
+def _retire_gate_b_v2_pinned_spec_reference(reference: object) -> None:
+    """Remove the one-shot bootstrap capability regardless of outcome."""
+    if type(reference) is GateBV2PinnedSpecReference:
+        with _V2_RESERVATION_AUTHORIZATION_LOCK:
+            _PINNED_SPEC_REGISTRY.pop(id(reference), None)
 
 
 def _bootstrap_pin(value: object, label: str) -> dict[str, Any]:
@@ -967,7 +975,13 @@ def _load_stored_artifact(
     for name, value in values.items():
         object.__setattr__(snapshot, name, value)
     _ARTIFACT_REGISTRY[id(snapshot)] = _artifact_snapshot_tuple(snapshot)
-    return _validate_stored_artifact(snapshot), payload
+    try:
+        return _validate_stored_artifact(snapshot), payload
+    except BaseException:
+        _ARTIFACT_REGISTRY.pop(id(snapshot), None)
+        object.__setattr__(snapshot, "raw", b"")
+        object.__setattr__(snapshot, "size_bytes", 0)
+        raise
 
 
 def _validate_execution_human_and_readiness(
@@ -1185,8 +1199,16 @@ def _new_runtime_root_reference(
         anchor_raw=anchor_raw,
     )
     _ROOT_REF_REGISTRY[id(ref)] = _root_ref_snapshot(ref)
-    validate_gate_b_v2_runtime_root_reference(ref, role)
-    return ref
+    try:
+        validate_gate_b_v2_runtime_root_reference(ref, role)
+        return ref
+    except BaseException:
+        _ROOT_REF_REGISTRY.pop(id(ref), None)
+        object.__setattr__(ref, "_payload", MappingProxyType({}))
+        object.__setattr__(ref, "_fixed_root", MappingProxyType({}))
+        object.__setattr__(ref, "_descriptor", MappingProxyType({}))
+        object.__setattr__(ref, "_anchor_raw", None)
+        raise
 
 
 def _request_snapshot(request: GateBLoaderRequest) -> tuple[object, ...]:
@@ -1623,6 +1645,127 @@ def _close_gate_b_v2_execution_plan_locked(
         _fail("v2 execution-plan close failed closed")
 
 
+def _cleanup_unregistered_v2_plan_graph(
+    *,
+    plan: GateBV2ExecutionPlan | None,
+    compatibility_chain: object,
+    bundle_evidence: object,
+    artifacts: Mapping[str, GateBV2StoredArtifactSnapshot],
+    root_references: Mapping[str, GateBV2RuntimeRootReference],
+    batch: GateBBatchManifest | None,
+    readiness: GateBReadinessAuthorization | None,
+    context: GateBExecutionContext | None,
+    request: GateBLoaderRequest | None,
+    input_owners: tuple[_GateBV2RetainedInputOwner, ...],
+) -> None:
+    """Best-effort erasure for every object created before plan registration."""
+    with _V2_RESERVATION_AUTHORIZATION_LOCK:
+        if type(request) is GateBLoaderRequest:
+            request_id = id(request)
+            _V2_RUNTIME_REQUEST_ORIGINS.pop(request_id, None)
+            _V2_RUNTIME_REQUEST_PLANS.pop(request_id, None)
+            _V2_RUNTIME_REQUEST_COPY_PROVENANCE.pop(request_id, None)
+            _V2_RESERVATION_AUTHORIZATIONS.pop(request_id, None)
+            for name, value in (
+                ("roots", MappingProxyType({})),
+                ("_payload", MappingProxyType({})),
+                ("_v2_reservation_origin", None),
+                ("_v2_reservation_state", "closed"),
+                ("_v2_reservation_authorization", None),
+            ):
+                with suppress(BaseException):
+                    object.__setattr__(request, name, value)
+
+        for root_reference in tuple(root_references.values()):
+            _ROOT_REF_REGISTRY.pop(id(root_reference), None)
+            for name, value in (
+                ("_payload", MappingProxyType({})),
+                ("_fixed_root", MappingProxyType({})),
+                ("_descriptor", MappingProxyType({})),
+                ("_anchor_raw", None),
+            ):
+                with suppress(BaseException):
+                    object.__setattr__(root_reference, name, value)
+
+        for artifact in tuple(artifacts.values()):
+            _ARTIFACT_REGISTRY.pop(id(artifact), None)
+            with suppress(BaseException):
+                object.__setattr__(artifact, "raw", b"")
+                object.__setattr__(artifact, "size_bytes", 0)
+
+        if type(bundle_evidence) is ValidatedPhase6ContractBundleEvidence:
+            contracts_module._BUNDLE_EVIDENCE_REGISTRY.pop(id(bundle_evidence), None)
+            try:
+                bundle_artifacts = tuple(bundle_evidence._artifacts)
+            except BaseException:
+                bundle_artifacts = ()
+            for artifact in bundle_artifacts:
+                with suppress(BaseException):
+                    object.__setattr__(artifact, "raw", b"")
+            for name, value in (
+                ("_root_manifest_raw", b""),
+                ("_artifacts", ()),
+                ("_loader_token", None),
+            ):
+                with suppress(BaseException):
+                    object.__setattr__(bundle_evidence, name, value)
+
+        if type(compatibility_chain) is GateBV2CompatibilityTrustChain:
+            gate_b_contracts_module._V2_TRUST_CHAIN_REGISTRY.pop(
+                id(compatibility_chain),
+                None,
+            )
+            try:
+                projection = compatibility_chain.projection
+            except BaseException:
+                projection = None
+            if projection is not None:
+                gate_b_contracts_module._V2_PROJECTION_REGISTRY.pop(id(projection), None)
+                for name, value in (
+                    ("payload", MappingProxyType({})),
+                    ("canonical_bytes", b""),
+                ):
+                    with suppress(BaseException):
+                        object.__setattr__(projection, name, value)
+            for name, value in (
+                ("projection", None),
+                ("descriptor", MappingProxyType({})),
+                ("roots", MappingProxyType({})),
+                ("artifact_hashes", MappingProxyType({})),
+                ("request_payload", MappingProxyType({})),
+                ("_artifact_raws", MappingProxyType({})),
+            ):
+                with suppress(BaseException):
+                    object.__setattr__(compatibility_chain, name, value)
+
+        for value in (batch, readiness, context):
+            if value is not None:
+                with suppress(BaseException):
+                    object.__setattr__(value, "_payload", MappingProxyType({}))
+                    object.__setattr__(value, "_raw", b"")
+
+        for owner in reversed(input_owners):
+            with suppress(BaseException):
+                _close_input_owner(owner)
+
+        if type(plan) is GateBV2ExecutionPlan:
+            _PLAN_ROUTE_OWNERS.pop(id(plan), None)
+            _PLAN_REGISTRY.pop(id(plan), None)
+            for name, value in (
+                ("compatibility_chain", None),
+                ("phase6_contract_bundle_evidence", None),
+                ("projection_descriptor", MappingProxyType({})),
+                ("artifact_hashes", MappingProxyType({})),
+                ("roots", MappingProxyType({})),
+                ("request", None),
+                ("_artifacts", MappingProxyType({})),
+                ("_input_owners", ()),
+                ("_closed", True),
+            ):
+                with suppress(BaseException):
+                    object.__setattr__(plan, name, value)
+
+
 def build_gate_b_v2_execution_plan(
     compatibility_chain: GateBV2CompatibilityTrustChain,
     *,
@@ -1646,10 +1789,21 @@ def build_gate_b_v2_execution_plan(
     _additional_input_owners: tuple[_GateBV2RetainedInputOwner, ...] = (),
 ) -> GateBV2ExecutionPlan:
     """Build a retained plan; hand it to prepare or close it explicitly without writing roots."""
-    _require_v2_source_only_startup()
-    created_owner: _GateBV2RetainedInputOwner | None = None
     registered_plan: GateBV2ExecutionPlan | None = None
+    plan: GateBV2ExecutionPlan | None = None
+    artifacts: dict[str, GateBV2StoredArtifactSnapshot] = {}
+    runtime_roots: dict[str, GateBV2RuntimeRootReference] = {}
+    batch: GateBBatchManifest | None = None
+    readiness_object: GateBReadinessAuthorization | None = None
+    context_object: GateBExecutionContext | None = None
+    request_object: GateBLoaderRequest | None = None
+    cleanup_input_owners = tuple(
+        owner
+        for owner in (*_additional_input_owners, _retained_input_owner)
+        if type(owner) is _GateBV2RetainedInputOwner
+    )
     try:
+        _require_v2_source_only_startup()
         input_rows = (
             ("approval_record", approval_record_raw, approval_record_path, "v2 execution approval"),
             (
@@ -1715,7 +1869,7 @@ def build_gate_b_v2_execution_plan(
                 for name, raw, _path, _label in input_rows
             }
             input_owner = _open_retained_input_owner(direct_pins, supplied_raws=supplied_raws)
-            created_owner = input_owner
+            cleanup_input_owners = (input_owner,)
             input_keys = {name: name for name in supplied_raws}
         else:
             input_owner = _validate_input_owner(_retained_input_owner, reread=True)
@@ -1733,6 +1887,7 @@ def build_gate_b_v2_execution_plan(
                 ):
                     _fail("v2 retained execution input continuity mismatch")
         input_owners = (*_additional_input_owners, input_owner)
+        cleanup_input_owners = input_owners
         if (
             not input_owners
             or any(type(owner) is not _GateBV2RetainedInputOwner for owner in input_owners)
@@ -1741,7 +1896,6 @@ def build_gate_b_v2_execution_plan(
             _fail("v2 retained-input owner inventory mismatch")
         _validate_input_owner_topology(input_owners)
 
-        artifacts: dict[str, GateBV2StoredArtifactSnapshot] = {}
         payloads: dict[str, dict[str, Any]] = {}
         for name, raw, path, label in input_rows:
             snapshot, payload = _load_stored_artifact(
@@ -1873,7 +2027,6 @@ def build_gate_b_v2_execution_plan(
         request_roots = _closed(
             request_legacy["roots"], set(_ROOT_ROLES), "v2 execution request roots"
         )
-        runtime_roots: dict[str, GateBV2RuntimeRootReference] = {}
         for role in _ROOT_ROLES:
             root = _closed(
                 request_roots[role],
@@ -1901,7 +2054,7 @@ def build_gate_b_v2_execution_plan(
         ):
             _fail("v2 execution request initial actor contract mismatch")
 
-        batch: GateBBatchManifest = load_gate_b_batch_manifest_bytes(
+        batch = load_gate_b_batch_manifest_bytes(
             artifacts["batch_manifest"].raw,
             expected_sha256=batch_hash,
             reference_path=artifacts["batch_manifest"].reference_path,
@@ -2115,7 +2268,6 @@ def build_gate_b_v2_execution_plan(
         validated_plan = validate_gate_b_v2_execution_plan(plan)
         with _V2_RESERVATION_AUTHORIZATION_LOCK:
             _V2_RUNTIME_REQUEST_PLANS[id(plan.request)] = plan
-        created_owner = None
         return validated_plan
     except GateBV2RouteError:
         if registered_plan is not None:
@@ -2124,9 +2276,19 @@ def build_gate_b_v2_execution_plan(
                     registered_plan,
                     _allow_unregistered_runtime_plan=True,
                 )
-        elif created_owner is not None:
-            with suppress(Exception):
-                _close_input_owner(created_owner)
+        else:
+            _cleanup_unregistered_v2_plan_graph(
+                plan=plan,
+                compatibility_chain=compatibility_chain,
+                bundle_evidence=phase6_contract_bundle_evidence,
+                artifacts=artifacts,
+                root_references=runtime_roots,
+                batch=batch,
+                readiness=readiness_object,
+                context=context_object,
+                request=request_object,
+                input_owners=cleanup_input_owners,
+            )
         raise
     except (GateBContractError, KeyError, TypeError, ValueError, OverflowError, OSError):
         if registered_plan is not None:
@@ -2135,10 +2297,62 @@ def build_gate_b_v2_execution_plan(
                     registered_plan,
                     _allow_unregistered_runtime_plan=True,
                 )
-        elif created_owner is not None:
-            with suppress(Exception):
-                _close_input_owner(created_owner)
+        else:
+            _cleanup_unregistered_v2_plan_graph(
+                plan=plan,
+                compatibility_chain=compatibility_chain,
+                bundle_evidence=phase6_contract_bundle_evidence,
+                artifacts=artifacts,
+                root_references=runtime_roots,
+                batch=batch,
+                readiness=readiness_object,
+                context=context_object,
+                request=request_object,
+                input_owners=cleanup_input_owners,
+            )
         _fail("Gate B v2 execution plan failed closed")
+    except Exception:
+        if registered_plan is not None:
+            with suppress(Exception):
+                close_gate_b_v2_execution_plan(
+                    registered_plan,
+                    _allow_unregistered_runtime_plan=True,
+                )
+        else:
+            _cleanup_unregistered_v2_plan_graph(
+                plan=plan,
+                compatibility_chain=compatibility_chain,
+                bundle_evidence=phase6_contract_bundle_evidence,
+                artifacts=artifacts,
+                root_references=runtime_roots,
+                batch=batch,
+                readiness=readiness_object,
+                context=context_object,
+                request=request_object,
+                input_owners=cleanup_input_owners,
+            )
+        _fail("Gate B v2 execution plan failed closed")
+    except BaseException:
+        if registered_plan is not None:
+            with suppress(Exception):
+                close_gate_b_v2_execution_plan(
+                    registered_plan,
+                    _allow_unregistered_runtime_plan=True,
+                )
+        else:
+            _cleanup_unregistered_v2_plan_graph(
+                plan=plan,
+                compatibility_chain=compatibility_chain,
+                bundle_evidence=phase6_contract_bundle_evidence,
+                artifacts=artifacts,
+                root_references=runtime_roots,
+                batch=batch,
+                readiness=readiness_object,
+                context=context_object,
+                request=request_object,
+                input_owners=cleanup_input_owners,
+            )
+        raise
 
 
 def is_gate_b_v2_runtime_request(value: object) -> bool:
@@ -2373,7 +2587,7 @@ class PreparedGateBV2ExecutionRoute:
         _require_v2_source_only_startup()
         route = validate_prepared_gate_b_v2_execution_route(self)
         if route._closed or route._consumed:
-            _fail("v2 prepared route is not available")
+            _fail(_V2_ROUTE_LIFECYCLE_UNAVAILABLE_ERROR)
         plan = validate_gate_b_v2_execution_plan(route.plan)
         for role in _ROOT_ROLES:
             root = plan.roots[role]
@@ -2416,9 +2630,16 @@ class PreparedGateBV2ExecutionRoute:
 
     def consume(self) -> tuple[GateBLoaderRequest, GateBProductionExecutor]:
         _require_v2_source_only_startup()
-        self.verify_pre_write()
-        request = self.request
         with _V2_RESERVATION_AUTHORIZATION_LOCK:
+            if (
+                type(self) is not PreparedGateBV2ExecutionRoute
+                or self._closed
+                or self._consumed
+                or _PREPARED_REGISTRY.get(id(self)) is None
+            ):
+                _fail(_V2_ROUTE_LIFECYCLE_UNAVAILABLE_ERROR)
+            self.verify_pre_write()
+            request = self.request
             if (
                 type(request._v2_reservation_state) is not str
                 or request._v2_reservation_state != "planned"
@@ -2737,10 +2958,14 @@ def prepare_gate_b_v2_execution_route_from_reference(
     spec_reference: GateBV2PinnedSpecReference,
 ) -> PreparedGateBV2ExecutionRoute:
     """Resolve one closed bootstrap into the exact read-only plan and retained route."""
-    _require_v2_source_only_startup()
     spec_owner: _GateBV2RetainedInputOwner | None = None
     input_owner: _GateBV2RetainedInputOwner | None = None
+    compatibility_chain: GateBV2CompatibilityTrustChain | None = None
+    bundle_evidence: ValidatedPhase6ContractBundleEvidence | None = None
+    plan: GateBV2ExecutionPlan | None = None
+    prepared: PreparedGateBV2ExecutionRoute | None = None
     try:
+        _require_v2_source_only_startup()
         bootstrap_raw, spec_owner = _read_v2_bootstrap_reference(spec_reference)
         payload = _validate_bootstrap_payload(bootstrap_raw)
         raws, paths, input_owner = _read_v2_bootstrap_inputs(payload)
@@ -2829,6 +3054,24 @@ def prepare_gate_b_v2_execution_route_from_reference(
     except (GateBContractError, KeyError, TypeError, ValueError, OSError, OverflowError):
         _fail("Gate B v2 bootstrap failed closed")
     finally:
+        _retire_gate_b_v2_pinned_spec_reference(spec_reference)
+        if prepared is None:
+            _cleanup_unregistered_v2_plan_graph(
+                plan=plan,
+                compatibility_chain=compatibility_chain,
+                bundle_evidence=bundle_evidence,
+                artifacts={},
+                root_references={},
+                batch=None,
+                readiness=None,
+                context=None,
+                request=None,
+                input_owners=tuple(
+                    owner
+                    for owner in (spec_owner, input_owner)
+                    if type(owner) is _GateBV2RetainedInputOwner
+                ),
+            )
         for owner in (input_owner, spec_owner):
             if owner is not None:
                 registered = _INPUT_OWNER_REGISTRY.get(id(owner))
@@ -3136,7 +3379,7 @@ def consume_gate_b_v2_execution_route(
 ) -> tuple[GateBLoaderRequest, Any]:
     if type(value) is PreparedGateBV2ExecutionRoute:
         _require_v2_source_only_startup()
-        return validate_prepared_gate_b_v2_execution_route(value).consume()
+        return value.consume()
     if type(value) is _PreparedDisposableGateBV2FixtureRoute:
         return _validate_disposable_gate_b_v2_fixture_route(value).consume()
     _fail("v2 execution-route dispatcher type mismatch")
