@@ -358,16 +358,25 @@ def require_gate_b_v2_source_only_startup() -> None:
 
         spec = _testinternalcapi.__spec__
         getter = _testinternalcapi.get_configs
-        expected_origin = Path(sys.base_prefix) / "DLLs" / "_testinternalcapi.pyd"
+        provider_root = Path(sys.base_prefix).resolve()
         if os.name == "nt":
-            trusted_provider = (
-                type(spec.loader) is importlib.machinery.ExtensionFileLoader
-                and Path(spec.origin).resolve() == expected_origin.resolve()
-            )
+            expected_origin = provider_root / "DLLs" / "_testinternalcapi.pyd"
         else:
-            trusted_provider = (
-                spec.loader is importlib.machinery.BuiltinImporter and spec.origin == "built-in"
-            )
+            destination = sysconfig.get_config_var("DESTSHARED")
+            extension_suffix = sysconfig.get_config_var("EXT_SUFFIX")
+            if type(destination) is not str or type(extension_suffix) is not str:
+                raise GateBExecutionEnvironmentFailure(
+                    "CPython startup configuration provider mismatch"
+                )
+            expected_origin = Path(destination) / f"_testinternalcapi{extension_suffix}"
+        expected_origin = expected_origin.resolve()
+        trusted_provider = (
+            provider_root in expected_origin.parents
+            and type(spec.loader) is importlib.machinery.ExtensionFileLoader
+            and spec.loader.name == "_testinternalcapi"
+            and Path(spec.loader.path).resolve() == expected_origin
+            and Path(spec.origin).resolve() == expected_origin
+        )
         if (
             type(_testinternalcapi) is not ModuleType
             or not trusted_provider
