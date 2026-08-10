@@ -82,8 +82,8 @@ def test_release_workflow_keeps_exact_python_and_offline_cross_platform_gates() 
     assert "--wheelhouse wheelhouse" in workflow
     assert "ubuntu-24.04" in workflow
     assert "windows-2022" in workflow
-    assert "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02" in workflow
-    assert "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093" in workflow
+    assert "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" in workflow
+    assert "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c" in workflow
     assert "gh release" not in workflow
     verifier = (SCRIPTS / "verify_release_artifacts.py").read_text(encoding="utf-8")
     assert verifier.count('"--isolated"') == 2

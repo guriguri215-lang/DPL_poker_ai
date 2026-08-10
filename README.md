@@ -118,6 +118,11 @@ This is a simulation-only research artefact. Do not use it to gain an unfair
 advantage in real-money play or in violation of any poker platform's terms. See
 `docs/responsible_use.md` (added with the docs phase).
 
+## Distribution
+
+Release artifacts are distributed only through GitHub Releases. This project
+does not publish to PyPI or other package indexes.
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
