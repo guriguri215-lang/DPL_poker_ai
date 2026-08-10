@@ -18,7 +18,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import wraps
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import MappingProxyType
 from typing import Any
 
@@ -49,9 +49,9 @@ HUMAN_SIGNATURE_RECORD_V3_SCHEMA_VERSION = "phase6-gate-b-human-signature-record
 READINESS_AUTHORIZATION_V3_SCHEMA_VERSION = "phase6-gate-b-readiness-authorization-v3"
 ROOT_ANCHOR_V2_SCHEMA_VERSION = "phase6-gate-b-root-anchor-v2"
 LOADER_REQUEST_V2_SCHEMA_VERSION = "phase6-gate-b-test-loader-request-v2"
-SOURCE_MATERIALIZATION_PROJECTION_SIZE_BYTES = 1111
+SOURCE_MATERIALIZATION_PROJECTION_SIZE_BYTES = 868
 SOURCE_MATERIALIZATION_PROJECTION_SHA256 = (
-    "134f7169a949b41de3bb0b6de8f9c80c3e65cab477d31bae2581281df8c57a09"
+    "94f80575ad801a9d98175eeae668d11d5bb4f1b9da8369808fc84159cef375d0"
 )
 ROOT_ANCHOR_POLICY_VERSION = "phase6-gate-b-root-anchor-policy-v1"
 OPPONENT_PAYLOAD_INDEX_SCHEMA_VERSION = "phase6-gate-b-opponent-payload-index-v1"
@@ -1502,7 +1502,7 @@ def build_gate_b_preapproval_root_identity_projection_v2(
             or any(unicodedata.category(character) in {"Cc", "Cf"} for character in absolute_path)
         ):
             _fail(f"{role} v2 preapproval root path mismatch")
-        path = Path(absolute_path)
+        path = PureWindowsPath(absolute_path)
         if not path.is_absolute() or ".." in path.parts or str(path) != absolute_path:
             _fail(f"{role} v2 preapproval root path must be canonical and absolute")
         if raw["identity_scheme"] != "windows-volume-file-id-v1":
@@ -1903,7 +1903,15 @@ def build_gate_b_v2_compatibility_trust_chain(
         anchor_hashes=anchor_hashes,
     )
     rebuilt = build_gate_b_preapproval_root_identity_projection_v2(roots)
-    if rebuilt.canonical_bytes != projection.canonical_bytes or rebuilt.sha256 != projection.sha256:
+    rebuilt_mismatch = (
+        rebuilt.canonical_bytes != projection.canonical_bytes or rebuilt.sha256 != projection.sha256
+    )
+    rebuilt_snapshot = _V2_PROJECTION_REGISTRY.pop(id(rebuilt), None)
+    if rebuilt_snapshot is None or rebuilt_snapshot[0] is not rebuilt:
+        _fail("v2 rebuilt projection registry identity changed")
+    object.__setattr__(rebuilt, "payload", MappingProxyType({}))
+    object.__setattr__(rebuilt, "canonical_bytes", b"")
+    if rebuilt_mismatch:
         _fail("v2 loader roots differ from the approved projection")
     paths = {role: Path(root["absolute_path"]) for role, root in roots.items()}
     if len({os.path.normcase(str(path)) for path in paths.values()}) != 3:

@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=77"]
+requires = ["setuptools==83.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -13,19 +13,24 @@ license-files = ["LICENSE"]
 authors = [{ name = "poker-xai contributors" }]
 keywords = ["poker", "explainable-ai", "opponent-modeling", "game-theory"]
 dependencies = [
-    "pydantic>=2.6",
-    "pyyaml>=6.0",
+    "pydantic==2.11.7",
+    "pyyaml==6.0.2",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.0",
-    "ruff>=0.5",
-    "jsonschema>=4.0",
+    "pytest==8.4.1",
+    "ruff==0.12.9",
+    "jsonschema==4.25.1",
+    "setuptools==83.0.0",
 ]
 
 [project.scripts]
 poker-xai-export-schemas = "poker_core.schema_export:main"
+poker-xai-gate-b-v2 = "gate_b_v2_launcher:main"
+
+[tool.setuptools]
+py-modules = ["gate_b_v2_launcher", "gate_b_v2_startup"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

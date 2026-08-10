@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import gc
 import json
 import multiprocessing
 import os
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
@@ -1994,6 +1996,59 @@ def test_host_pinned_directory_create_read_list_and_close(tmp_path: Path) -> Non
     object.__setattr__(created, "_raw", b"retained-mutation")
     with pytest.raises(GateBLedgerError, match="provenance"):
         _ = created.sha256
+
+
+def test_pinned_artifact_rejects_coordinated_raw_hash_and_size_mutation(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "coordinated-artifact.json"
+    raw = b'{"fixture":"original"}\n'
+    path.write_bytes(raw)
+    artifact = ledger_module._new_pinned_artifact(raw, path.stat())
+    replacement = b'{"fixture":"replacement"}\n'
+    object.__setattr__(artifact, "_raw", replacement)
+    object.__setattr__(artifact, "_sha256", sha256_bytes(replacement))
+    object.__setattr__(artifact, "_size_bytes", len(replacement))
+
+    with pytest.raises(GateBLedgerError, match="provenance"):
+        _ = artifact.raw
+
+
+@pytest.mark.parametrize("field", ["_volume_id_hex", "_file_id_hex"])
+def test_pinned_artifact_rejects_physical_identity_mutation(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    path = tmp_path / "identity-artifact.json"
+    raw = b'{"fixture":"identity"}\n'
+    path.write_bytes(raw)
+    artifact = ledger_module._new_pinned_artifact(raw, path.stat())
+    original = object.__getattribute__(artifact, field)
+    object.__setattr__(artifact, field, "1" if original != "1" else "2")
+
+    with pytest.raises(GateBLedgerError, match="provenance"):
+        _ = artifact.physical_identity
+
+
+def test_pinned_artifact_registry_is_weak_and_retains_no_raw_bytes(tmp_path: Path) -> None:
+    path = tmp_path / "weak-artifact.json"
+    raw = b'{"fixture":"weak"}\n'
+    path.write_bytes(raw)
+    artifact = ledger_module._new_pinned_artifact(raw, path.stat())
+    artifact_id = id(artifact)
+    retained = weakref.ref(artifact)
+    registration = ledger_module._PINNED_ARTIFACT_REGISTRY[artifact_id]
+    assert registration[0]() is artifact
+    assert registration[1] == (
+        raw,
+        sha256_bytes(raw),
+        len(raw),
+        *artifact.physical_identity,
+    )
+    del artifact
+    gc.collect()
+    assert retained() is None
+    assert artifact_id not in ledger_module._PINNED_ARTIFACT_REGISTRY
 
 
 @pytest.mark.parametrize(

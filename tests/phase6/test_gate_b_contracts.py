@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import itertools
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePath
 from types import MappingProxyType, SimpleNamespace
 
@@ -331,18 +332,9 @@ def _v2_projection_roots(
     paths: dict[str, str] | None = None,
 ) -> dict[str, dict[str, object]]:
     selected_paths = paths or {
-        "ledger_base": (
-            r"C:\synthetic\poker_xai\gate_b_v2\ledger"
-            r"\gate_b_test_v2_ledger"
-        ),
-        "quarantine_base": (
-            r"C:\synthetic\poker_xai\gate_b_v2\quarantine"
-            r"\gate_b_test_v2_quarantine"
-        ),
-        "test_root": (
-            r"C:\synthetic\poker_xai\gate_b_v2\input"
-            r"\gate_b_test_v2_input"
-        ),
+        "ledger_base": r"C:\synthetic\poker_xai\gate_b_v2\ledger",
+        "quarantine_base": r"C:\synthetic\poker_xai\gate_b_v2\quarantine",
+        "test_root": r"C:\synthetic\poker_xai\gate_b_v2\input",
     }
     identities = {
         "ledger_base": ("00355357", "008f000000277838"),
@@ -2049,36 +2041,25 @@ def test_retained_bytes_trust_mismatch_matrix_is_exact_base_and_sanitized(
 def test_v2_root_projection_exact_golden_vectors_and_source_binding() -> None:
     fixture = _v2_chain_fixture()
     expected = (
-        b'{"anchor_policy_version":"phase6-gate-b-root-anchor-policy-v1","roots":['
-        b'{"absolute_path":"C:\\\\Users\\\\gurig\\\\Desktop\\\\claude code\\\\'
-        b"\\u30dd\\u30fc\\u30ab\\u30fcAI\\u691c\\u8a0e\\\\controlled_evaluation"
-        b'\\\\gate_b_test_v2_ledger","anchor_relative_path":'
-        b'".gate-b-root-anchor.json","file_id_hex":"008f000000277838",'
-        b'"identity_scheme":"windows-volume-file-id-v1","root_role":"ledger_base",'
-        b'"volume_id_hex":"00355357"},{"absolute_path":"C:\\\\Users\\\\gurig\\\\Desktop'
-        b"\\\\claude code\\\\\\u30dd\\u30fc\\u30ab\\u30fcAI\\u691c\\u8a0e"
-        b'\\\\controlled_evaluation\\\\gate_b_test_v2_quarantine",'
-        b'"anchor_relative_path":".gate-b-root-anchor.json","file_id_hex":'
-        b'"0055000000277839","identity_scheme":"windows-volume-file-id-v1",'
-        b'"root_role":"quarantine_base","volume_id_hex":"00355357"},'
-        b'{"absolute_path":"C:\\\\Users\\\\gurig\\\\Desktop\\\\claude code\\\\'
-        b"\\u30dd\\u30fc\\u30ab\\u30fcAI\\u691c\\u8a0e\\\\controlled_evaluation"
-        b'\\\\gate_b_test_v2_input","anchor_relative_path":null,'
-        b'"file_id_hex":"0edb00000002971b","identity_scheme":'
-        b'"windows-volume-file-id-v1","root_role":"test_root","volume_id_hex":'
-        b'"00355357"}],"schema_version":'
-        b'"phase6-gate-b-preapproval-root-identity-projection-v2",'
-        b'"serialization_profile":"windows-volume8-file16-lowerhex-v1",'
-        b'"source_materialization_projection":{"schema_version":'
-        b'"phase6-gate-b-preapproval-root-identity-projection-v1",'
-        b'"serialization_profile":"windows-volume8-file16-lowerhex-v1",'
-        b'"sha256":"134f7169a949b41de3bb0b6de8f9c80c3e65cab477d31bae2581281df8c57a09",'
-        b'"size_bytes":1111}}\n'
+        b'{"anchor_policy_version":"phase6-gate-b-root-anchor-policy-v1","roots":[{"absolute_path"'
+        b':"C:\\\\synthetic\\\\poker_xai\\\\gate_b_v2\\\\ledger","anchor_relative_path":".gate-b-root-anch'
+        b'or.json","file_id_hex":"008f000000277838","identity_scheme":"windows-volume-file-id-v1",'
+        b'"root_role":"ledger_base","volume_id_hex":"00355357"},{"absolute_path":"C:\\\\synthetic\\\\p'
+        b'oker_xai\\\\gate_b_v2\\\\quarantine","anchor_relative_path":".gate-b-root-anchor.json","file'
+        b'_id_hex":"0055000000277839","identity_scheme":"windows-volume-file-id-v1","root_role":"q'
+        b'uarantine_base","volume_id_hex":"00355357"},{"absolute_path":"C:\\\\synthetic\\\\poker_xai\\\\'
+        b'gate_b_v2\\\\input","anchor_relative_path":null,"file_id_hex":"0edb00000002971b","identity'
+        b'_scheme":"windows-volume-file-id-v1","root_role":"test_root","volume_id_hex":"00355357"}'
+        b'],"schema_version":"phase6-gate-b-preapproval-root-identity-projection-v2","serializatio'
+        b'n_profile":"windows-volume8-file16-lowerhex-v1","source_materialization_projection":{"sc'
+        b'hema_version":"phase6-gate-b-preapproval-root-identity-projection-v1","serialization_pro'
+        b'file":"windows-volume8-file16-lowerhex-v1","sha256":"94f80575ad801a9d98175eeae668d11d5bb'
+        b'4f1b9da8369808fc84159cef375d0","size_bytes":868}}\n'
     )
     assert fixture.projection.canonical_bytes == expected
-    assert len(expected) == 1438
+    assert len(expected) == 1194
     assert fixture.projection.sha256 == (
-        "32df0fa0fa6a09e9ecfa7e39e5441953c6aa4578300f9c942f08f0db2d756d26"
+        "a21b2ba8630267c4ae59ff30a7304e478982537926e8c5282d9f7e338bc49a26"
     )
     assert fixture.descriptor == {
         "schema_version": ROOT_IDENTITY_PROJECTION_DESCRIPTOR_V2_SCHEMA_VERSION,
@@ -2097,9 +2078,9 @@ def test_v2_root_projection_exact_golden_vectors_and_source_binding() -> None:
         ),
         "source_materialization_projection_sha256": (SOURCE_MATERIALIZATION_PROJECTION_SHA256),
     }
-    assert len(canonical_json_bytes(fixture.descriptor)) == 732
+    assert len(canonical_json_bytes(fixture.descriptor)) == 731
     assert sha256_bytes(canonical_json_bytes(fixture.descriptor)) == (
-        "ed31edde3f62c99271223e2885d857f006c6b6d7bb344446295bc25335319ee5"
+        "1eb5c3ac9a6e7b966e33ffbb103acce38f2771b7224d726ebb32ee8cf0983e14"
     )
 
 
@@ -2138,10 +2119,10 @@ def test_previous_reviewer_request_hash_pair_cannot_reach_a_full_v2_chain() -> N
     original = _rejected_synthetic_v2_request_raw(requested_at_utc="2026-08-01T00:04:00Z")
     substituted = _rejected_synthetic_v2_request_raw(requested_at_utc="2026-08-01T00:05:00Z")
     assert sha256_bytes(original) == (
-        "6f2c9a59dce7fd8a6d75ac2b5a5cb86984b001529a11159ef62af8b7819e9bf2"
+        "e79a44c2aba921699f3a54e1cbfc0c838597a4e0ac12ca8788b6bdc344e3c39b"
     )
     assert sha256_bytes(substituted) == (
-        "fc73e83f693b087c1d6a0acfd6caa19772266f1fba9cd28863355067670ec523"
+        "dd1474212192dc6d433279df7c0b40a3a8900421c84319432628f98939da94a8"
     )
     with pytest.raises(GateBContractError):
         build_gate_b_preapproval_root_identity_projection_v2(
@@ -2230,16 +2211,16 @@ def test_v2_trust_chain_exact_stored_byte_hash_join_and_golden_hashes() -> None:
     fixture = _v2_chain_fixture()
     assert validate_gate_b_v2_compatibility_trust_chain(fixture.chain) is fixture.chain
     assert fixture.chain.artifact_hashes == {
-        "approval_record": "86cf4c0372a4c7906dc76256879543cd3a889b5edfb2cf0648d465d567e389f0",
-        "signature_record": "b621f392ee60331b2effa786791af66c4abf16d2d444088918b853cd02c66a08",
+        "approval_record": "44ef3bab33f8f0c69b56d39531018ecb403dc512dce49db33bcdd304e72ddf22",
+        "signature_record": "f67932eba6f37d88b8bbb6b2b5c682fc9f032875b8872ea1ecf568c57992411a",
         "readiness_authorization": (
-            "dc2135cfc7429082456eaed05cb2d4530f9d78681d03c94214d54601237daee7"
+            "e24a8d079b8b314caca01a76270c480242a15919fbe78b7628125ddfe88429b6"
         ),
-        "ledger_root_anchor": "0fb77a8b1861fd2db73be46be6957ff893a007df940ee28b1158ecdfb5dd8961",
+        "ledger_root_anchor": "89a04f7a54368112540d75d1be94c37c64679f186d2196b171d10c555f323146",
         "quarantine_root_anchor": (
-            "2b35c1425fa7d0c5b5b3a57e8f03065f3c8cbbbcac5aea4b56afc199f0feefe9"
+            "f9e1d26b04deaeb71540d1e50b3668a0f0e0526a2eca262d7020a9069054fe6f"
         ),
-        "loader_request": "cbbd3ee39e8e63afac0b2f01c75d15aec7980a30576a383e216db58a13eb51cb",
+        "loader_request": "45a304f1322e5aea823e14403a10c0de2a610a671a570ab5f54e30e53e6fdab2",
     }
     assert tuple(fixture.chain.roots) == PREAPPROVAL_ROOT_ROLE_ORDER
     assert fixture.chain.request_payload["operation"] == "compatibility_preflight_only"
@@ -2361,3 +2342,47 @@ def test_execution_context_v1_bytes_route_cannot_type_consume_v2_object() -> Non
             expected_sha256="f" * 64,
             reference_path=reference,
         )
+
+
+def test_v2_chain_builder_releases_exact_temporary_projection_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _v2_chain_fixture()
+    before = dict(contracts_module._V2_PROJECTION_REGISTRY)
+    original = contracts_module.build_gate_b_preapproval_root_identity_projection_v2
+
+    def mismatched_rebuild(*args, **kwargs):
+        rebuilt = original(*args, **kwargs)
+        object.__setattr__(rebuilt, "canonical_bytes", b"mismatch\n")
+        return rebuilt
+
+    monkeypatch.setattr(
+        contracts_module,
+        "build_gate_b_preapproval_root_identity_projection_v2",
+        mismatched_rebuild,
+    )
+    with pytest.raises(GateBContractError):
+        _rebuild_v2_chain(fixture)
+    assert before == contracts_module._V2_PROJECTION_REGISTRY
+
+
+def test_parallel_v2_chain_builders_keep_only_their_adopted_projections() -> None:
+    before_projections = set(contracts_module._V2_PROJECTION_REGISTRY)
+    before_chains = set(contracts_module._V2_TRUST_CHAIN_REGISTRY)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        fixtures = tuple(pool.map(lambda _index: _v2_chain_fixture(), range(8)))
+    new_chains = {
+        key: snapshot
+        for key, snapshot in contracts_module._V2_TRUST_CHAIN_REGISTRY.items()
+        if key not in before_chains
+    }
+    new_projections = {
+        key: snapshot
+        for key, snapshot in contracts_module._V2_PROJECTION_REGISTRY.items()
+        if key not in before_projections
+    }
+    assert set(new_chains) == {id(fixture.chain) for fixture in fixtures}
+    assert set(new_projections) == {id(fixture.projection) for fixture in fixtures}
+    assert {id(snapshot[1]) for snapshot in new_chains.values()} == {
+        id(fixture.projection) for fixture in fixtures
+    }

@@ -11,6 +11,8 @@ import json
 import os
 import re
 import stat
+import threading
+import weakref
 from collections.abc import Mapping
 from contextlib import AbstractContextManager, suppress
 from dataclasses import dataclass, field
@@ -1193,7 +1195,7 @@ def _verify_windows_pinned_chain(
                 _fail("Windows retained ancestor topology changed")
 
 
-@dataclass(frozen=True, slots=True, init=False, eq=False)
+@dataclass(frozen=True, slots=True, init=False, eq=False, weakref_slot=True)
 class GateBPinnedArtifact:
     """Immutable bytes and physical identity from a pinned child operation."""
 
@@ -1242,16 +1244,29 @@ class GateBPinnedArtifact:
         )
 
 
+_PinnedArtifactSnapshot = tuple[bytes, str, int, str, str]
 _PINNED_ARTIFACT_REGISTRY: dict[
     int,
-    tuple[GateBPinnedArtifact, bytes, str, int, str, str],
+    tuple[weakref.ReferenceType[GateBPinnedArtifact], _PinnedArtifactSnapshot],
 ] = {}
+_PINNED_ARTIFACT_REGISTRY_LOCK = threading.Lock()
+
+
+def _drop_pinned_artifact_registration(
+    artifact_id: int,
+    reference: weakref.ReferenceType[GateBPinnedArtifact],
+) -> None:
+    with _PINNED_ARTIFACT_REGISTRY_LOCK:
+        registered = _PINNED_ARTIFACT_REGISTRY.get(artifact_id)
+        if registered is not None and registered[0] is reference:
+            _PINNED_ARTIFACT_REGISTRY.pop(artifact_id, None)
 
 
 def _validated_pinned_artifact_snapshot(
     artifact: GateBPinnedArtifact,
 ) -> tuple[bytes, str, int, str, str]:
-    registered = _PINNED_ARTIFACT_REGISTRY.get(id(artifact))
+    with _PINNED_ARTIFACT_REGISTRY_LOCK:
+        registered = _PINNED_ARTIFACT_REGISTRY.get(id(artifact))
     try:
         current = (
             object.__getattribute__(artifact, "_raw"),
@@ -1265,14 +1280,18 @@ def _validated_pinned_artifact_snapshot(
         _fail("pinned artifact loader provenance mismatch")
     if (
         registered is None
-        or registered[0] is not artifact
+        or registered[0]() is not artifact
         or loader_token is not _PINNED_ARTIFACT_LOADER_TOKEN
-        or current != registered[1:]
         or type(current[0]) is not bytes
+        or type(current[1]) is not str
+        or type(current[2]) is not int
+        or type(current[3]) is not str
+        or type(current[4]) is not str
         or sha256_bytes(current[0]) != current[1]
         or len(current[0]) != current[2]
         or _HEX_RE.fullmatch(current[3]) is None
         or _HEX_RE.fullmatch(current[4]) is None
+        or current != registered[1]
     ):
         _fail("pinned artifact loader provenance mismatch")
     return current
@@ -1289,14 +1308,16 @@ def _new_pinned_artifact(raw: bytes, metadata: os.stat_result) -> GateBPinnedArt
     object.__setattr__(artifact, "_volume_id_hex", volume_id)
     object.__setattr__(artifact, "_file_id_hex", file_id)
     object.__setattr__(artifact, "_loader_token", _PINNED_ARTIFACT_LOADER_TOKEN)
-    _PINNED_ARTIFACT_REGISTRY[id(artifact)] = (
+    artifact_id = id(artifact)
+    snapshot = (memoryview(raw).tobytes(), digest, len(raw), volume_id, file_id)
+    reference = weakref.ref(
         artifact,
-        bytes(raw),
-        digest,
-        len(raw),
-        volume_id,
-        file_id,
+        lambda observed: _drop_pinned_artifact_registration(artifact_id, observed),
     )
+    with _PINNED_ARTIFACT_REGISTRY_LOCK:
+        if artifact_id in _PINNED_ARTIFACT_REGISTRY:
+            _fail("pinned artifact loader provenance identity collision")
+        _PINNED_ARTIFACT_REGISTRY[artifact_id] = (reference, snapshot)
     return artifact
 
 
@@ -1726,6 +1747,17 @@ def _write_exclusive(path: Path, raw: bytes) -> None:
 
 
 def _verify_root_ref(ref: Mapping[str, Any], expected_role: str) -> Path:
+    # Import at the call boundary to avoid a module cycle.  Only the exact
+    # provenance-registered executable adapter may reuse a published v2 anchor;
+    # ordinary mappings stay on the unchanged v1 contract below.
+    from phase6.gate_b_v2_route import (
+        GateBV2RuntimeRootReference,
+        validate_gate_b_v2_runtime_root_reference,
+    )
+
+    executable_v2 = type(ref) is GateBV2RuntimeRootReference
+    if executable_v2:
+        validate_gate_b_v2_runtime_root_reference(ref, expected_role)
     required = {
         "absolute_path",
         "anchor_relative_path",
@@ -1758,6 +1790,13 @@ def _verify_root_ref(ref: Mapping[str, Any], expected_role: str) -> Path:
         anchor_raw = _read_pinned(path / ".gate-b-root-anchor.json", "writable root anchor")
         if sha256_bytes(anchor_raw) != ref["anchor_sha256"]:
             _fail("writable root anchor bytes changed")
+        if executable_v2:
+            validate_gate_b_v2_runtime_root_reference(
+                ref,
+                expected_role,
+                anchor_raw=anchor_raw,
+            )
+            return path
         anchor = _strict_canonical_object(anchor_raw, "writable root anchor")
         _closed(
             anchor,
@@ -1780,8 +1819,11 @@ def _verify_root_ref(ref: Mapping[str, Any], expected_role: str) -> Path:
         _atom(anchor["anchor_id"], "root anchor ID")
         _sha(anchor["approval_record_sha256"], "anchor approval hash")
         _timestamp(anchor["created_at_utc"], "root anchor")
-    elif ref["anchor_relative_path"] is not None or ref["anchor_sha256"] is not None:
-        _fail("Test root anchor fields must be null")
+    else:
+        if ref["anchor_relative_path"] is not None or ref["anchor_sha256"] is not None:
+            _fail("Test root anchor fields must be null")
+        if executable_v2:
+            validate_gate_b_v2_runtime_root_reference(ref, expected_role, anchor_raw=None)
     return path
 
 
@@ -2080,7 +2122,7 @@ def _retry_catalog(batch: GateBBatchManifest) -> dict[str, tuple[str, ...]]:
         reasons = batch.payload["governance"]["technical_retry_reasons"]
     except (KeyError, TypeError) as exc:
         raise GateBLedgerError("technical retry catalog is unavailable") from exc
-    if not isinstance(reasons, (list, tuple)) or not reasons:
+    if not isinstance(reasons, list | tuple) or not reasons:
         _fail("technical retry catalog is invalid")
     catalog: dict[str, tuple[str, ...]] = {}
     for item in reasons:
@@ -2092,7 +2134,7 @@ def _retry_catalog(batch: GateBBatchManifest) -> dict[str, tuple[str, ...]]:
         reason_id = _atom(item["reason_id"], "technical retry reason")
         states = item["eligible_from_states"]
         if (
-            not isinstance(states, (list, tuple))
+            not isinstance(states, list | tuple)
             or not states
             or tuple(states) != tuple(state for state in ("RESERVED", "STARTED") if state in states)
         ):
@@ -2508,6 +2550,26 @@ class GateBLedgerStore:
     def reserve_attempt(
         request: GateBRequestLike, *, expected_latest_record_sha256: str | None
     ) -> GateBAttemptReservation:
+        # This is a public reservation entry point in its own right.  Keep the
+        # v2 one-shot capability check here so callers cannot bypass the
+        # loader facade by invoking the store directly.
+        from phase6.gate_b_v2_route import (
+            GateBV2RouteError,
+            claim_gate_b_v2_reservation_authorization,
+            is_gate_b_v2_runtime_request,
+        )
+
+        if is_gate_b_v2_runtime_request(request):
+            try:
+                return claim_gate_b_v2_reservation_authorization(
+                    request,
+                    lambda: _reserve_attempt(
+                        request,
+                        expected_latest_record_sha256=expected_latest_record_sha256,
+                    ),
+                )
+            except GateBV2RouteError:
+                _fail("v2 reservation is not authorized by a consumed route")
         return _reserve_attempt(
             request,
             expected_latest_record_sha256=expected_latest_record_sha256,

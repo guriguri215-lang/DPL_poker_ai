@@ -3179,13 +3179,17 @@ def _relative_to_repository(repository_root: Path, path: Path) -> str:
 def _real_dependency_lock(repository_root: Path) -> dict[str, object]:
     executable = Path(sys.executable).resolve()
     base_executable = Path(getattr(sys, "_base_executable", sys.executable)).resolve()
-    purelib = Path(sysconfig.get_path("purelib")).resolve()
-    pyvenv = (Path(sys.prefix) / "pyvenv.cfg").resolve()
+    if sys.flags.no_site:
+        venv_root, purelib = loader_module.require_gate_b_v2_bootstrap_topology()
+        pyvenv = (venv_root / "pyvenv.cfg").resolve()
+    else:
+        purelib = Path(sysconfig.get_path("purelib")).resolve()
+        pyvenv = (Path(sys.prefix) / "pyvenv.cfg").resolve()
     project_name = "poker-xai"
     return {
         "schema_version": DEPENDENCY_LOCK_SCHEMA_VERSION,
         "lock_scope": "complete-installed-environment-snapshot",
-        "distributions": loader_module._installed_distributions(project_name),
+        "distributions": loader_module._installed_distributions(project_name, purelib),
         "project": {
             "git_commit": COMMIT,
             "name": project_name,
@@ -3199,10 +3203,10 @@ def _real_dependency_lock(repository_root: Path) -> dict[str, object]:
             "compiler": platform_module.python_compiler(),
             "implementation": platform_module.python_implementation(),
             "platform": platform_module.platform(),
-            "pyvenv_cfg_path": _relative_to_repository(repository_root, pyvenv),
+            "pyvenv_cfg_path": str(pyvenv),
             "pyvenv_cfg_sha256": sha256_bytes(pyvenv.read_bytes()),
-            "site_packages_path": _relative_to_repository(repository_root, purelib),
-            "venv_executable_path": _relative_to_repository(repository_root, executable),
+            "site_packages_path": str(purelib),
+            "venv_executable_path": str(executable),
             "venv_executable_sha256": sha256_bytes(executable.read_bytes()),
             "version": platform_module.python_version(),
         },
@@ -3265,6 +3269,7 @@ def _real_route_fixture(tmp_path: Path) -> _RealRouteFixture:
         relative_path: (repository_root / relative_path).read_bytes()
         for _module_name, relative_path in ACTIVE_MODULE_PATHS
     }
+    source_blobs["pyproject.toml"] = (repository_root / "pyproject.toml").read_bytes()
     context_payload = {
         "schema_version": EXECUTION_CONTEXT_SCHEMA_VERSION,
         "artifact_type": "gate_b_execution_context",
@@ -3691,6 +3696,11 @@ class _ProcessZeroGitProbe:
                 )
                 for _module_name, relative_path in ACTIVE_MODULE_PATHS
             ],
+            (
+                ("cat-file", "blob", f"{expected_commit}:pyproject.toml"),
+                False,
+                route.source_blobs["pyproject.toml"],
+            ),
         ]
 
     def __call__(
@@ -3712,7 +3722,7 @@ class _ProcessZeroGitProbe:
 
     def assert_complete(self) -> None:
         assert self._queue == []
-        assert len(self.calls) == 9 + len(ACTIVE_MODULE_PATHS)
+        assert len(self.calls) == 10 + len(ACTIVE_MODULE_PATHS)
 
 
 def test_root_anchor_preapproval_projection_genuine_route(
@@ -4497,13 +4507,13 @@ def test_v2_materialization_specs_join_exact_hashes_without_materializing(
         (
             "readiness",
             lambda value: value["projection_descriptor"].__setitem__(
-                "source_materialization_projection_size_bytes", 1111.0
+                "source_materialization_projection_size_bytes", 868.0
             ),
         ),
         (
             "request",
             lambda value: value["projection_descriptor"].__setitem__(
-                "source_materialization_projection_size_bytes", 1111.0
+                "source_materialization_projection_size_bytes", 868.0
             ),
         ),
         (
@@ -4558,7 +4568,7 @@ def test_v2_materialization_specs_reject_noncanonical_bytes_and_private_tamper()
 def test_v2_materialization_spec_provenance_rejects_int_float_equivalence() -> None:
     fixture = _v2_specs_fixture()
     descriptor = copy.deepcopy(fixture.chain_fixture.descriptor)
-    descriptor["source_materialization_projection_size_bytes"] = 1111.0
+    descriptor["source_materialization_projection_size_bytes"] = 868.0
     object.__setattr__(
         fixture.specs,
         "projection_descriptor",

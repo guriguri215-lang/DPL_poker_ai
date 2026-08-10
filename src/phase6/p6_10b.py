@@ -2761,7 +2761,7 @@ def run_p6_10b_from_freeze(
                     "failed_timeout"
                     if isinstance(exc, TimeoutError)
                     else "failed_verification"
-                    if isinstance(exc, (ValueError, RuntimeError))
+                    if isinstance(exc, ValueError | RuntimeError)
                     else "failed_nonzero"
                 ),
                 "failure_type": type(exc).__name__,

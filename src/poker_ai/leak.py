@@ -256,14 +256,14 @@ def load_action_baseline_table_payload(payload: object) -> ActionBaselineTable:
             not isinstance(action, str) for action in action_group
         ):
             raise ValueError("baseline artifact action_group must be a list of strings")
-        if isinstance(baseline_rate, bool) or not isinstance(baseline_rate, (int, float)):
+        if isinstance(baseline_rate, bool) or not isinstance(baseline_rate, int | float):
             raise ValueError("baseline artifact baseline_rate must be numeric")
         if not isinstance(direction, str):
             raise ValueError("baseline artifact direction must be a string")
         if not isinstance(overrides, dict) or any(
             not isinstance(situation_key, str)
             or isinstance(rate, bool)
-            or not isinstance(rate, (int, float))
+            or not isinstance(rate, int | float)
             for situation_key, rate in overrides.items()
         ):
             raise ValueError("baseline artifact situation_overrides are invalid")

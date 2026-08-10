@@ -1025,7 +1025,7 @@ def _resolve_attr(current: Any, name: str) -> Any:
 
 
 def _resolve_index(current: Any, index: int) -> Any:
-    if not isinstance(current, (list, tuple)):
+    if not isinstance(current, list | tuple):
         raise ValueError(f"source path cannot index {type(current).__name__}")
     try:
         return current[index]
@@ -1042,7 +1042,7 @@ def _resolve_key(current: Any, key: str) -> Any:
 
 
 def _is_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    return isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
 
 
 def _tokens_are_ev_estimate(tokens: tuple[PathToken, ...]) -> bool:

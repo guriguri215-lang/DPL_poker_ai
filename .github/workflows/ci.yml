@@ -8,28 +8,103 @@ on:
 permissions:
   contents: read
 
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_NO_PYTHON_VERSION_WARNING: "1"
+
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.12"]
+  test-ubuntu:
+    name: Ubuntu / Python 3.12.10
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Python 3.12.10
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.12.10"
           cache: pip
       - name: Create virtual environment
         run: python -m venv --copies .venv
-      - name: Install
+      - name: Install pinned dependencies
         run: |
-          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install --upgrade pip==25.2
           .venv/bin/python -m pip install -e ".[dev]"
-      - name: Lint (ruff)
-        run: .venv/bin/python -m ruff check .
-      - name: Format check (ruff)
-        run: .venv/bin/python -m ruff format --check .
-      - name: Test (pytest)
-        run: .venv/bin/python -m pytest
+      - name: Lint
+        run: .venv/bin/python -m ruff check . --no-cache
+      - name: Format check
+        run: .venv/bin/python -m ruff format --check --diff .
+      - name: Full pytest
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: .venv/bin/python -m pytest -p no:cacheprovider
+      - name: Offline no-index packaging
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: >-
+          .venv/bin/python -m pytest -p no:cacheprovider
+          tests/phase6/test_gate_b_v2_packaging.py::test_console_metadata_survives_isolated_offline_target_install
+
+  test-windows:
+    name: Windows / Python 3.12.10
+    runs-on: windows-2022
+    env:
+      POKER_XAI_OFFLINE_BUILD_BACKEND_PATH: ${{ github.workspace }}\.venv\Lib\site-packages
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Python 3.12.10
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12.10"
+          cache: pip
+      - name: Create virtual environment
+        shell: pwsh
+        run: python -m venv --copies .venv
+      - name: Install pinned dependencies
+        shell: pwsh
+        run: |
+          .\.venv\Scripts\python.exe -m pip install --upgrade pip==25.2
+          .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+      - name: Lint
+        shell: pwsh
+        run: .\.venv\Scripts\python.exe -m ruff check . --no-cache
+      - name: Format check
+        shell: pwsh
+        run: .\.venv\Scripts\python.exe -m ruff format --check --diff .
+      - name: Exact-startup Gate B v2 suite
+        shell: pwsh
+        run: |
+          $python = (Resolve-Path .\.venv\Scripts\python.exe).Path
+          $env:PYTHONDONTWRITEBYTECODE = "1"
+          $env:PYTHONNOUSERSITE = "1"
+          $env:PYTHONSAFEPATH = "1"
+          $env:PYTHONPYCACHEPREFIX = $python
+          $env:PYTHONPATH = (Resolve-Path .\src).Path
+          $env:PYTEST_DISABLE_PLUGIN_AUTOLOAD = "1"
+          & $python -S -B -P -s -X "pycache_prefix=$python" -c "import gate_b_v2_startup as startup; startup.bootstrap_gate_b_v2_source_only_startup(); import pytest; raise SystemExit(pytest.main(['-p','no:cacheprovider','tests/phase6/test_gate_b_loader.py','tests/phase6/test_gate_b_v2_route.py','tests/phase6/test_gate_b_v2_cli.py','tests/phase6/test_gate_b_v2_packaging.py']))"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Full pytest under exact startup
+        shell: pwsh
+        run: |
+          $python = (Resolve-Path .\.venv\Scripts\python.exe).Path
+          $env:PYTHONDONTWRITEBYTECODE = "1"
+          $env:PYTHONNOUSERSITE = "1"
+          $env:PYTHONSAFEPATH = "1"
+          $env:PYTHONPYCACHEPREFIX = $python
+          $env:PYTHONPATH = (Resolve-Path .\src).Path
+          $env:PYTEST_DISABLE_PLUGIN_AUTOLOAD = "1"
+          & $python -S -B -P -s -X "pycache_prefix=$python" -c "import gate_b_v2_startup as startup; startup.bootstrap_gate_b_v2_source_only_startup(); import pytest; raise SystemExit(pytest.main(['-p','no:cacheprovider']))"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Offline no-index packaging under exact startup
+        shell: pwsh
+        run: |
+          $python = (Resolve-Path .\.venv\Scripts\python.exe).Path
+          $env:PYTHONDONTWRITEBYTECODE = "1"
+          $env:PYTHONNOUSERSITE = "1"
+          $env:PYTHONSAFEPATH = "1"
+          $env:PYTHONPYCACHEPREFIX = $python
+          $env:PYTHONPATH = (Resolve-Path .\src).Path
+          $env:PYTEST_DISABLE_PLUGIN_AUTOLOAD = "1"
+          & $python -S -B -P -s -X "pycache_prefix=$python" -c "import gate_b_v2_startup as startup; startup.bootstrap_gate_b_v2_source_only_startup(); import pytest; raise SystemExit(pytest.main(['-p','no:cacheprovider','tests/phase6/test_gate_b_v2_packaging.py::test_console_metadata_survives_isolated_offline_target_install']))"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
