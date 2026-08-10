@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "poker-xai"
-version = "0.0.0"
+version = "0.1.0a1"
 description = "Research framework for explainable, verifiable safe opponent exploitation in poker"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -12,6 +12,10 @@ license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{ name = "poker-xai contributors" }]
 keywords = ["poker", "explainable-ai", "opponent-modeling", "game-theory"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3.12",
+]
 dependencies = [
     "pydantic==2.11.7",
     "pyyaml==6.0.2",
