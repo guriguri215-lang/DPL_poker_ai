@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -129,7 +130,12 @@ def solve_frozen_river_scenario(
 ) -> RiverScenarioSolveResult:
     """Solve a frozen Q3 river scenario as a small combo-granular game."""
     config = RiverBettingConfig(pot=scenario.pot, bet_fraction=bet_fraction)
-    if config.bet > scenario.effective_stack:
+    if config.bet > scenario.effective_stack and not math.isclose(
+        config.bet,
+        scenario.effective_stack,
+        rel_tol=0.0,
+        abs_tol=1e-9,
+    ):
         raise ValueError(
             f"bet size {config.bet} exceeds effective stack {scenario.effective_stack}"
         )

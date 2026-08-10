@@ -1,4 +1,4 @@
-"""Tests for current DPL v2 and read-only historical DPL v1 loading."""
+"""Tests for current DPL v3 and read-only historical DPL loading."""
 
 from __future__ import annotations
 
@@ -8,8 +8,10 @@ from pydantic import ValidationError
 from poker_core.dpl_schema import (
     DPL_SCHEMA_VERSION,
     DPL_SCHEMA_VERSION_V1,
+    DPL_SCHEMA_VERSION_V2,
     DecisionProvenanceLog,
     DecisionProvenanceLogV1,
+    DecisionProvenanceLogV2,
     EvEstimate,
     load_dpl,
     load_dpl_json,
@@ -22,13 +24,27 @@ def test_valid_dpl_round_trips(valid_dpl):
     assert dpl.selected_action in dpl.final_policy
     assert dpl.mix_reasons == ["MIX_R001"]
     assert dpl.hero_combo == "AhKh"
+    assert dpl.base_strategy_provenance.table_version == "river-cfr-v1"
     # JSON round-trip preserves the record
     again = DecisionProvenanceLog.model_validate_json(dpl.model_dump_json())
     assert again == dpl
 
 
+def test_version_dispatch_keeps_v2_read_only_without_relabelling(valid_dpl):
+    valid_dpl["schema_version"] = DPL_SCHEMA_VERSION_V2
+    valid_dpl.pop("base_strategy_provenance")
+    legacy = load_dpl(valid_dpl)
+
+    assert isinstance(legacy, DecisionProvenanceLogV2)
+    assert legacy.schema_version == "2.0.0"
+    assert load_dpl_json(legacy.model_dump_json()) == legacy
+    with pytest.raises(ValidationError):
+        DecisionProvenanceLog.model_validate(valid_dpl)
+
+
 def test_version_dispatch_keeps_v1_read_only_without_relabelling(valid_dpl):
     valid_dpl["schema_version"] = DPL_SCHEMA_VERSION_V1
+    valid_dpl.pop("base_strategy_provenance")
     legacy = load_dpl(valid_dpl)
 
     assert isinstance(legacy, DecisionProvenanceLogV1)
@@ -39,7 +55,7 @@ def test_version_dispatch_keeps_v1_read_only_without_relabelling(valid_dpl):
 
 
 def test_version_dispatch_rejects_unknown_dpl_version(valid_dpl):
-    valid_dpl["schema_version"] = "3.0.0"
+    valid_dpl["schema_version"] = "4.0.0"
     with pytest.raises(ValueError, match="unsupported DPL schema_version"):
         load_dpl(valid_dpl)
 
@@ -292,6 +308,18 @@ def test_hero_combo_required(valid_dpl):
 def test_extra_field_forbidden(valid_dpl):
     valid_dpl["surprise"] = 1
     with pytest.raises(ValidationError):
+        DecisionProvenanceLog.model_validate(valid_dpl)
+
+
+def test_base_strategy_provenance_requires_sha256(valid_dpl):
+    valid_dpl["base_strategy_provenance"]["solver_config_sha256"] = "not-a-digest"
+    with pytest.raises(ValidationError, match="solver_config_sha256"):
+        DecisionProvenanceLog.model_validate(valid_dpl)
+
+
+def test_base_strategy_provenance_is_required(valid_dpl):
+    valid_dpl.pop("base_strategy_provenance")
+    with pytest.raises(ValidationError, match="base_strategy_provenance"):
         DecisionProvenanceLog.model_validate(valid_dpl)
 
 

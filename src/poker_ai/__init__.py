@@ -1,17 +1,17 @@
 """poker_ai: observation, lookup strategy, leak detection, exploitation and sessions.
 
-Phase 2 implements the river MVP (ADR-0007): a river scenario is generated
-deterministically, the stub opponent acts, public action observations feed an
-action-only LeakDetector, Hero looks up its base policy by situation and
-``hand_bucket`` (ADR-0005), optional rule exploitation feeds the SafetyMixer,
-an action is sampled, and the decision is assembled into a frozen Decision
-Provenance Log with an exact ``solver_exact`` EV (ADR-0008). Phase 5 adds an
-optional node-lock solver exploit provider behind the same SafetyMixer contract.
+The river MVP generates scenarios deterministically, observes the stub opponent's
+all-in, obtains Hero's exact combo/position ``vs_bet`` policy from CFR+, and keeps
+optional rule or node-lock exploitation behind the SafetyMixer. Public action
+observations feed the LeakDetector without exposing hidden opponent strategy. The
+decision is recorded in a versioned Decision Provenance Log with exact
+``solver_exact`` EV (ADR-0008).
 """
 
 from __future__ import annotations
 
 from .actions import ALL_ACTIONS, FACING_ACTIONS, NO_FACING_ACTIONS, legal_actions
+from .base_policy import BasePolicyProvider, BasePolicySelection, StubBasePolicyProvider
 from .baseline_strategy import (
     FACING_ALL_IN,
     BaselineStrategy,
@@ -20,6 +20,13 @@ from .baseline_strategy import (
     build_strategy_table,
     get_baseline_strategy,
     load_baseline_strategy,
+)
+from .cfr_policy import (
+    CFR_RIVER_POLICY_CONFIG_VERSION,
+    CFR_RIVER_POLICY_SOURCE,
+    DEFAULT_CFR_RIVER_POLICY_CONFIG,
+    CfrRiverPolicyConfig,
+    CfrRiverPolicyProvider,
 )
 from .decision import (
     DecisionResult,
@@ -95,7 +102,14 @@ __all__ = [
     "ActionLeakRule",
     "ActionStats",
     "BaselineStrategy",
+    "BasePolicyProvider",
+    "BasePolicySelection",
     "BucketDefinition",
+    "CFR_RIVER_POLICY_CONFIG_VERSION",
+    "CFR_RIVER_POLICY_SOURCE",
+    "DEFAULT_CFR_RIVER_POLICY_CONFIG",
+    "CfrRiverPolicyConfig",
+    "CfrRiverPolicyProvider",
     "DecisionResult",
     "ExploitProvider",
     "HeroAgent",
@@ -113,6 +127,7 @@ __all__ = [
     "Scenario",
     "SessionResult",
     "StubOpponent",
+    "StubBasePolicyProvider",
     "baseline_table_version",
     "beta_binomial_upper_tail",
     "classify_ground_truth_boundary",

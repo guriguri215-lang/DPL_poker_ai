@@ -33,6 +33,7 @@ def test_template_explanation_has_five_stages_and_counterfactual(valid_dpl):
 
 def test_template_preserves_historical_v1_source_schema_version(valid_dpl):
     valid_dpl["schema_version"] = "1.0.0"
+    valid_dpl.pop("base_strategy_provenance")
     legacy = load_dpl(valid_dpl)
 
     explanation = generate_template_explanation(legacy)

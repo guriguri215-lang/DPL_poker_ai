@@ -57,8 +57,11 @@ from .reason_ontology import get_ontology
 #: Historical MVP-score DPL version retained for read-only loading.
 DPL_SCHEMA_VERSION_V1 = "1.0.0"
 
-#: Current posterior-confidence DPL version (ADR-0019).
-DPL_SCHEMA_VERSION = "2.0.0"
+#: Historical posterior-confidence DPL version retained for read-only loading.
+DPL_SCHEMA_VERSION_V2 = "2.0.0"
+
+#: Current solver-base-strategy-provenance DPL version.
+DPL_SCHEMA_VERSION = "3.0.0"
 
 #: MIX reason recorded only when the ADR-0018 epsilon branch actually fires.
 MIX_EPSILON_REASON_ID = "MIX_EPSILON"
@@ -222,16 +225,16 @@ class ExecutionSampling(BaseModel):
     exploration_fired: bool
 
 
-class DecisionProvenanceLog(BaseModel):
-    """One decision's full provenance record (Spec 6.11; the project core)."""
+class DecisionProvenanceLogV2(BaseModel):
+    """Historical posterior-confidence DPL retained for read-only loading."""
 
     model_config = ConfigDict(extra="forbid")
-    supported_schema_version: ClassVar[str] = DPL_SCHEMA_VERSION
+    supported_schema_version: ClassVar[str] = DPL_SCHEMA_VERSION_V2
 
     # --- identity / versioning ---
     hand_id: str
     session_id: str
-    schema_version: str = Field(json_schema_extra={"const": DPL_SCHEMA_VERSION})
+    schema_version: str = Field(json_schema_extra={"const": DPL_SCHEMA_VERSION_V2})
 
     # --- situation ---
     state_cluster: str
@@ -286,7 +289,7 @@ class DecisionProvenanceLog(BaseModel):
         return _validate_known_unique(value, field_name="allowed_reason_ids")
 
     @model_validator(mode="after")
-    def _cross_field_checks(self) -> DecisionProvenanceLog:
+    def _cross_field_checks(self) -> DecisionProvenanceLogV2:
         if self.exploit_source == "nodelock_solver" and self.solver_result_id is None:
             raise ValueError(
                 "solver_result_id is required when exploit_source is 'nodelock_solver'"
@@ -402,27 +405,49 @@ class DecisionProvenanceLog(BaseModel):
         return self.ev_estimate.explanation_values()
 
 
-class DecisionProvenanceLogV1(DecisionProvenanceLog):
+class BaseStrategyProvenance(BaseModel):
+    """Auditable identity of the StrategyTable that supplied ``base_policy``."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    table_version: str = Field(min_length=1)
+    source: str = Field(min_length=1)
+    solver_config_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class DecisionProvenanceLog(DecisionProvenanceLogV2):
+    """Current DPL with explicit solver-derived base-strategy provenance."""
+
+    supported_schema_version: ClassVar[str] = DPL_SCHEMA_VERSION
+    schema_version: str = Field(json_schema_extra={"const": DPL_SCHEMA_VERSION})
+    base_strategy_provenance: BaseStrategyProvenance
+
+
+class DecisionProvenanceLogV1(DecisionProvenanceLogV2):
     """Historical MVP-confidence DPL model retained for read-only loading."""
 
     supported_schema_version: ClassVar[str] = DPL_SCHEMA_VERSION_V1
     schema_version: str = Field(json_schema_extra={"const": DPL_SCHEMA_VERSION_V1})
 
 
-LoadedDecisionProvenanceLog = DecisionProvenanceLog | DecisionProvenanceLogV1
+LoadedDecisionProvenanceLog = (
+    DecisionProvenanceLog | DecisionProvenanceLogV2 | DecisionProvenanceLogV1
+)
 
 
 def load_dpl(payload: Mapping[str, Any]) -> LoadedDecisionProvenanceLog:
     """Load a DPL by dispatching on ``schema_version`` before validation.
 
-    Version 1 is never converted or relabelled as version 2. New writes must use
-    :class:`DecisionProvenanceLog` and explicitly record version 2.
+    Historical versions are never converted or relabelled. New writes must use
+    :class:`DecisionProvenanceLog` and explicitly record the current version.
     """
     if "schema_version" not in payload:
         raise ValueError("DPL schema_version is required for version dispatch")
     version = payload["schema_version"]
     if version == DPL_SCHEMA_VERSION:
         return DecisionProvenanceLog.model_validate(payload)
+    if version == DPL_SCHEMA_VERSION_V2:
+        return DecisionProvenanceLogV2.model_validate(payload)
     if version == DPL_SCHEMA_VERSION_V1:
         return DecisionProvenanceLogV1.model_validate(payload)
     raise ValueError(f"unsupported DPL schema_version {version!r}")
