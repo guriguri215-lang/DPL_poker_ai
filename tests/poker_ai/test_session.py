@@ -7,7 +7,15 @@ import json
 import math
 from pathlib import Path
 
-from poker_ai.baseline_strategy import baseline_table_version
+import pytest
+
+from poker_ai.base_policy import StubBasePolicyProvider
+from poker_ai.cfr_policy import (
+    CFR_RIVER_POLICY_SOURCE,
+    DEFAULT_CFR_RIVER_POLICY_CONFIG,
+    CfrRiverPolicyConfig,
+    CfrRiverPolicyProvider,
+)
 from poker_ai.exploit import RuleExploitResult
 from poker_ai.leak import (
     BET_ACTIONS,
@@ -30,10 +38,21 @@ from poker_core.run_manifest import RunManifest
 from poker_core.state_cluster import cluster_def_version
 
 HANDS = 120  # exceeds the 100-hand acceptance floor
+STUB_PROVIDER = StubBasePolicyProvider()
+
+
+def _iter_stub(*args, **kwargs):
+    kwargs["_base_policy_provider"] = STUB_PROVIDER
+    return iter_session_logs(*args, **kwargs)
+
+
+def _run_stub(*args, **kwargs):
+    kwargs["_base_policy_provider"] = STUB_PROVIDER
+    return run_session(*args, **kwargs)
 
 
 def test_runs_over_100_hands_all_dpl_valid():
-    logs = list(iter_session_logs(20260704, HANDS))
+    logs = list(_iter_stub(20260704, HANDS))
     assert len(logs) == HANDS
     for log in logs:
         assert isinstance(log, DecisionProvenanceLog)
@@ -41,8 +60,49 @@ def test_runs_over_100_hands_all_dpl_valid():
         DecisionProvenanceLog.model_validate(log.model_dump(mode="json"))
 
 
+def test_normal_session_uses_cfr_policy_and_consistent_provenance():
+    config = CfrRiverPolicyConfig(iterations=5, average_delay=0, checkpoints=())
+
+    first = run_session(20260704, 1, solver_config=config)
+    second = run_session(20260704, 1, solver_config=config)
+    first_log = first.logs[0]
+    second_log = second.logs[0]
+    solver_refs = [config for config in first.manifest.configs if config.role == "solver"]
+
+    assert first_log == second_log
+    assert first_log.base_strategy_provenance.source == CFR_RIVER_POLICY_SOURCE
+    assert (
+        first_log.base_strategy_provenance.table_version
+        == first.manifest.versions.strategy_table_version
+    )
+    assert len(solver_refs) == 1
+    assert first_log.base_strategy_provenance.solver_config_sha256 == solver_refs[0].sha256
+    assert set(first_log.base_policy) == {"FOLD", "CALL"}
+    assert math.fsum(first_log.base_policy.values()) == pytest.approx(1.0)
+
+
+def test_cfr_base_policy_composes_with_existing_safety_mix():
+    result = run_session(
+        20260704,
+        1,
+        leak_detector=_positive_fixture_detector(),
+        safety_alpha=0.25,
+        exploit_provider=_StaticExploitProvider(),
+        solver_config=CfrRiverPolicyConfig(iterations=1, average_delay=0, checkpoints=()),
+    )
+    log = result.logs[0]
+
+    assert log.base_strategy_provenance.source == CFR_RIVER_POLICY_SOURCE
+    for action in set(log.base_policy) | set(log.exploit_policy):
+        expected = 0.75 * log.base_policy.get(action, 0.0) + 0.25 * log.exploit_policy.get(
+            action, 0.0
+        )
+        assert log.final_policy.get(action, 0.0) == pytest.approx(expected)
+    assert log.mix_reasons == ["MIX_R001"]
+
+
 def test_ev_source_is_solver_exact_only():
-    for log in iter_session_logs(20260704, HANDS):
+    for log in _iter_stub(20260704, HANDS):
         assert log.ev_estimate.ev_source == EV_SOURCE == "solver_exact"
         assert log.ev_estimate.ev_definition == "incremental_ev_from_current_node"
         assert math.isfinite(log.ev_estimate.final_ev)
@@ -51,7 +111,7 @@ def test_ev_source_is_solver_exact_only():
 
 
 def test_alpha_zero_and_closed_world_reason_fields():
-    for log in iter_session_logs(20260704, HANDS):
+    for log in _iter_stub(20260704, HANDS):
         assert log.safety_alpha == 0.0
         assert log.final_policy == log.base_policy
         assert log.exploit_policy == log.base_policy
@@ -67,7 +127,7 @@ def test_alpha_zero_and_closed_world_reason_fields():
 def test_positive_leak_fixture_is_written_to_dpl_closed_world():
     leak_detector = _positive_fixture_detector()
 
-    logs = list(iter_session_logs(20260704, 3, leak_detector=leak_detector))
+    logs = list(_iter_stub(20260704, 3, leak_detector=leak_detector))
     assert len(logs) == 3
     for log in logs:
         assert log.detected_leaks
@@ -80,7 +140,7 @@ def test_positive_leak_fixture_is_written_to_dpl_closed_world():
 
 
 def test_positive_alpha_writes_rule_exploit_reasons_closed_world():
-    result = run_session(
+    result = _run_stub(
         20260704,
         1,
         leak_detector=_positive_fixture_detector(),
@@ -103,7 +163,7 @@ def test_positive_alpha_writes_rule_exploit_reasons_closed_world():
 
 
 def test_epsilon_one_writes_epsilon_reason_and_manifest_config():
-    result = run_session(20260704, 5, exploration_epsilon=1.0)
+    result = _run_stub(20260704, 5, exploration_epsilon=1.0)
 
     assert "exploration_epsilon=1.0" in result.manifest.description
     sampler_configs = [c for c in result.manifest.configs if c.name == "execution_sampler"]
@@ -122,7 +182,7 @@ def test_epsilon_one_writes_epsilon_reason_and_manifest_config():
 
 
 def test_epsilon_only_does_not_allow_policy_reasons_from_exploit_provider():
-    result = run_session(
+    result = _run_stub(
         20260704,
         1,
         leak_detector=_positive_fixture_detector(),
@@ -143,7 +203,7 @@ def test_epsilon_only_does_not_allow_policy_reasons_from_exploit_provider():
 
 
 def test_positive_alpha_writes_nodelock_solver_provenance_to_dpl():
-    result = run_session(
+    result = _run_stub(
         20260704,
         1,
         leak_detector=_positive_fixture_detector(),
@@ -164,7 +224,7 @@ def test_positive_alpha_writes_nodelock_solver_provenance_to_dpl():
 
 def test_custom_leak_baseline_version_is_stamped_on_manifest_and_logs():
     leak_detector = _positive_fixture_detector()
-    result = run_session(20260704, 1, leak_detector=leak_detector)
+    result = _run_stub(20260704, 1, leak_detector=leak_detector)
 
     assert result.logs[0].baseline_table_version == "fixture-action-baseline"
     assert result.manifest.versions.baseline_table_version == "fixture-action-baseline"
@@ -221,15 +281,17 @@ class _StaticNodelockProvider:
 
 def test_versions_are_stamped_on_every_log():
     default_detector = LeakDetector()
-    for log in iter_session_logs(20260704, HANDS):
+    for log in _iter_stub(20260704, HANDS):
         assert log.cluster_def_version == cluster_def_version()
         assert log.cluster_def_version == "0.1.0"
         assert log.baseline_table_version == default_detector.baseline_table_version
         assert log.baseline_table_version.endswith("-stub")
+        assert log.base_strategy_provenance.table_version.endswith("-stub")
+        assert log.base_strategy_provenance.source == "task3_stub_baseline"
 
 
 def test_hand_buckets_and_actions_have_variety():
-    logs = list(iter_session_logs(20260704, HANDS))
+    logs = list(_iter_stub(20260704, HANDS))
     buckets = {log.hand_bucket for log in logs}
     actions = {log.selected_action for log in logs}
     # The generated session should exercise more than one bucket and both actions.
@@ -238,16 +300,16 @@ def test_hand_buckets_and_actions_have_variety():
 
 
 def test_seed_reproducible_jsonl(tmp_path):
-    first = run_session(42, HANDS)
-    second = run_session(42, HANDS)
+    first = _run_stub(42, HANDS)
+    second = _run_stub(42, HANDS)
     a, _ = write_session_bundle(first, tmp_path / "a")
     b, _ = write_session_bundle(second, tmp_path / "b")
     assert a.read_bytes() == b.read_bytes()
 
 
 def test_different_seed_changes_output():
-    a = [log.model_dump(mode="json") for log in iter_session_logs(1, HANDS)]
-    b = [log.model_dump(mode="json") for log in iter_session_logs(2, HANDS)]
+    a = [log.model_dump(mode="json") for log in _iter_stub(1, HANDS)]
+    b = [log.model_dump(mode="json") for log in _iter_stub(2, HANDS)]
     assert a != b
 
 
@@ -256,11 +318,14 @@ def test_manifest_is_valid_and_pins_versions_and_configs():
     assert isinstance(manifest, RunManifest)
     assert manifest.seeds["master"] == 20260704
     assert manifest.versions.cluster_def_version == cluster_def_version()
-    assert manifest.versions.strategy_table_version == baseline_table_version()
+    assert (
+        manifest.versions.strategy_table_version
+        == CfrRiverPolicyProvider(DEFAULT_CFR_RIVER_POLICY_CONFIG).strategy_version
+    )
     assert manifest.versions.baseline_table_version == LeakDetector().baseline_table_version
     # Every referenced config carries a content hash (auditable provenance).
     roles = {c.role for c in manifest.configs}
-    assert {"cluster_def", "strategy_table", "baseline_table", "other"} <= roles
+    assert {"cluster_def", "solver", "baseline_table", "other"} <= roles
     for config in manifest.configs:
         assert len(config.sha256) == 64
     assert manifest.opponents[0].opponent_id == "stub_jam_all"
@@ -273,10 +338,10 @@ def test_manifest_config_hashes_are_reproducible():
 
 
 def test_posterior_1000_hand_session_regression():
-    result = run_session(20260710, 1000)
+    result = _run_stub(20260710, 1000)
 
     assert len(result.logs) == 1000
-    assert all(log.schema_version == "2.0.0" for log in result.logs)
+    assert all(log.schema_version == "3.0.0" for log in result.logs)
     snapshot = json.loads(
         result.posterior_bundle.artifacts["provenance/action_stats_terminal_snapshots.json"]
     )
@@ -285,7 +350,7 @@ def test_posterior_1000_hand_session_regression():
 
 
 def test_run_session_writes_and_reloads(tmp_path):
-    result = run_session(7, HANDS, git_commit="unknown")
+    result = _run_stub(7, HANDS, git_commit="unknown")
     jsonl_path, manifest_path = write_session_bundle(result, tmp_path)
 
     lines = jsonl_path.read_text(encoding="utf-8").splitlines()

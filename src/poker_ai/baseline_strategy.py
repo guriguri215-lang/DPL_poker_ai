@@ -1,9 +1,9 @@
-"""Stub base strategy: situation + hand_bucket -> base policy (ADR-0005, ADR-0007).
+"""Compatibility stub strategy: situation + hand_bucket -> policy.
 
 The base strategy is looked up by *situation* (state_cluster + position + facing
-state) and then subdivided by ``hand_bucket`` (ADR-0005). Task 3 has no CFR solver
-yet, so the policies are a hand-authored **placeholder** (:mod:`baseline_strategy.yaml`,
-``baseline_table_version`` ends with ``-stub``), not an equilibrium.
+state) and then subdivided by ``hand_bucket`` (ADR-0005). The policies are a
+hand-authored **placeholder** (:mod:`baseline_strategy.yaml`, whose version ends
+with ``-stub``), retained for compatibility fixtures rather than normal Hero play.
 
 The per-combo :class:`~poker_core.strategy_table.StrategyTable` is the canonical
 representation of a solved strategy (ADR-0005); :func:`build_strategy_table` builds
@@ -95,7 +95,7 @@ def get_baseline_strategy() -> BaselineStrategy:
 
 
 def baseline_table_version() -> str:
-    """The packaged stub base strategy version (ends with ``-stub`` for task 3)."""
+    """The packaged compatibility-stub strategy version."""
     return get_baseline_strategy().baseline_table_version
 
 

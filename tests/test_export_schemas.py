@@ -36,6 +36,7 @@ def test_write_schemas_emits_files(tmp_path):
     assert {p.name for p in written} == {
         "decision_provenance_log.schema.json",
         "decision_provenance_log_v1.schema.json",
+        "decision_provenance_log_v2.schema.json",
         "run_manifest.schema.json",
         "reason_ontology.schema.json",
         "strategy_table.schema.json",
@@ -51,6 +52,7 @@ def test_cli_main_writes_to_out_dir(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "decision_provenance_log.schema.json" in out
     assert "decision_provenance_log_v1.schema.json" in out
+    assert "decision_provenance_log_v2.schema.json" in out
     assert "canonical validator" in out  # the structural-schema note is printed
     assert (tmp_path / "run_manifest.schema.json").exists()
 
@@ -63,15 +65,18 @@ def test_exported_dpl_schema_validates_example(valid_dpl):
 
 def test_versioned_dpl_schemas_reject_the_other_estimand_version(valid_dpl):
     schemas = build_schemas()
-    valid_dpl["schema_version"] = "2.0.0"
     Draft202012Validator(schemas["decision_provenance_log"]).validate(valid_dpl)
+
+    valid_dpl["schema_version"] = "2.0.0"
+    valid_dpl.pop("base_strategy_provenance")
+    Draft202012Validator(schemas["decision_provenance_log_v2"]).validate(valid_dpl)
     with pytest.raises(JsonSchemaError):
-        Draft202012Validator(schemas["decision_provenance_log_v1"]).validate(valid_dpl)
+        Draft202012Validator(schemas["decision_provenance_log"]).validate(valid_dpl)
 
     valid_dpl["schema_version"] = "1.0.0"
     Draft202012Validator(schemas["decision_provenance_log_v1"]).validate(valid_dpl)
     with pytest.raises(JsonSchemaError):
-        Draft202012Validator(schemas["decision_provenance_log"]).validate(valid_dpl)
+        Draft202012Validator(schemas["decision_provenance_log_v2"]).validate(valid_dpl)
 
 
 def test_versioned_dpl_schemas_require_explicit_version(valid_dpl):
@@ -82,6 +87,8 @@ def test_versioned_dpl_schemas_require_explicit_version(valid_dpl):
         Draft202012Validator(schemas["decision_provenance_log"]).validate(valid_dpl)
     with pytest.raises(JsonSchemaError):
         Draft202012Validator(schemas["decision_provenance_log_v1"]).validate(valid_dpl)
+    with pytest.raises(JsonSchemaError):
+        Draft202012Validator(schemas["decision_provenance_log_v2"]).validate(valid_dpl)
 
 
 def test_exported_dpl_schema_rejects_bad_enum(valid_dpl):

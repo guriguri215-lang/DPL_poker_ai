@@ -4,12 +4,12 @@ Usage::
 
     python cli/run_session.py --seed 20260704 --hands 200 --out-dir experiments_output/demo
 
-Generates ``--hands`` river decisions deterministically from ``--seed``, validates
-each against the frozen DPL schema, includes action-only public leak detection,
-optional rule-based exploitation behind the SafetyMixer, writes them as JSONL, and
-writes a RunManifest sidecar. Output goes under a gitignored directory
-(``experiments_output/`` by default). Requires
-``pip install -e .``.
+Generates ``--hands`` river decisions deterministically from ``--seed``, solves each
+Hero ``vs_bet`` policy with CFR+, validates the current DPL schema, includes
+action-only public leak detection and optional rule exploitation behind the
+SafetyMixer, then writes JSONL plus a RunManifest sidecar. Solver iterations and
+average delay are explicit CLI/config inputs. Output goes under a gitignored
+directory (``experiments_output/`` by default).
 """
 
 from __future__ import annotations
@@ -18,6 +18,10 @@ import argparse
 import subprocess
 from pathlib import Path
 
+from poker_ai.cfr_policy import (
+    DEFAULT_CFR_RIVER_POLICY_CONFIG,
+    CfrRiverPolicyConfig,
+)
 from poker_ai.exploit import RuleExploitResult
 from poker_ai.leak import (
     LeakDetector,
@@ -81,6 +85,23 @@ def main(argv: list[str] | None = None) -> int:
         help="post-SafetyMixer epsilon exploration rate in [0, 1] (default: 0.0)",
     )
     parser.add_argument(
+        "--solver-iterations",
+        type=int,
+        default=DEFAULT_CFR_RIVER_POLICY_CONFIG.iterations,
+        help=(
+            "deterministic CFR+ iterations per river decision "
+            f"(default: {DEFAULT_CFR_RIVER_POLICY_CONFIG.iterations})"
+        ),
+    )
+    parser.add_argument(
+        "--solver-average-delay",
+        type=int,
+        default=DEFAULT_CFR_RIVER_POLICY_CONFIG.average_delay,
+        help=(
+            f"CFR+ linear-average delay (default: {DEFAULT_CFR_RIVER_POLICY_CONFIG.average_delay})"
+        ),
+    )
+    parser.add_argument(
         "--leaky-fixture",
         action="store_true",
         help="use a public fixture baseline that produces leak/exploit smoke output",
@@ -117,12 +138,17 @@ def main(argv: list[str] | None = None) -> int:
         safety_alpha=safety_alpha,
         exploration_epsilon=args.exploration_epsilon,
         exploit_provider=exploit_provider,
+        solver_config=CfrRiverPolicyConfig(
+            iterations=args.solver_iterations,
+            average_delay=args.solver_average_delay,
+            checkpoints=(),
+        ),
     )
     jsonl_path, manifest_path = write_session_bundle(result, args.out_dir)
 
     detected_leaks = sum(len(log.detected_leaks) for log in result.logs)
     mixed_decisions = sum(1 for log in result.logs if log.mix_reasons)
-    print(f"session {result.session_id}: {len(result.logs)} decisions validated against DPL v2")
+    print(f"session {result.session_id}: {len(result.logs)} decisions validated against DPL v3")
     print(f"detected_leaks={detected_leaks}")
     print(f"mixed_decisions={mixed_decisions}")
     print(f"wrote {jsonl_path}")

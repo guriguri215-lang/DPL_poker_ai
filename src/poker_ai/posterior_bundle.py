@@ -1,6 +1,6 @@
 """Canonical provenance bundle for ADR-0019 posterior-confidence runs.
 
-The checks in this module are contextual hard gates for posterior DPL v2 runs.
+The checks in this module are contextual hard gates for current posterior DPL runs.
 They intentionally do not change the generic :mod:`poker_core.run_manifest`
 schema or validators.
 """
@@ -195,7 +195,7 @@ def validate_posterior_bundle(
 ) -> ValidatedPosteriorBundle:
     """Apply the ADR-0019 contextual exactly-one, path, hash, and join hard gate."""
     if manifest.versions.dpl_schema_version != DPL_SCHEMA_VERSION:
-        raise ValueError("posterior bundle requires the current DPL v2 schema version")
+        raise ValueError("posterior bundle requires the current DPL schema version")
 
     estimator_ref = _exactly_one_config(manifest, ESTIMATOR_CONFIG_NAME, "other")
     baseline_ref = _exactly_one_config(manifest, BASELINE_CONFIG_NAME, "baseline_table")

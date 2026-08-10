@@ -1,16 +1,13 @@
 """Vertical-slice session runner: scenarios -> decisions -> validated DPL + manifest.
 
-Ties task 3 together (ADR-0007): generate scenarios deterministically, have the stub
-opponent act, let Hero decide on the *public* observation, and assemble each decision
-into a frozen :class:`~poker_core.dpl_schema.DecisionProvenanceLog`. Phase 2 now also
-records action-only public observations and runs a minimal leak detector. The default
-stub baseline matches the stub opponent, so the normal CLI run remains leak-free, but
-positive fixtures can inject a stricter baseline and produce DPL ``DetectedLeak``
-records without reading hidden strategy. The Hero can run the rule-based exploit
-provider behind the DPL safety mixer; the default session keeps ``safety_alpha = 0``
-for baseline compatibility, while positive-alpha fixtures exercise the boundary.
-Every EV is exact ``solver_exact``. A :class:`~poker_core.run_manifest.RunManifest`
-pins the versions, seed and config hashes so the run is reproducible (M-7).
+Generates scenarios deterministically, has the stub opponent act, solves the public
+river spot with CFR+, and gives Hero the exact combo/position ``vs_bet`` StrategyTable
+entry. Each decision is assembled into a current
+:class:`~poker_core.dpl_schema.DecisionProvenanceLog`. Public action observations feed
+the leak detector independently; its action baseline still matches the stub opponent,
+so the normal CLI run remains leak-free. Optional rule or node-lock exploitation stays
+behind the existing DPL safety mixer. Every EV is exact ``solver_exact``. A
+:class:`~poker_core.run_manifest.RunManifest` pins the strategy and solver config.
 
 The DPLs are written as JSONL (one decision per line); the manifest is written as a
 sidecar JSON. Both live under a gitignored output directory.
@@ -39,12 +36,12 @@ from poker_core.run_manifest import (
 )
 from poker_core.state_cluster import CLUSTER_DEF_PATH, classify_board, cluster_def_version
 
-from .baseline_strategy import (
-    BASELINE_PATH,
-    FACING_ALL_IN,
-    baseline_table_version,
-    build_situation_key,
-    get_baseline_strategy,
+from .base_policy import BasePolicyProvider
+from .baseline_strategy import FACING_ALL_IN, build_situation_key
+from .cfr_policy import (
+    DEFAULT_CFR_RIVER_POLICY_CONFIG,
+    CfrRiverPolicyConfig,
+    CfrRiverPolicyProvider,
 )
 from .decision import HeroAgent, Observation
 from .exploit import ExploitProvider
@@ -93,6 +90,7 @@ def _build_dpl(
     safety_alpha: float,
     exploration_epsilon: float,
     exploit_provider: ExploitProvider | None,
+    base_policy_provider: BasePolicyProvider,
 ) -> DecisionProvenanceLog:
     """Run one decision and assemble its validated DPL."""
     opponent = StubOpponent(
@@ -130,7 +128,7 @@ def _build_dpl(
         situation_key,
     )
     agent = HeroAgent(
-        get_baseline_strategy(),
+        base_policy_provider,
         get_bucket_definition(),
         safety_alpha=safety_alpha,
         exploration_epsilon=exploration_epsilon,
@@ -185,6 +183,7 @@ def _build_dpl(
         ev_estimate=ev,
         allowed_reason_ids=allowed_reason_ids,
         baseline_table_version=leak_detector.baseline_table_version,
+        base_strategy_provenance=result.base_strategy_provenance,
     )
 
 
@@ -196,12 +195,15 @@ def iter_session_logs(
     safety_alpha: float = 0.0,
     exploration_epsilon: float = 0.0,
     exploit_provider: ExploitProvider | None = None,
+    solver_config: CfrRiverPolicyConfig = DEFAULT_CFR_RIVER_POLICY_CONFIG,
     _tracker: ObservationTracker | None = None,
+    _base_policy_provider: BasePolicyProvider | None = None,
 ) -> Iterator[DecisionProvenanceLog]:
     """Yield one validated DPL per generated hand (deterministic for a seed)."""
     session_id = _session_id_for(seed)
     tracker = _tracker or ObservationTracker()
     detector = leak_detector or LeakDetector()
+    base_policy_provider = _base_policy_provider or CfrRiverPolicyProvider(solver_config)
     for index, scenario in enumerate(generate_scenarios(seed, num_hands)):
         hand_id = f"{session_id}-H{index:05d}"
         yield _build_dpl(
@@ -213,6 +215,7 @@ def iter_session_logs(
             safety_alpha=safety_alpha,
             exploration_epsilon=exploration_epsilon,
             exploit_provider=exploit_provider,
+            base_policy_provider=base_policy_provider,
         )
 
 
@@ -256,6 +259,8 @@ def build_manifest(
     exploration_epsilon: float = 0.0,
     action_stats: tuple[ActionStats, ...] | list[ActionStats] = (),
     posterior_bundle: PosteriorBundleParts | None = None,
+    solver_config: CfrRiverPolicyConfig = DEFAULT_CFR_RIVER_POLICY_CONFIG,
+    _base_policy_provider: BasePolicyProvider | None = None,
 ) -> RunManifest:
     """Build the RunManifest pinning versions, the seed and config hashes (M-7)."""
     detector = leak_detector or LeakDetector()
@@ -266,16 +271,17 @@ def build_manifest(
         horizon=num_hands,
         seed=seed,
     )
+    base_policy_provider = _base_policy_provider or CfrRiverPolicyProvider(solver_config)
     versions = ComponentVersions(
         reason_ontology_version=get_ontology().ontology_version,
         cluster_def_version=cluster_def_version(),
-        strategy_table_version=baseline_table_version(),
+        strategy_table_version=base_policy_provider.strategy_version,
         baseline_table_version=detector.baseline_table_version,
     )
     configs = [
         _config_ref(CLUSTER_DEF_PATH, name="state_cluster", role="cluster_def"),
         _config_ref(BUCKET_DEF_PATH, name="hand_bucket_def", role="other"),
-        _config_ref(BASELINE_PATH, name="baseline_strategy", role="strategy_table"),
+        base_policy_provider.config_ref(),
         bundle.estimator_ref,
         bundle.baseline_ref,
         _execution_sampler_config_ref(exploration_epsilon),
@@ -293,6 +299,8 @@ def build_manifest(
         description=(
             f"task-3 vertical slice; scenario_schema={SCENARIO_SCHEMA_VERSION}, "
             f"hand_bucket_def={bucket_def_version()}, hands={num_hands}, "
+            f"base_strategy={base_policy_provider.strategy_version}, "
+            f"base_strategy_source={base_policy_provider.source}, "
             f"safety_alpha={safety_alpha}, exploration_epsilon={exploration_epsilon}"
         ),
         code=code,
@@ -319,10 +327,13 @@ def run_session(
     safety_alpha: float = 0.0,
     exploration_epsilon: float = 0.0,
     exploit_provider: ExploitProvider | None = None,
+    solver_config: CfrRiverPolicyConfig = DEFAULT_CFR_RIVER_POLICY_CONFIG,
+    _base_policy_provider: BasePolicyProvider | None = None,
 ) -> SessionResult:
     """Run a full session in memory: validated DPLs plus the manifest."""
     detector = leak_detector or LeakDetector()
     tracker = ObservationTracker()
+    base_policy_provider = _base_policy_provider or CfrRiverPolicyProvider(solver_config)
     logs = list(
         iter_session_logs(
             seed,
@@ -331,7 +342,9 @@ def run_session(
             safety_alpha=safety_alpha,
             exploration_epsilon=exploration_epsilon,
             exploit_provider=exploit_provider,
+            solver_config=solver_config,
             _tracker=tracker,
+            _base_policy_provider=base_policy_provider,
         )
     )
     bundle = build_posterior_bundle_parts(
@@ -350,6 +363,8 @@ def run_session(
         exploration_epsilon=exploration_epsilon,
         action_stats=tracker.snapshot(),
         posterior_bundle=bundle,
+        solver_config=solver_config,
+        _base_policy_provider=base_policy_provider,
     )
     return SessionResult(_session_id_for(seed), logs, manifest, bundle)
 
@@ -361,7 +376,7 @@ def write_jsonl(
     manifest: RunManifest,
     bundle_root: Path | str,
 ) -> Path:
-    """Write posterior DPL v2 JSONL after its contextual bundle hard gate passes."""
+    """Write current posterior DPL JSONL after its contextual bundle hard gate passes."""
     validate_posterior_bundle(manifest, bundle_root)
     if any(log.schema_version != manifest.versions.dpl_schema_version for log in logs):
         raise ValueError("DPL log version does not match the posterior manifest")

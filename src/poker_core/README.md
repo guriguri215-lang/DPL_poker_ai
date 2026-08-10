@@ -5,7 +5,8 @@ Shared contracts and primitives for the whole project, so that `poker_ai` and
 
 ## Frozen contracts (Phase 0, ADR-0006)
 
-- `dpl_schema.py` — Decision Provenance Log (DPL) schema v1, the core contract.
+- `dpl_schema.py` — Decision Provenance Log (DPL) schema v3, with explicit
+  base-strategy provenance and read-only loaders for historical v1/v2 records.
 - `reason_ontology.yaml` + `reason_ontology.py` — the three-layer reason
   namespaces `LEAK_` / `TRG_` / `MIX_` (ADR-0001) and their loader.
 - `strategy_table.py` — per-combo StrategyTable contract (ADR-0005, M-3).

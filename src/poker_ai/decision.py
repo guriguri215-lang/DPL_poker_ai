@@ -31,6 +31,7 @@ from poker_core.combo import Combo
 from poker_core.dpl_schema import (
     MIX_EPSILON_REASON_ID,
     MIXING_ABS_TOL,
+    BaseStrategyProvenance,
     DetectedLeak,
     ExecutionSampling,
     HandBucket,
@@ -40,6 +41,7 @@ from poker_core.showdown_ev import DEFAULT_EV_UNIT, ShowdownEquity, showdown_equ
 from poker_core.state_cluster import classify_board, cluster_def_version
 
 from .actions import legal_actions
+from .base_policy import BasePolicyProvider, StubBasePolicyProvider
 from .baseline_strategy import FACING_ALL_IN, BaselineStrategy, build_situation_key
 from .exploit import ExploitProvider, RuleExploitProvider, validate_provider_confidence_config
 from .hand_bucket import BucketDefinition, classify_combo
@@ -93,6 +95,7 @@ class DecisionResult:
     mix_reasons: list[str]
     exploit_source: str
     solver_result_id: str | None
+    base_strategy_provenance: BaseStrategyProvenance
 
 
 def call_fold_action_evs(
@@ -116,7 +119,7 @@ class HeroAgent:
 
     def __init__(
         self,
-        baseline: BaselineStrategy,
+        baseline: BaselineStrategy | BasePolicyProvider,
         bucket_def: BucketDefinition,
         *,
         safety_alpha: float = 0.0,
@@ -130,7 +133,12 @@ class HeroAgent:
             raise ValueError(
                 f"exploration_epsilon must be finite and in [0, 1], got {exploration_epsilon}"
             )
-        self.baseline = baseline
+        self.baseline = baseline if isinstance(baseline, BaselineStrategy) else None
+        self.base_policy_provider = (
+            StubBasePolicyProvider(baseline, bucket_def)
+            if isinstance(baseline, BaselineStrategy)
+            else baseline
+        )
         self.bucket_def = bucket_def
         self.safety_alpha = safety_alpha
         self.exploration_epsilon = exploration_epsilon
@@ -156,7 +164,30 @@ class HeroAgent:
         )
         situation_key = build_situation_key(state_cluster, obs.position, FACING_ALL_IN)
 
-        base_policy = self.baseline.policy_for(FACING_ALL_IN, hand_bucket)
+        selection = self.base_policy_provider.policy_for(obs, state_cluster=state_cluster)
+        table = selection.strategy_table
+        if table.table_version != self.base_policy_provider.strategy_version:
+            raise ValueError("base StrategyTable version does not match its provider")
+        if table.source != self.base_policy_provider.source:
+            raise ValueError("base StrategyTable source does not match its provider")
+        if table.cluster_def_version != cluster_def_version():
+            raise ValueError("base StrategyTable cluster definition version is stale")
+        situation_parts = table.situation_key.split(":")
+        if situation_parts[:2] != [state_cluster, obs.position]:
+            raise ValueError("base StrategyTable situation does not match Hero observation")
+        config_ref = self.base_policy_provider.config_ref()
+        if selection.config_sha256 != config_ref.sha256:
+            raise ValueError("base StrategyTable config hash does not match its provider")
+
+        hero_combo = obs.hero_combo.canonical()
+        entries = [entry for entry in table.entries if entry.combo == hero_combo]
+        if len(entries) != 1:
+            raise ValueError(
+                f"base StrategyTable must contain exactly one entry for Hero combo {hero_combo}"
+            )
+        if entries[0].reach_prob <= 0.0:
+            raise ValueError("Hero combo must have positive reach in the base StrategyTable")
+        base_policy = dict(entries[0].policy)
         if set(base_policy) - set(legal):
             raise ValueError(f"base policy cites actions outside the legal set {legal}")
 
@@ -228,6 +259,11 @@ class HeroAgent:
             mix_reasons=mix_reasons,
             exploit_source=exploit.exploit_source if policy_mix_applied else NO_EXPLOIT_SOURCE,
             solver_result_id=exploit.solver_result_id if policy_mix_applied else None,
+            base_strategy_provenance=BaseStrategyProvenance(
+                table_version=table.table_version,
+                source=table.source,
+                solver_config_sha256=selection.config_sha256,
+            ),
         )
 
 

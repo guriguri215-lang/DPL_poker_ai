@@ -23,7 +23,7 @@ from opponents import load_training_catalog
 from opponents.ground_truth import extract_independent_action_rates
 from opponents.synthesis import synthesize_opponent
 from poker_ai.leak import BET_ACTIONS
-from poker_core.dpl_schema import DPL_SCHEMA_VERSION
+from poker_core.dpl_schema import DPL_SCHEMA_VERSION_V2
 from poker_core.reason_ontology import get_ontology
 from poker_solver.game import Chance, Decision, Node, Terminal
 
@@ -385,7 +385,7 @@ def _component_provenance(
     ]
     versioned_components = [
         ("canonicalizer", CANONICALIZER_VERSION),
-        ("dpl_schema", DPL_SCHEMA_VERSION),
+        ("dpl_schema", DPL_SCHEMA_VERSION_V2),
         ("training_runner", TRAINING_RUNNER_VERSION),
         ("training_execution_adapter", TRAINING_EXECUTION_ADAPTER_VERSION),
         (PRODUCTION_TRAINING_BACKEND_ID, PRODUCTION_TRAINING_BACKEND_VERSION),

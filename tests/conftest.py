@@ -21,7 +21,7 @@ def _valid_dpl() -> dict:
     return {
         "hand_id": "H000421",
         "session_id": "S0001",
-        "schema_version": "2.0.0",
+        "schema_version": "3.0.0",
         "state_cluster": "river_flush_complete",
         "cluster_def_version": "1.0.0",
         "hand_bucket": "strong_value",
@@ -65,6 +65,11 @@ def _valid_dpl() -> dict:
             "MIX_R001",
         ],
         "baseline_table_version": "1.0.0",
+        "base_strategy_provenance": {
+            "table_version": "river-cfr-v1",
+            "source": "poker_solver.solve_frozen_river_scenario",
+            "solver_config_sha256": "c" * 64,
+        },
     }
 
 

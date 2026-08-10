@@ -24,7 +24,7 @@ from opponents import load_validation_catalog
 from opponents.ground_truth import extract_independent_action_rates
 from opponents.synthesis import synthesize_opponent
 from poker_ai.leak import BET_ACTIONS
-from poker_core.dpl_schema import DPL_SCHEMA_VERSION
+from poker_core.dpl_schema import DPL_SCHEMA_VERSION_V2
 from poker_core.reason_ontology import get_ontology
 
 from .calibration import CALIBRATION_EVALUATOR_VERSION, EXACT_EV_INPUT_VERSION
@@ -756,7 +756,11 @@ def _component_provenance(verified: VerifiedValidationFreeze) -> list[dict[str, 
             CANONICALIZER_VERSION,
             {"encoding": "canonical UTF-8 JSON with trailing LF"},
         ),
-        ("dpl_schema", DPL_SCHEMA_VERSION, {"schema_version": DPL_SCHEMA_VERSION}),
+        (
+            "dpl_schema",
+            DPL_SCHEMA_VERSION_V2,
+            {"schema_version": DPL_SCHEMA_VERSION_V2},
+        ),
         (
             "validation_runner",
             VALIDATION_RUNNER_VERSION,
