@@ -44,6 +44,14 @@ pytest
 python cli/export_schemas.py --out-dir docs/schemas
 ```
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and verification.
+Use [GitHub Issues](https://github.com/guriguri215-lang/DPL_poker_ai/issues) to
+report or discuss work, and submit changes through
+[Pull requests](https://github.com/guriguri215-lang/DPL_poker_ai/pulls).
+Please keep pull requests small and focused so they are easy to review and verify.
+
 ## Gate B v2 one-shot CLI
 
 The Windows-only Gate B v2 production route is started by the repository
