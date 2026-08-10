@@ -1,0 +1,219 @@
+name: Release artifacts
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/release-artifacts.yml"
+      - "LICENSE"
+      - "README.md"
+      - "pyproject.toml"
+      - "requirements/release-*.txt"
+      - "scripts/check_publication_history.py"
+      - "scripts/normalize_sdist.py"
+      - "scripts/publication_policy.py"
+      - "scripts/verify_release_artifacts.py"
+      - "src/**"
+      - "tests/test*.py"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to build
+        required: true
+        default: "0.1.0a1"
+        type: string
+      expected_version:
+        description: Exact distribution version
+        required: true
+        default: "0.1.0a1"
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_NO_PYTHON_VERSION_WARNING: "1"
+  EXPECTED_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.expected_version || '0.1.0a1' }}
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || '' }}
+  SOURCE_REF: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.event.pull_request.head.sha }}
+
+jobs:
+  build-ubuntu:
+    name: Ubuntu / Python 3.12.10 / release artifacts
+    runs-on: ubuntu-24.04
+    outputs:
+      artifact_name: ${{ steps.identity.outputs.artifact_name }}
+      control_sha: ${{ steps.identity.outputs.control_sha }}
+      source_sha: ${{ steps.identity.outputs.source_sha }}
+    steps:
+      - name: Fail closed unless manual dispatch runs from main
+        shell: bash
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            test "$GITHUB_REF" = "refs/heads/main"
+          fi
+      - name: Check out verifier
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'refs/heads/main' || github.sha }}
+          path: control
+          persist-credentials: false
+      - name: Check out clean source A
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          path: source-a
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check out clean source B
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          path: source-b
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Python 3.12.10
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12.10"
+          cache: pip
+          cache-dependency-path: |
+            control/requirements/release-build.txt
+            control/requirements/release-smoke.txt
+      - name: Validate source identity
+        id: identity
+        shell: bash
+        run: |
+          test "$(git -C control rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git -C source-a rev-parse HEAD)" = "$(git -C source-b rev-parse HEAD)"
+          test -z "$(git -C source-a status --porcelain --untracked-files=all)"
+          test -z "$(git -C source-b status --porcelain --untracked-files=all)"
+          test "$(python -c 'import tomllib; print(tomllib.load(open("source-a/pyproject.toml", "rb"))["project"]["version"])')" = "$EXPECTED_VERSION"
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            test "$RELEASE_TAG" = "$EXPECTED_VERSION"
+            test "$(git -C source-a tag --points-at HEAD --list "$RELEASE_TAG")" = "$RELEASE_TAG"
+          fi
+          source_sha="$(git -C source-a rev-parse HEAD)"
+          source_epoch="$(git -C source-a show -s --format=%ct HEAD)"
+          artifact_name="poker-xai-$EXPECTED_VERSION-$source_sha"
+          echo "SOURCE_DATE_EPOCH=$source_epoch" >> "$GITHUB_ENV"
+          echo "control_sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
+      - name: Scan tracked files and reachable source history
+        run: >-
+          python control/scripts/check_publication_history.py
+          --repository source-a
+          --ref HEAD
+      - name: Provision pinned build toolchain
+        run: |
+          python -m venv --copies .release-build-venv
+          .release-build-venv/bin/python -m pip install --no-cache-dir --upgrade pip==25.2
+          .release-build-venv/bin/python -m pip install --no-cache-dir --requirement control/requirements/release-build.txt
+          .release-build-venv/bin/python -m pip check
+      - name: Build twice from independent clean checkouts
+        run: |
+          mkdir -p release-bundle/dist build-b release-bundle/evidence
+          .release-build-venv/bin/python -m build --no-isolation --outdir release-bundle/dist source-a
+          .release-build-venv/bin/python -m build --no-isolation --outdir build-b source-b
+          .release-build-venv/bin/python control/scripts/normalize_sdist.py --sdist "release-bundle/dist/poker_xai-$EXPECTED_VERSION.tar.gz" --source-date-epoch "$SOURCE_DATE_EPOCH"
+          .release-build-venv/bin/python control/scripts/normalize_sdist.py --sdist "build-b/poker_xai-$EXPECTED_VERSION.tar.gz" --source-date-epoch "$SOURCE_DATE_EPOCH"
+      - name: Prepare complete offline wheelhouse
+        run: >-
+          .release-build-venv/bin/python -m pip download
+          --dest wheelhouse
+          --only-binary=:all:
+          --requirement control/requirements/release-build.txt
+          --requirement control/requirements/release-smoke.txt
+      - name: Verify contents, reproducibility, metadata, and offline installs
+        env:
+          PIP_NO_INDEX: "1"
+        run: >-
+          .release-build-venv/bin/python control/scripts/verify_release_artifacts.py
+          --source source-a
+          --dist release-bundle/dist
+          --expected-version "$EXPECTED_VERSION"
+          --compare-dist build-b
+          --wheelhouse wheelhouse
+          --report release-bundle/evidence/artifact-manifest.json
+      - name: Write SHA256 evidence
+        shell: bash
+        run: |
+          cd release-bundle/dist
+          sha256sum -- * > ../evidence/SHA256SUMS
+      - name: Upload verified CI artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.identity.outputs.artifact_name }}
+          path: release-bundle
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  verify-windows:
+    name: Windows / Python 3.12.10 / release artifacts
+    needs: build-ubuntu
+    runs-on: windows-2022
+    steps:
+      - name: Check out verifier
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.build-ubuntu.outputs.control_sha }}
+          path: control
+          persist-credentials: false
+      - name: Check out verified source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.build-ubuntu.outputs.source_sha }}
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Python 3.12.10
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12.10"
+          cache: pip
+          cache-dependency-path: |
+            control/requirements/release-build.txt
+            control/requirements/release-smoke.txt
+      - name: Download Ubuntu-built artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.build-ubuntu.outputs.artifact_name }}
+          path: release-bundle
+      - name: Provision pinned verification toolchain
+        shell: pwsh
+        run: |
+          python -m venv --copies .release-verify-venv
+          .\.release-verify-venv\Scripts\python.exe -m pip install --no-cache-dir --upgrade pip==25.2
+          .\.release-verify-venv\Scripts\python.exe -m pip install --no-cache-dir --requirement control\requirements\release-build.txt
+          .\.release-verify-venv\Scripts\python.exe -m pip check
+      - name: Prepare complete offline wheelhouse
+        shell: pwsh
+        run: >-
+          .\.release-verify-venv\Scripts\python.exe -m pip download
+          --dest wheelhouse
+          --only-binary=:all:
+          --requirement control\requirements\release-build.txt
+          --requirement control\requirements\release-smoke.txt
+      - name: Verify source identity and SHA256 evidence
+        shell: pwsh
+        run: |
+          if ((git -C control rev-parse HEAD) -ne "${{ needs.build-ubuntu.outputs.control_sha }}") { exit 1 }
+          if ((git -C source rev-parse HEAD) -ne "${{ needs.build-ubuntu.outputs.source_sha }}") { exit 1 }
+          Push-Location release-bundle\dist
+          Get-FileHash -Algorithm SHA256 * | ForEach-Object { "$($_.Hash.ToLower())  $([IO.Path]::GetFileName($_.Path))" } | Sort-Object | Set-Content ..\..\WINDOWS_SHA256SUMS -Encoding ascii
+          Pop-Location
+          $expected = Get-Content release-bundle\evidence\SHA256SUMS | Sort-Object
+          $actual = Get-Content WINDOWS_SHA256SUMS | Sort-Object
+          if (Compare-Object $expected $actual) { exit 1 }
+      - name: Verify contents, metadata, and offline wheel/sdist installs
+        shell: pwsh
+        env:
+          PIP_NO_INDEX: "1"
+        run: >-
+          .\.release-verify-venv\Scripts\python.exe control\scripts\verify_release_artifacts.py
+          --source source
+          --dist release-bundle\dist
+          --expected-version "$env:EXPECTED_VERSION"
+          --wheelhouse wheelhouse
