@@ -1,0 +1,45 @@
+name: Feature request
+description: Propose a focused simulation or research improvement
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the research or simulation need before proposing an implementation. The project does not support real-time poker operation or publishing to package indexes.
+  - type: checkboxes
+    id: existing_issue
+    attributes:
+      label: Existing issue check
+      options:
+        - label: I searched the open issues and did not find an existing request.
+          required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or research need
+      description: What is difficult or missing today, and who would benefit?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: Describe a small, focused solution and its expected result.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe workarounds or other approaches you considered.
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope confirmation
+      options:
+        - label: This request is limited to simulation or offline research use.
+          required: true
+        - label: This request does not add real-time poker operation, screen scraping, poker-site APIs, or external-site automation.
+          required: true
+        - label: This request does not add publishing to PyPI or another package index.
+          required: true

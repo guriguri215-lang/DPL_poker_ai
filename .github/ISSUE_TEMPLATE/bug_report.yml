@@ -1,0 +1,53 @@
+name: Bug report
+description: Report a reproducible problem in the simulation or research code
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve poker-xai. Please do not include credentials, private data, or information from real-money poker play.
+  - type: checkboxes
+    id: existing_issue
+    attributes:
+      label: Existing issue check
+      options:
+        - label: I searched the open issues and did not find an existing report.
+          required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Describe the problem and its impact.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Provide the smallest simulation-only example that reproduces the problem.
+      placeholder: |
+        1. Install ...
+        2. Run ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include your operating system and Python 3.12.x patch version.
+      placeholder: Windows 11, Python 3.12.10
+    validations:
+      required: true
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional context
+      description: Add sanitized logs, tracebacks, or other context if useful.
+      render: shell
