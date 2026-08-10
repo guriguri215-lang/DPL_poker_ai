@@ -1,0 +1,7 @@
+# Complete runtime dependency set used by the offline wheel/sdist smoke installs.
+annotated-types==0.7.0
+pydantic==2.11.7
+pydantic-core==2.33.2
+PyYAML==6.0.2
+typing-extensions==4.14.1
+typing-inspection==0.4.1
