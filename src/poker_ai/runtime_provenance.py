@@ -81,9 +81,7 @@ def resolve_package_version(module_file: Path | None = None) -> str:
     resolved_module = Path(__file__) if module_file is None else module_file
     source_root = _source_project_root(resolved_module)
     if source_root is not None:
-        source_version = _source_version(source_root)
-        if source_version is not None:
-            return source_version
+        return _source_version(source_root) or UNKNOWN_PACKAGE_VERSION
     return _matching_distribution_version(resolved_module) or UNKNOWN_PACKAGE_VERSION
 
 
