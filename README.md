@@ -57,7 +57,8 @@ Please keep pull requests small and focused so they are easy to review and verif
 See the public [documentation index](docs/README.md) for the current
 [architecture](docs/architecture.md), [DPL and RunManifest
 contracts](docs/dpl_and_run_manifest.md), [normal Hero session
-tutorial](docs/hero_session.md), and [responsible-use guidance](docs/responsible_use.md).
+tutorial](docs/hero_session.md), [responsible-use guidance](docs/responsible_use.md),
+and [GitHub Release verification](docs/release_verification.md).
 
 ## Normal Hero session CLI
 
@@ -189,6 +190,9 @@ Release artifacts are distributed only through GitHub Releases. This project
 does not publish to PyPI or other package indexes. Starting with `0.1.0a4`, each
 release attaches only the wheel, sdist, `artifact-manifest.json`, and
 `SHA256SUMS` taken unchanged from the same verified release-workflow bundle.
+Before using a release, follow the [GitHub Release verification
+guide](docs/release_verification.md) to confirm the exact four uploaded assets,
+their checksums, and the recorded offline smoke results without installing them.
 
 ## License
 

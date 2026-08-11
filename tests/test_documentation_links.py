@@ -48,6 +48,7 @@ def test_public_documentation_index_has_required_pages() -> None:
         "architecture.md",
         "dpl_and_run_manifest.md",
         "hero_session.md",
+        "release_verification.md",
         "responsible_use.md",
     ):
         assert f"]({target})" in index

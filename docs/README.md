@@ -12,6 +12,8 @@ scope and development status.
   minimal offline session, its output bundle, and the legacy source wrapper.
 - [Responsible use](responsible_use.md) records the intended research use and the
   current safety and solver limitations.
+- [GitHub Release verification](release_verification.md) explains how to obtain
+  and check the exact four release assets without installing them.
 
 Generated JSON Schemas are not checked in. Maintainers can generate them with
 `python cli/export_schemas.py --out-dir docs/schemas`; the Pydantic models remain

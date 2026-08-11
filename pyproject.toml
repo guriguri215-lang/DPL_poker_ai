@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "poker-xai"
-version = "0.1.0a4"
+version = "0.1.0a5"
 description = "Research framework for explainable, verifiable safe opponent exploitation in poker"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -35,6 +35,7 @@ poker-xai-gate-b-v2 = "gate_b_v2_launcher:main"
 poker-xai-run-session = "poker_ai.run_session_cli:main"
 
 [tool.setuptools]
+include-package-data = false
 py-modules = ["gate_b_v2_launcher", "gate_b_v2_startup"]
 
 [tool.setuptools.packages.find]

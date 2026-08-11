@@ -159,6 +159,6 @@ def test_git_command_failure_uses_explicit_unknowns(tmp_path: Path, monkeypatch)
 
 def test_current_source_checkout_reports_project_version() -> None:
     provenance = runtime_provenance.collect_runtime_provenance()
-    assert provenance.package_version == "0.1.0a4"
+    assert provenance.package_version == "0.1.0a5"
     assert provenance.git_commit == UNKNOWN_COMMIT or len(provenance.git_commit) == 40
     assert provenance.git_dirty is None or isinstance(provenance.git_dirty, bool)

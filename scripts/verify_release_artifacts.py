@@ -10,6 +10,7 @@ import email.policy
 import hashlib
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -19,6 +20,7 @@ import tomllib
 import zipfile
 from email.message import Message
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
@@ -47,6 +49,11 @@ _SDIST_EGG_INFO_FILES = {
     "requires.txt",
     "top_level.txt",
 }
+_INLINE_DOCUMENTATION_LINK = re.compile(r"!?\[[^\]]*\]\((?P<target><[^>]+>|[^\s)]+)")
+_REFERENCE_DOCUMENTATION_LINK = re.compile(
+    r"^\s*\[[^\]]+\]:\s*(?P<target><[^>]+>|\S+)",
+    flags=re.MULTILINE,
+)
 
 
 class VerificationError(RuntimeError):
@@ -123,6 +130,64 @@ def _tracked_top_level_sdist_tests(source: Path) -> set[str]:
         if candidate.parent.as_posix() == "tests" and candidate.match("test*.py"):
             result.add(candidate.as_posix())
     return result
+
+
+def _tracked_sdist_documents(source: Path) -> set[str]:
+    completed = subprocess.run(
+        ["git", "-C", str(source), "ls-files", "-z", "--", "CONTRIBUTING.md", "docs", "src"],
+        check=False,
+        capture_output=True,
+        timeout=30,
+    )
+    if completed.returncode != 0:
+        raise VerificationError("unable to resolve tracked sdist documentation")
+    tracked = {
+        raw.decode("utf-8", "surrogateescape") for raw in completed.stdout.split(b"\0") if raw
+    }
+    documents = {
+        path
+        for path in tracked
+        if path == "CONTRIBUTING.md"
+        or (path.startswith("docs/") and Path(path).suffix.lower() == ".md")
+        or (path.startswith("src/") and Path(path).name == "README.md")
+    }
+    if not {"CONTRIBUTING.md", "docs/README.md"}.issubset(documents):
+        raise VerificationError("required tracked sdist documentation is unavailable")
+    return documents
+
+
+def _relative_documentation_targets(markdown: str) -> tuple[str, ...]:
+    matches = (
+        *_INLINE_DOCUMENTATION_LINK.finditer(markdown),
+        *_REFERENCE_DOCUMENTATION_LINK.finditer(markdown),
+    )
+    targets = []
+    for match in matches:
+        target = match.group("target").strip("<>")
+        parsed = urlsplit(target)
+        if parsed.scheme or parsed.netloc or target.startswith("#") or not parsed.path:
+            continue
+        targets.append(unquote(parsed.path))
+    return tuple(targets)
+
+
+def verify_documentation_links(project: Path) -> None:
+    root = project.resolve()
+    documents = (root / "README.md", *sorted((root / "docs").rglob("*.md")))
+    if not documents or any(not document.is_file() for document in documents):
+        _fail("documentation", "documentation-file-missing")
+    for document in documents:
+        try:
+            markdown = document.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            _fail(document.relative_to(root).as_posix(), "documentation-unreadable")
+        for target in _relative_documentation_targets(markdown):
+            resolved = (document.parent / target).resolve()
+            location = document.relative_to(root).as_posix()
+            if resolved != root and root not in resolved.parents:
+                _fail(location, "documentation-link-escape")
+            if not resolved.exists():
+                _fail(location, "documentation-link-missing")
 
 
 def _check_member(location: str, member: str, data: bytes, *, allow_egg_info: bool = False) -> None:
@@ -310,8 +375,10 @@ def verify_sdist(sdist: Path, source: Path, version: str) -> None:
         expected_repository = (
             expected_payload
             | _tracked_top_level_sdist_tests(source)
+            | _tracked_sdist_documents(source)
             | {
                 "LICENSE",
+                "MANIFEST.in",
                 "README.md",
                 "pyproject.toml",
             }
@@ -392,14 +459,18 @@ def _smoke_one(
         surface_work.mkdir()
         import_root = source / "src"
         source_project = source
+        documentation_root = source
     else:
         assert artifact is not None
         surface_name = artifact.name
         surface_work = work / artifact.name.replace(".", "-")
         import_root = _extract_artifact(artifact, surface_work, version)
         source_project = None
+        documentation_root = import_root.parent if artifact.name.endswith(".tar.gz") else None
     if not import_root.is_dir():
         raise VerificationError(f"smoke import root is missing for {surface_name}")
+    if documentation_root is not None:
+        verify_documentation_links(documentation_root)
     run_root = surface_work / "offline-run"
     run_root.mkdir()
     output_root = run_root / "session-output"
@@ -611,6 +682,7 @@ def verify(
             "minimal-session",
             "manifest-round-trip",
             "entry-point-metadata",
+            "documentation-relative-links",
         ],
     }
     if report is not None:

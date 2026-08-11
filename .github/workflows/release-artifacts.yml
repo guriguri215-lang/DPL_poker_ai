@@ -4,7 +4,9 @@ on:
   pull_request:
     paths:
       - ".github/workflows/release-artifacts.yml"
+      - "CONTRIBUTING.md"
       - "LICENSE"
+      - "MANIFEST.in"
       - "README.md"
       - "docs/**"
       - "pyproject.toml"
@@ -22,12 +24,12 @@ on:
       tag:
         description: Existing version tag to build
         required: true
-        default: "0.1.0a4"
+        default: "0.1.0a5"
         type: string
       expected_version:
         description: Exact distribution version
         required: true
-        default: "0.1.0a4"
+        default: "0.1.0a5"
         type: string
 
 permissions:
@@ -35,7 +37,7 @@ permissions:
 
 env:
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
-  EXPECTED_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.expected_version || '0.1.0a4' }}
+  EXPECTED_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.expected_version || '0.1.0a5' }}
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || '' }}
   SOURCE_REF: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.event.pull_request.head.sha }}
 
