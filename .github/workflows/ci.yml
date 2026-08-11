@@ -37,13 +37,13 @@ jobs:
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
           PYTHONDONTWRITEBYTECODE: "1"
         run: .venv/bin/python -m pytest -p no:cacheprovider
-      - name: Offline no-index packaging
+      - name: Offline archive-extraction packaging
         env:
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
           PYTHONDONTWRITEBYTECODE: "1"
         run: >-
           .venv/bin/python -m pytest -p no:cacheprovider
-          tests/phase6/test_gate_b_v2_packaging.py::test_console_metadata_survives_isolated_offline_target_install
+          tests/phase6/test_gate_b_v2_packaging.py::test_console_metadata_survives_isolated_archive_extraction
 
   test-windows:
     name: Windows / Python 3.12.10
@@ -95,7 +95,7 @@ jobs:
           $env:PYTEST_DISABLE_PLUGIN_AUTOLOAD = "1"
           & $python -S -B -P -s -X "pycache_prefix=$python" -c "import gate_b_v2_startup as startup; startup.bootstrap_gate_b_v2_source_only_startup(); import pytest; raise SystemExit(pytest.main(['-p','no:cacheprovider']))"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Offline no-index packaging under exact startup
+      - name: Offline archive-extraction packaging under exact startup
         shell: pwsh
         run: |
           $python = (Resolve-Path .\.venv\Scripts\python.exe).Path
@@ -105,5 +105,5 @@ jobs:
           $env:PYTHONPYCACHEPREFIX = $python
           $env:PYTHONPATH = (Resolve-Path .\src).Path
           $env:PYTEST_DISABLE_PLUGIN_AUTOLOAD = "1"
-          & $python -S -B -P -s -X "pycache_prefix=$python" -c "import gate_b_v2_startup as startup; startup.bootstrap_gate_b_v2_source_only_startup(); import pytest; raise SystemExit(pytest.main(['-p','no:cacheprovider','tests/phase6/test_gate_b_v2_packaging.py::test_console_metadata_survives_isolated_offline_target_install']))"
+          & $python -S -B -P -s -X "pycache_prefix=$python" -c "import gate_b_v2_startup as startup; startup.bootstrap_gate_b_v2_source_only_startup(); import pytest; raise SystemExit(pytest.main(['-p','no:cacheprovider','tests/phase6/test_gate_b_v2_packaging.py::test_console_metadata_survives_isolated_archive_extraction']))"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

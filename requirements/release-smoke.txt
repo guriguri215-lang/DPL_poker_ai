@@ -1,4 +1,4 @@
-# Complete runtime dependency set used by the offline wheel/sdist smoke installs.
+# Complete runtime dependency set present for wheel/sdist archive-extraction smoke.
 annotated-types==0.7.0
 pydantic==2.11.7
 pydantic-core==2.33.2

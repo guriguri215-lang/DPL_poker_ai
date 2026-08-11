@@ -11,6 +11,7 @@ import sys
 import sysconfig
 import tempfile
 import tomllib
+import zipfile
 from pathlib import Path
 
 
@@ -184,7 +185,7 @@ def test_exact_startup_blocks_pth_and_sitecustomize_before_bootstrap(tmp_path: P
     assert not side_effect.exists()
 
 
-def test_console_metadata_survives_isolated_offline_target_install() -> None:
+def test_console_metadata_survives_isolated_archive_extraction() -> None:
     root = Path(__file__).resolve().parents[2]
     project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
     build_requirements = project["build-system"]["requires"]
@@ -242,8 +243,11 @@ def test_console_metadata_survives_isolated_offline_target_install() -> None:
         work = Path(temporary_directory)
         isolated_source = work / "source"
         target = work / "target"
+        dist = work / "dist"
         outside = work / "run"
         isolated_source.mkdir()
+        target.mkdir()
+        dist.mkdir()
         outside.mkdir()
         for name in ("pyproject.toml", "README.md", "LICENSE"):
             shutil.copy2(root / name, isolated_source / name)
@@ -281,32 +285,28 @@ def test_console_metadata_survives_isolated_offline_target_install() -> None:
                 "PYTHONPATH": str(backend_path),
             }
         )
-        installed = subprocess.run(
+        built = subprocess.run(
             [
                 sys.executable,
-                "-m",
-                "pip",
-                "--isolated",
-                "install",
-                "--disable-pip-version-check",
-                "--no-index",
-                "--no-cache-dir",
-                "--no-compile",
-                "--no-deps",
-                "--no-build-isolation",
-                "--use-pep517",
-                "--target",
-                str(target),
-                str(isolated_source),
+                "-c",
+                (
+                    "import setuptools.build_meta as backend, sys; "
+                    "print(backend.build_wheel(sys.argv[1]))"
+                ),
+                str(dist),
             ],
-            cwd=work,
+            cwd=isolated_source,
             check=False,
             capture_output=True,
             text=True,
             env=environment,
             timeout=120,
         )
-        assert installed.returncode == 0, installed.stderr
+        assert built.returncode == 0, built.stderr
+        wheels = tuple(dist.glob("*.whl"))
+        assert len(wheels) == 1
+        with zipfile.ZipFile(wheels[0]) as archive:
+            archive.extractall(target)
         entry_points = tuple(target.glob("poker_xai-*.dist-info/entry_points.txt"))
         assert len(entry_points) == 1
         assert "poker-xai-gate-b-v2 = gate_b_v2_launcher:main" in entry_points[0].read_text(

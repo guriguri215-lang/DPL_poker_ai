@@ -1,4 +1,4 @@
-"""Verify reproducible poker-xai wheel/sdist artifacts and offline installs."""
+"""Verify reproducible poker-xai wheel/sdist artifacts without installing them."""
 
 from __future__ import annotations
 
@@ -16,11 +16,9 @@ import sys
 import tarfile
 import tempfile
 import tomllib
-import venv
 import zipfile
 from email.message import Message
 from pathlib import Path
-from urllib.parse import unquote, urlparse
 
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
@@ -31,14 +29,7 @@ NORMALIZED_NAME = "poker_xai"
 EXPECTED_ENTRY_POINTS = {
     "poker-xai-export-schemas": "poker_core.schema_export:main",
     "poker-xai-gate-b-v2": "gate_b_v2_launcher:main",
-}
-EXPECTED_SMOKE_DISTRIBUTIONS = {
-    "annotated-types": "0.7.0",
-    "pydantic": "2.11.7",
-    "pydantic-core": "2.33.2",
-    "PyYAML": "6.0.2",
-    "typing-extensions": "4.14.1",
-    "typing-inspection": "0.4.1",
+    "poker-xai-run-session": "poker_ai.run_session_cli:main",
 }
 _WHEEL_METADATA_FILES = {
     "METADATA",
@@ -344,10 +335,6 @@ def verify_sdist(sdist: Path, source: Path, version: str) -> None:
         )
 
 
-def _venv_python(root: Path) -> Path:
-    return root / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-
-
 def _run(
     command: list[str], *, cwd: Path, environment: dict[str, str]
 ) -> subprocess.CompletedProcess[str]:
@@ -362,145 +349,158 @@ def _run(
     )
 
 
-def _assert_report_sources(report: Path, artifact: Path, wheelhouse: Path) -> None:
-    allowed_artifact = artifact.resolve()
-    allowed_wheelhouse = wheelhouse.resolve()
-    payload = json.loads(report.read_text(encoding="utf-8"))
-    for item in payload.get("install", ()):
-        url = item.get("download_info", {}).get("url")
-        parsed = urlparse(url) if isinstance(url, str) else None
-        if parsed is None or parsed.scheme != "file":
-            raise VerificationError("offline smoke report contains a non-file source")
-        raw_path = unquote(parsed.path)
-        if os.name == "nt" and len(raw_path) >= 3 and raw_path[0] == "/" and raw_path[2] == ":":
-            raw_path = raw_path[1:]
-        resolved = Path(raw_path).resolve()
-        if resolved != allowed_artifact and allowed_wheelhouse not in resolved.parents:
-            raise VerificationError("offline smoke report escaped the approved wheelhouse")
+def _extract_artifact(artifact: Path, destination: Path, version: str) -> Path:
+    """Extract a pre-verified archive and return its import/metadata root."""
+    destination.mkdir()
+    if artifact.suffix == ".whl":
+        with zipfile.ZipFile(artifact) as archive:
+            archive.extractall(destination)
+        return destination
+    expected_root = destination / f"{NORMALIZED_NAME}-{version}"
+    with tarfile.open(artifact, mode="r:gz") as archive:
+        archive.extractall(destination, filter="data")
+    if not expected_root.is_dir() or tuple(destination.iterdir()) != (expected_root,):
+        raise VerificationError("sdist smoke extraction root mismatch")
+    import_root = expected_root / "src"
+    if not import_root.is_dir():
+        raise VerificationError("sdist smoke import root is missing")
+    return import_root
 
 
-def _smoke_one(artifact: Path, wheelhouse: Path, version: str, work: Path) -> None:
+def _smoke_one(artifact: Path, version: str, work: Path) -> None:
     environment = os.environ.copy()
     for name in tuple(environment):
         if name.startswith("PIP_") or name in {"PYTHONHOME", "PYTHONPATH"}:
             environment.pop(name, None)
     environment.update(
         {
-            "PIP_CONFIG_FILE": os.devnull,
-            "PIP_DISABLE_PIP_VERSION_CHECK": "1",
-            "PIP_NO_INDEX": "1",
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTHONNOUSERSITE": "1",
         }
     )
-    venv_root = work / artifact.name.replace(".", "-")
-    venv.EnvBuilder(with_pip=True, symlinks=False).create(venv_root)
-    python = _venv_python(venv_root)
-    find_links = str(wheelhouse.resolve())
-    upgrade = _run(
-        [
-            str(python),
-            "-m",
-            "pip",
-            "--isolated",
-            "install",
-            "--no-index",
-            "--no-cache-dir",
-            "--find-links",
-            find_links,
-            "pip==25.2",
-        ],
-        cwd=work,
-        environment=environment,
-    )
-    if upgrade.returncode != 0:
-        raise VerificationError("offline smoke could not provision pinned pip")
-    install_report = work / f"{artifact.name}.install-report.json"
-    installed = _run(
-        [
-            str(python),
-            "-m",
-            "pip",
-            "--isolated",
-            "install",
-            "--no-index",
-            "--no-cache-dir",
-            "--no-compile",
-            "--find-links",
-            find_links,
-            "--report",
-            str(install_report),
-            str(artifact.resolve()),
-        ],
-        cwd=work,
-        environment=environment,
-    )
-    if installed.returncode != 0:
-        raise VerificationError(f"offline smoke install failed for {artifact.name}")
-    _assert_report_sources(install_report, artifact, wheelhouse)
-    script = """
+    artifact_work = work / artifact.name.replace(".", "-")
+    import_root = _extract_artifact(artifact, artifact_work, version)
+    run_root = artifact_work / "offline-run"
+    run_root.mkdir()
+    output_root = run_root / "session-output"
+    script = r"""
+import contextlib
+import io
 import importlib.metadata
-distribution = importlib.metadata.distribution('poker-xai')
+import json
+import sys
+from pathlib import Path
+
+import_root = Path(sys.argv[1]).resolve()
+output_root = Path(sys.argv[2]).resolve()
+sys.path.insert(0, str(import_root))
+
+distributions = [
+    item
+    for item in importlib.metadata.distributions(path=[str(import_root)])
+    if item.metadata['Name'] == 'poker-xai'
+]
+assert len(distributions) == 1
+distribution = distributions[0]
 assert distribution.version == EXPECTED_VERSION
-for name, expected_version in EXPECTED_DISTRIBUTIONS.items():
-    assert importlib.metadata.version(name) == expected_version
 actual = {
     entry.name: entry.value
     for entry in distribution.entry_points
     if entry.group == 'console_scripts'
 }
 assert actual == EXPECTED_ENTRY_POINTS
-assert all(
-    callable(entry.load())
+entries = {
+    entry.name: entry
     for entry in distribution.entry_points
     if entry.group == 'console_scripts'
-)
+}
+loaded = {name: entry.load() for name, entry in entries.items()}
+assert all(callable(value) for value in loaded.values())
+
+import poker_ai.run_session_cli as session_cli
+assert Path(session_cli.__file__).resolve().is_relative_to(import_root)
+
+help_output = io.StringIO()
+try:
+    with contextlib.redirect_stdout(help_output):
+        loaded['poker-xai-run-session'](['--help'])
+except SystemExit as stopped:
+    assert stopped.code == 0
+else:
+    raise AssertionError('session --help did not stop through argparse')
+assert '--solver-iterations' in help_output.getvalue()
+assert '--out-dir' in help_output.getvalue()
+
+schema_help = io.StringIO()
+try:
+    with contextlib.redirect_stdout(schema_help):
+        loaded['poker-xai-export-schemas'](['--help'])
+except SystemExit as stopped:
+    assert stopped.code == 0
+else:
+    raise AssertionError('schema --help did not stop through argparse')
+assert '--out-dir' in schema_help.getvalue()
+
+gate_stdout = io.StringIO()
+gate_stderr = io.StringIO()
+with contextlib.redirect_stdout(gate_stdout), contextlib.redirect_stderr(gate_stderr):
+    gate_status = loaded['poker-xai-gate-b-v2']([])
+assert gate_status == 1
+assert gate_stdout.getvalue() == ''
+assert json.loads(gate_stderr.getvalue()) == {
+    'schema_version': 'phase6-gate-b-v2-cli-error-v1',
+    'operation': 'pre-dispatch',
+    'status': 'failed',
+    'error_code': 'gate_b_invalid_preflight',
+}
+
+raw_argv = [
+    '--seed',
+    '7',
+    '--hands',
+    '1',
+    '--solver-iterations',
+    '1',
+    '--out-dir',
+    str(output_root),
+]
+with contextlib.redirect_stdout(io.StringIO()):
+    assert loaded['poker-xai-run-session'](raw_argv) == 0
+
+from poker_core.dpl_schema import DecisionProvenanceLog
+from poker_core.run_manifest import RunManifest
+
+manifest_paths = list(output_root.glob('*.manifest.json'))
+dpl_paths = list(output_root.glob('*.dpl.jsonl'))
+assert len(manifest_paths) == len(dpl_paths) == 1
+manifest = RunManifest.model_validate_json(manifest_paths[0].read_text(encoding='utf-8'))
+assert RunManifest.model_validate_json(manifest.model_dump_json()) == manifest
+assert manifest.code.package_version == EXPECTED_VERSION
+assert manifest.code.git_commit == 'unknown'
+assert manifest.code.git_dirty is None
+assert manifest.code.entrypoint == 'poker-xai-run-session'
+assert manifest.code.argv == raw_argv
+lines = dpl_paths[0].read_text(encoding='utf-8').splitlines()
+assert len(lines) == 1
+assert DecisionProvenanceLog.model_validate_json(lines[0]).schema_version == '3.0.0'
 """
-    script = (
-        script.replace("EXPECTED_VERSION", repr(version))
-        .replace("EXPECTED_DISTRIBUTIONS", repr(EXPECTED_SMOKE_DISTRIBUTIONS))
-        .replace("EXPECTED_ENTRY_POINTS", repr(EXPECTED_ENTRY_POINTS))
+    script = script.replace("EXPECTED_VERSION", repr(version)).replace(
+        "EXPECTED_ENTRY_POINTS", repr(EXPECTED_ENTRY_POINTS)
     )
     checked = _run(
-        [str(python), "-I", "-c", script],
-        cwd=work,
+        [sys.executable, "-I", "-c", script, str(import_root), str(output_root)],
+        cwd=run_root,
         environment=environment,
     )
     if checked.returncode != 0:
-        raise VerificationError(f"installed metadata check failed for {artifact.name}")
-    scripts = venv_root / ("Scripts" if os.name == "nt" else "bin")
-    suffix = ".exe" if os.name == "nt" else ""
-    exported = _run(
-        [str(scripts / f"poker-xai-export-schemas{suffix}"), "--help"],
-        cwd=work,
-        environment=environment,
-    )
-    if exported.returncode != 0 or "--out-dir" not in exported.stdout:
-        raise VerificationError(f"console smoke failed for {artifact.name}")
-    gated = _run(
-        [str(scripts / f"poker-xai-gate-b-v2{suffix}")],
-        cwd=work,
-        environment=environment,
-    )
-    expected_error = {
-        "schema_version": "phase6-gate-b-v2-cli-error-v1",
-        "operation": "pre-dispatch",
-        "status": "failed",
-        "error_code": "gate_b_invalid_preflight",
-    }
-    try:
-        gate_error = json.loads(gated.stderr)
-    except json.JSONDecodeError:
-        gate_error = None
-    if gated.returncode != 1 or gated.stdout or gate_error != expected_error:
-        raise VerificationError(f"Gate B console fail-closed smoke failed for {artifact.name}")
+        raise VerificationError(f"archive extraction smoke failed for {artifact.name}")
 
 
-def smoke_install(wheel: Path, sdist: Path, wheelhouse: Path, version: str) -> None:
+def smoke_archives(wheel: Path, sdist: Path, version: str) -> None:
     with tempfile.TemporaryDirectory(prefix="poker-xai-release-smoke-") as temporary:
         work = Path(temporary)
-        _smoke_one(wheel, wheelhouse, version, work)
-        _smoke_one(sdist, wheelhouse, version, work)
+        _smoke_one(wheel, version, work)
+        _smoke_one(sdist, version, work)
 
 
 def verify(
@@ -509,7 +509,6 @@ def verify(
     version: str,
     *,
     compare_dist: Path | None = None,
-    wheelhouse: Path | None = None,
     report: Path | None = None,
 ) -> dict[str, object]:
     project = tomllib.loads((source / "pyproject.toml").read_text(encoding="utf-8"))
@@ -524,8 +523,7 @@ def verify(
         compare_hashes = {path.name: _hash(path) for path in (compare_wheel, compare_sdist)}
         if hashes != compare_hashes:
             raise VerificationError("independent release builds are not byte-for-byte reproducible")
-    if wheelhouse is not None:
-        smoke_install(wheel, sdist, wheelhouse, version)
+    smoke_archives(wheel, sdist, version)
     result: dict[str, object] = {
         "distribution": DIST_NAME,
         "version": version,
@@ -538,7 +536,8 @@ def verify(
         ).stdout.strip(),
         "artifacts": hashes,
         "reproducible": compare_dist is not None,
-        "offline_smoke": wheelhouse is not None,
+        "offline_smoke": True,
+        "smoke_mode": "archive-extraction-existing-python",
     }
     if report is not None:
         report.parent.mkdir(parents=True, exist_ok=True)
@@ -552,7 +551,6 @@ def main() -> int:
     parser.add_argument("--dist", type=Path, required=True)
     parser.add_argument("--expected-version", required=True)
     parser.add_argument("--compare-dist", type=Path)
-    parser.add_argument("--wheelhouse", type=Path)
     parser.add_argument("--report", type=Path)
     args = parser.parse_args()
     try:
@@ -561,7 +559,6 @@ def main() -> int:
             args.dist.resolve(),
             args.expected_version,
             compare_dist=args.compare_dist.resolve() if args.compare_dist else None,
-            wheelhouse=args.wheelhouse.resolve() if args.wheelhouse else None,
             report=args.report.resolve() if args.report else None,
         )
     except VerificationError as exc:

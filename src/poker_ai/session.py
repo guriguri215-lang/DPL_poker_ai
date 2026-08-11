@@ -18,7 +18,6 @@ from __future__ import annotations
 import hashlib
 import json
 import platform
-import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,6 +55,7 @@ from .posterior_bundle import (
     validate_posterior_bundle,
     write_posterior_artifacts,
 )
+from .runtime_provenance import resolve_package_version
 from .scenario import SCENARIO_SCHEMA_VERSION, Scenario, generate_scenarios
 
 #: EV source for every task-3 DPL: exact showdown enumeration (ADR-0008).
@@ -250,8 +250,9 @@ def build_manifest(
     num_hands: int,
     *,
     git_commit: str = "unknown",
-    git_dirty: bool = False,
-    entrypoint: str = "cli/run_session.py",
+    git_dirty: bool | None = None,
+    package_version: str | None = None,
+    entrypoint: str = "poker_ai.session.run_session",
     argv: list[str] | None = None,
     output_paths: list[str] | None = None,
     leak_detector: LeakDetector | None = None,
@@ -289,10 +290,10 @@ def build_manifest(
     code = CodeProvenance(
         git_commit=git_commit,
         git_dirty=git_dirty,
-        package_version="0.0.0",
+        package_version=(resolve_package_version() if package_version is None else package_version),
         python_version=platform.python_version(),
         entrypoint=entrypoint,
-        argv=list(sys.argv[1:] if argv is None else argv),
+        argv=list(argv or ()),
     )
     return RunManifest(
         run_id=_session_id_for(seed),
@@ -323,6 +324,10 @@ def run_session(
     num_hands: int,
     *,
     git_commit: str = "unknown",
+    git_dirty: bool | None = None,
+    package_version: str | None = None,
+    entrypoint: str = "poker_ai.session.run_session",
+    argv: list[str] | None = None,
     leak_detector: LeakDetector | None = None,
     safety_alpha: float = 0.0,
     exploration_epsilon: float = 0.0,
@@ -358,6 +363,10 @@ def run_session(
         seed,
         num_hands,
         git_commit=git_commit,
+        git_dirty=git_dirty,
+        package_version=package_version,
+        entrypoint=entrypoint,
+        argv=argv,
         leak_detector=detector,
         safety_alpha=safety_alpha,
         exploration_epsilon=exploration_epsilon,

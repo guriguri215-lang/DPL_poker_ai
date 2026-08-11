@@ -316,6 +316,10 @@ def test_different_seed_changes_output():
 def test_manifest_is_valid_and_pins_versions_and_configs():
     manifest = build_manifest(20260704, HANDS, git_commit="unknown")
     assert isinstance(manifest, RunManifest)
+    assert manifest.code.package_version == "0.1.0a3"
+    assert manifest.code.git_dirty is None
+    assert manifest.code.entrypoint == "poker_ai.session.run_session"
+    assert manifest.code.argv == []
     assert manifest.seeds["master"] == 20260704
     assert manifest.versions.cluster_def_version == cluster_def_version()
     assert (
@@ -366,18 +370,17 @@ def test_run_session_writes_and_reloads(tmp_path):
 
 def test_leaky_fixture_cli_smoke_writes_detected_leaks_and_mix(tmp_path, capsys):
     cli = _load_cli_module()
+    raw_argv = [
+        "--seed",
+        "20260704",
+        "--hands",
+        "3",
+        "--leaky-fixture",
+        "--out-dir",
+        str(tmp_path),
+    ]
 
-    rc = cli.main(
-        [
-            "--seed",
-            "20260704",
-            "--hands",
-            "3",
-            "--leaky-fixture",
-            "--out-dir",
-            str(tmp_path),
-        ]
-    )
+    rc = cli.main(raw_argv)
 
     assert rc == 0
     out = capsys.readouterr().out
@@ -400,6 +403,27 @@ def test_leaky_fixture_cli_smoke_writes_detected_leaks_and_mix(tmp_path, capsys)
     assert any(log.safety_alpha > 0.0 and log.mix_reasons for log in logs)
     assert any(log.exploit_policy == {"CALL": 1.0} for log in logs)
     assert manifest.versions.baseline_table_version == "fixture-action-baseline"
+    assert manifest.code.package_version == "0.1.0a3"
+    assert manifest.code.entrypoint == "cli/run_session.py"
+    assert manifest.code.argv == raw_argv
+
+
+def test_distributed_session_entrypoint_and_help_are_available(capsys):
+    import tomllib
+
+    from poker_ai import run_session_cli
+
+    root = Path(__file__).resolve().parents[2]
+    project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    assert project["project"]["scripts"]["poker-xai-run-session"] == (
+        "poker_ai.run_session_cli:main"
+    )
+    with pytest.raises(SystemExit) as stopped:
+        run_session_cli.main(["--help"])
+    assert stopped.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "--solver-iterations" in help_text
+    assert "--out-dir" in help_text
 
 
 def _load_cli_module():
