@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import io
+import json
 import re
 import sys
 import tarfile
@@ -27,6 +29,8 @@ def _module(name: str):
 publication_policy = _module("publication_policy")
 normalizer = _module("normalize_sdist")
 release = _module("verify_release_artifacts")
+bundle = _module("verify_release_bundle")
+checksums = _module("write_release_checksums")
 
 
 def _requirements(path: Path) -> dict[str, str]:
@@ -58,7 +62,7 @@ def test_release_toolchains_are_fully_pinned_and_match_project_metadata() -> Non
         "wheel": "0.45.1",
     }
     assert project["build-system"]["requires"] == [f"setuptools=={build['setuptools']}"]
-    assert project["project"]["version"] == "0.1.0a3"
+    assert project["project"]["version"] == "0.1.0a4"
     direct = {value.lower() for value in project["project"]["dependencies"]}
     assert "pydantic==2.11.7" in direct
     assert "pyyaml==6.0.2" in direct
@@ -92,6 +96,89 @@ def test_release_workflow_keeps_exact_python_and_offline_cross_platform_gates() 
     assert "poker-xai-gate-b-v2" in verifier
     assert "poker-xai-run-session" in verifier
     assert "manifest.code.package_version" in verifier
+    assert "loaded['poker-xai-run-session'](['--version'])" in verifier
+    assert "source-checkout" in verifier
+    assert workflow.count("verify_release_bundle.py") == 3
+    assert "control/scripts/write_release_checksums.py" in workflow
+    assert workflow.index("Verify final four-file release bundle") < workflow.index(
+        "Upload final four-file release bundle"
+    )
+    assert "Get-FileHash" not in workflow
+
+
+def _release_bundle(tmp_path: Path) -> tuple[Path, Path, Path, Path, Path]:
+    release_bundle = tmp_path / "release-bundle"
+    dist = release_bundle / "dist"
+    evidence = release_bundle / "evidence"
+    dist.mkdir(parents=True)
+    evidence.mkdir()
+    wheel = dist / "poker_xai-0.1.0a4-py3-none-any.whl"
+    sdist = dist / "poker_xai-0.1.0a4.tar.gz"
+    wheel.write_bytes(b"wheel\n")
+    sdist.write_bytes(b"sdist\n")
+
+    def digest(path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    manifest = evidence / "artifact-manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "distribution": "poker-xai",
+                "version": "0.1.0a4",
+                "source_commit": "a" * 40,
+                "artifacts": {wheel.name: digest(wheel), sdist.name: digest(sdist)},
+                "reproducible": True,
+                "offline_smoke": True,
+                "smoke_mode": "source-and-archive-extraction-existing-python",
+                "smoke_surfaces": [
+                    "source-checkout",
+                    "unpacked-wheel",
+                    "unpacked-sdist",
+                ],
+                "smoke_checks": [
+                    "--version",
+                    "--help",
+                    "minimal-session",
+                    "manifest-round-trip",
+                    "entry-point-metadata",
+                ],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    checksum = evidence / "SHA256SUMS"
+    checksums.write_checksums(dist, manifest, checksum, "0.1.0a4")
+    return release_bundle, wheel, sdist, manifest, checksum
+
+
+def test_final_release_bundle_is_exact_self_verifying_four_file_set(tmp_path: Path) -> None:
+    release_bundle, wheel, sdist, manifest, checksum = _release_bundle(tmp_path)
+
+    result = bundle.verify_bundle(release_bundle, "0.1.0a4")
+
+    assert result["version"] == "0.1.0a4"
+    checksum_names = {line.split("  ", 1)[1] for line in checksum.read_text().splitlines()}
+    assert checksum_names == {wheel.name, sdist.name, manifest.name}
+    assert all("/" not in name and "\\" not in name for name in checksum_names)
+    with pytest.raises(checksums.ChecksumError, match="already exists"):
+        checksums.write_checksums(release_bundle / "dist", manifest, checksum, "0.1.0a4")
+
+
+def test_final_release_bundle_rejects_extra_or_changed_assets(tmp_path: Path) -> None:
+    release_bundle, wheel, *_ = _release_bundle(tmp_path)
+    extra = release_bundle / "evidence" / "extra.txt"
+    extra.write_text("extra\n", encoding="utf-8")
+    with pytest.raises(bundle.BundleVerificationError, match="exact-four-file-allowlist"):
+        bundle.verify_bundle(release_bundle, "0.1.0a4")
+
+    extra.unlink()
+    wheel.write_bytes(b"changed\n")
+    with pytest.raises(bundle.BundleVerificationError, match="checksum-mismatch"):
+        bundle.verify_bundle(release_bundle, "0.1.0a4")
 
 
 @pytest.mark.parametrize(
@@ -135,14 +222,14 @@ def test_publication_content_policy_covers_high_confidence_credentials(
 
 
 def test_distribution_directory_must_contain_only_wheel_and_sdist(tmp_path: Path) -> None:
-    wheel = tmp_path / "poker_xai-0.1.0a3-py3-none-any.whl"
-    sdist = tmp_path / "poker_xai-0.1.0a3.tar.gz"
+    wheel = tmp_path / "poker_xai-0.1.0a4-py3-none-any.whl"
+    sdist = tmp_path / "poker_xai-0.1.0a4.tar.gz"
     wheel.touch()
     sdist.touch()
-    assert release._distribution_files(tmp_path, "0.1.0a3") == (wheel, sdist)
+    assert release._distribution_files(tmp_path, "0.1.0a4") == (wheel, sdist)
     (tmp_path / "temporary.tmp").touch()
     with pytest.raises(release.VerificationError, match="exactly one expected wheel"):
-        release._distribution_files(tmp_path, "0.1.0a3")
+        release._distribution_files(tmp_path, "0.1.0a4")
 
 
 def test_sdist_normalization_is_byte_reproducible(tmp_path: Path) -> None:
@@ -150,7 +237,7 @@ def test_sdist_normalization_is_byte_reproducible(tmp_path: Path) -> None:
     for index in range(2):
         path = tmp_path / f"input-{index}.tar.gz"
         with tarfile.open(path, mode="w:gz") as archive:
-            info = tarfile.TarInfo("poker_xai-0.1.0a3/module.py")
+            info = tarfile.TarInfo("poker_xai-0.1.0a4/module.py")
             data = b"VALUE = 1\n"
             info.size = len(data)
             info.mtime = 100 + index
@@ -168,7 +255,7 @@ def test_wheel_rejects_unsafe_empty_directory(
     with zipfile.ZipFile(wheel, mode="w") as archive:
         archive.writestr("pkg/__pycache__/", b"")
     with pytest.raises(release.VerificationError, match="local-or-build-path"):
-        release.verify_wheel(wheel, ROOT, "0.1.0a3")
+        release.verify_wheel(wheel, ROOT, "0.1.0a4")
 
 
 def test_sdist_rejects_unsafe_empty_directory(
@@ -177,14 +264,14 @@ def test_sdist_rejects_unsafe_empty_directory(
     monkeypatch.setattr(release, "_tracked_payload", lambda _source: set())
     sdist = tmp_path / "unsafe.tar.gz"
     with tarfile.open(sdist, mode="w:gz") as archive:
-        root = tarfile.TarInfo("poker_xai-0.1.0a3")
+        root = tarfile.TarInfo("poker_xai-0.1.0a4")
         root.type = tarfile.DIRTYPE
         archive.addfile(root)
-        unsafe = tarfile.TarInfo("poker_xai-0.1.0a3/build")
+        unsafe = tarfile.TarInfo("poker_xai-0.1.0a4/build")
         unsafe.type = tarfile.DIRTYPE
         archive.addfile(unsafe)
     with pytest.raises(release.VerificationError, match="local-or-build-path"):
-        release.verify_sdist(sdist, ROOT, "0.1.0a3")
+        release.verify_sdist(sdist, ROOT, "0.1.0a4")
 
 
 def test_wheel_payload_must_equal_the_tracked_git_blob(
@@ -196,4 +283,4 @@ def test_wheel_payload_must_equal_the_tracked_git_blob(
     with zipfile.ZipFile(wheel, mode="w") as archive:
         archive.writestr("module.py", b"transformed\n")
     with pytest.raises(release.VerificationError, match="tracked-payload-byte-mismatch"):
-        release.verify_wheel(wheel, ROOT, "0.1.0a3")
+        release.verify_wheel(wheel, ROOT, "0.1.0a4")

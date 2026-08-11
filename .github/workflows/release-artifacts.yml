@@ -6,12 +6,15 @@ on:
       - ".github/workflows/release-artifacts.yml"
       - "LICENSE"
       - "README.md"
+      - "docs/**"
       - "pyproject.toml"
       - "requirements/release-*.txt"
       - "scripts/check_publication_history.py"
       - "scripts/normalize_sdist.py"
       - "scripts/publication_policy.py"
       - "scripts/verify_release_artifacts.py"
+      - "scripts/verify_release_bundle.py"
+      - "scripts/write_release_checksums.py"
       - "src/**"
       - "tests/test*.py"
   workflow_dispatch:
@@ -19,12 +22,12 @@ on:
       tag:
         description: Existing version tag to build
         required: true
-        default: "0.1.0a3"
+        default: "0.1.0a4"
         type: string
       expected_version:
         description: Exact distribution version
         required: true
-        default: "0.1.0a3"
+        default: "0.1.0a4"
         type: string
 
 permissions:
@@ -32,7 +35,7 @@ permissions:
 
 env:
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
-  EXPECTED_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.expected_version || '0.1.0a3' }}
+  EXPECTED_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.expected_version || '0.1.0a4' }}
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || '' }}
   SOURCE_REF: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.event.pull_request.head.sha }}
 
@@ -127,12 +130,19 @@ jobs:
           --expected-version "$EXPECTED_VERSION"
           --compare-dist build-b
           --report release-bundle/evidence/artifact-manifest.json
-      - name: Write SHA256 evidence
-        shell: bash
-        run: |
-          cd release-bundle/dist
-          sha256sum -- * > ../evidence/SHA256SUMS
-      - name: Upload verified CI artifact
+      - name: Write final SHA256 evidence once
+        run: >-
+          .release-build-venv/bin/python control/scripts/write_release_checksums.py
+          --dist release-bundle/dist
+          --manifest release-bundle/evidence/artifact-manifest.json
+          --output release-bundle/evidence/SHA256SUMS
+          --expected-version "$EXPECTED_VERSION"
+      - name: Verify final four-file release bundle
+        run: >-
+          .release-build-venv/bin/python control/scripts/verify_release_bundle.py
+          --bundle release-bundle
+          --expected-version "$EXPECTED_VERSION"
+      - name: Upload final four-file release bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ steps.identity.outputs.artifact_name }}
@@ -179,17 +189,17 @@ jobs:
           .\.release-verify-venv\Scripts\python.exe -m pip install --no-cache-dir --upgrade pip==25.2
           .\.release-verify-venv\Scripts\python.exe -m pip install --no-cache-dir --requirement control\requirements\release-build.txt --requirement control\requirements\release-smoke.txt
           .\.release-verify-venv\Scripts\python.exe -m pip check
-      - name: Verify source identity and SHA256 evidence
+      - name: Verify source identity
         shell: pwsh
         run: |
           if ((git -C control rev-parse HEAD) -ne "${{ needs.build-ubuntu.outputs.control_sha }}") { exit 1 }
           if ((git -C source rev-parse HEAD) -ne "${{ needs.build-ubuntu.outputs.source_sha }}") { exit 1 }
-          Push-Location release-bundle\dist
-          Get-FileHash -Algorithm SHA256 * | ForEach-Object { "$($_.Hash.ToLower())  $([IO.Path]::GetFileName($_.Path))" } | Sort-Object | Set-Content ..\..\WINDOWS_SHA256SUMS -Encoding ascii
-          Pop-Location
-          $expected = Get-Content release-bundle\evidence\SHA256SUMS | Sort-Object
-          $actual = Get-Content WINDOWS_SHA256SUMS | Sort-Object
-          if (Compare-Object $expected $actual) { exit 1 }
+      - name: Verify final four-file release bundle
+        shell: pwsh
+        run: >-
+          .\.release-verify-venv\Scripts\python.exe control\scripts\verify_release_bundle.py
+          --bundle release-bundle
+          --expected-version "$env:EXPECTED_VERSION"
       - name: Verify contents, metadata, and archive wheel/sdist smoke
         shell: pwsh
         env:

@@ -52,6 +52,13 @@ report or discuss work, and submit changes through
 [Pull requests](https://github.com/guriguri215-lang/DPL_poker_ai/pulls).
 Please keep pull requests small and focused so they are easy to review and verify.
 
+## Documentation
+
+See the public [documentation index](docs/README.md) for the current
+[architecture](docs/architecture.md), [DPL and RunManifest
+contracts](docs/dpl_and_run_manifest.md), [normal Hero session
+tutorial](docs/hero_session.md), and [responsible-use guidance](docs/responsible_use.md).
+
 ## Normal Hero session CLI
 
 The distributed command runs the normal simulated Hero session and writes DPL
@@ -67,6 +74,17 @@ same packaged module:
 ```bash
 python cli/run_session.py --seed 20260704 --hands 5 --out-dir experiments_output/quickstart
 ```
+
+Identify either command without starting a session or creating output files:
+
+```bash
+poker-xai-run-session --version
+python cli/run_session.py --version
+```
+
+Both forms reuse the same project/distribution version resolver as the
+RunManifest. If authoritative metadata for the executing module is unavailable,
+the displayed version is `unknown`.
 
 RunManifest provenance follows an explicit no-guessing contract. When the
 executing module is the exact `src/poker_ai` tree, the package version comes
@@ -163,12 +181,14 @@ iterations is not a convergence guarantee.
 
 This is a simulation-only research artefact. Do not use it to gain an unfair
 advantage in real-money play or in violation of any poker platform's terms. See
-`docs/responsible_use.md` (added with the docs phase).
+[Responsible use](docs/responsible_use.md).
 
 ## Distribution
 
 Release artifacts are distributed only through GitHub Releases. This project
-does not publish to PyPI or other package indexes.
+does not publish to PyPI or other package indexes. Starting with `0.1.0a4`, each
+release attaches only the wheel, sdist, `artifact-manifest.json`, and
+`SHA256SUMS` taken unchanged from the same verified release-workflow bundle.
 
 ## License
 

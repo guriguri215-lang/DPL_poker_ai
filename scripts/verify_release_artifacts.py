@@ -367,7 +367,15 @@ def _extract_artifact(artifact: Path, destination: Path, version: str) -> Path:
     return import_root
 
 
-def _smoke_one(artifact: Path, version: str, work: Path) -> None:
+def _smoke_one(
+    artifact: Path | None,
+    version: str,
+    work: Path,
+    *,
+    source: Path | None = None,
+) -> None:
+    if (artifact is None) == (source is None):
+        raise VerificationError("smoke surface must be exactly one source or archive")
     environment = os.environ.copy()
     for name in tuple(environment):
         if name.startswith("PIP_") or name in {"PYTHONHOME", "PYTHONPATH"}:
@@ -378,47 +386,88 @@ def _smoke_one(artifact: Path, version: str, work: Path) -> None:
             "PYTHONNOUSERSITE": "1",
         }
     )
-    artifact_work = work / artifact.name.replace(".", "-")
-    import_root = _extract_artifact(artifact, artifact_work, version)
-    run_root = artifact_work / "offline-run"
+    if source is not None:
+        surface_name = "source-checkout"
+        surface_work = work / surface_name
+        surface_work.mkdir()
+        import_root = source / "src"
+        source_project = source
+    else:
+        assert artifact is not None
+        surface_name = artifact.name
+        surface_work = work / artifact.name.replace(".", "-")
+        import_root = _extract_artifact(artifact, surface_work, version)
+        source_project = None
+    if not import_root.is_dir():
+        raise VerificationError(f"smoke import root is missing for {surface_name}")
+    run_root = surface_work / "offline-run"
     run_root.mkdir()
     output_root = run_root / "session-output"
     script = r"""
 import contextlib
 import io
+import importlib
 import importlib.metadata
 import json
 import sys
+import tomllib
 from pathlib import Path
 
 import_root = Path(sys.argv[1]).resolve()
 output_root = Path(sys.argv[2]).resolve()
+source_project_arg = sys.argv[3]
+source_project = Path(source_project_arg).resolve() if source_project_arg else None
 sys.path.insert(0, str(import_root))
 
-distributions = [
-    item
-    for item in importlib.metadata.distributions(path=[str(import_root)])
-    if item.metadata['Name'] == 'poker-xai'
-]
-assert len(distributions) == 1
-distribution = distributions[0]
-assert distribution.version == EXPECTED_VERSION
-actual = {
-    entry.name: entry.value
-    for entry in distribution.entry_points
-    if entry.group == 'console_scripts'
-}
-assert actual == EXPECTED_ENTRY_POINTS
-entries = {
-    entry.name: entry
-    for entry in distribution.entry_points
-    if entry.group == 'console_scripts'
-}
-loaded = {name: entry.load() for name, entry in entries.items()}
+if source_project is not None:
+    project = tomllib.loads((source_project / 'pyproject.toml').read_text(encoding='utf-8'))
+    assert project['project']['name'] == 'poker-xai'
+    assert project['project']['version'] == EXPECTED_VERSION
+    actual = dict(project['project']['scripts'])
+    assert actual == EXPECTED_ENTRY_POINTS
+
+    def load_target(value):
+        module_name, separator, attribute = value.partition(':')
+        assert separator and module_name and attribute
+        return getattr(importlib.import_module(module_name), attribute)
+
+    loaded = {name: load_target(value) for name, value in actual.items()}
+else:
+    distributions = [
+        item
+        for item in importlib.metadata.distributions(path=[str(import_root)])
+        if item.metadata['Name'] == 'poker-xai'
+    ]
+    assert len(distributions) == 1
+    distribution = distributions[0]
+    assert distribution.version == EXPECTED_VERSION
+    actual = {
+        entry.name: entry.value
+        for entry in distribution.entry_points
+        if entry.group == 'console_scripts'
+    }
+    assert actual == EXPECTED_ENTRY_POINTS
+    entries = {
+        entry.name: entry
+        for entry in distribution.entry_points
+        if entry.group == 'console_scripts'
+    }
+    loaded = {name: entry.load() for name, entry in entries.items()}
 assert all(callable(value) for value in loaded.values())
 
 import poker_ai.run_session_cli as session_cli
 assert Path(session_cli.__file__).resolve().is_relative_to(import_root)
+
+version_output = io.StringIO()
+try:
+    with contextlib.redirect_stdout(version_output):
+        loaded['poker-xai-run-session'](['--version'])
+except SystemExit as stopped:
+    assert stopped.code == 0
+else:
+    raise AssertionError('session --version did not stop through argparse')
+assert version_output.getvalue() == f'poker-xai-run-session {EXPECTED_VERSION}\n'
+assert not output_root.exists()
 
 help_output = io.StringIO()
 try:
@@ -430,6 +479,8 @@ else:
     raise AssertionError('session --help did not stop through argparse')
 assert '--solver-iterations' in help_output.getvalue()
 assert '--out-dir' in help_output.getvalue()
+assert '--version' in help_output.getvalue()
+assert not output_root.exists()
 
 schema_help = io.StringIO()
 try:
@@ -478,8 +529,12 @@ assert len(manifest_paths) == len(dpl_paths) == 1
 manifest = RunManifest.model_validate_json(manifest_paths[0].read_text(encoding='utf-8'))
 assert RunManifest.model_validate_json(manifest.model_dump_json()) == manifest
 assert manifest.code.package_version == EXPECTED_VERSION
-assert manifest.code.git_commit == 'unknown'
-assert manifest.code.git_dirty is None
+if source_project is None:
+    assert manifest.code.git_commit == 'unknown'
+    assert manifest.code.git_dirty is None
+else:
+    assert len(manifest.code.git_commit) == 40
+    assert isinstance(manifest.code.git_dirty, bool)
 assert manifest.code.entrypoint == 'poker-xai-run-session'
 assert manifest.code.argv == raw_argv
 lines = dpl_paths[0].read_text(encoding='utf-8').splitlines()
@@ -490,17 +545,26 @@ assert DecisionProvenanceLog.model_validate_json(lines[0]).schema_version == '3.
         "EXPECTED_ENTRY_POINTS", repr(EXPECTED_ENTRY_POINTS)
     )
     checked = _run(
-        [sys.executable, "-I", "-c", script, str(import_root), str(output_root)],
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            script,
+            str(import_root),
+            str(output_root),
+            str(source_project) if source_project is not None else "",
+        ],
         cwd=run_root,
         environment=environment,
     )
     if checked.returncode != 0:
-        raise VerificationError(f"archive extraction smoke failed for {artifact.name}")
+        raise VerificationError(f"offline smoke failed for {surface_name}")
 
 
-def smoke_archives(wheel: Path, sdist: Path, version: str) -> None:
+def smoke_release_surfaces(source: Path, wheel: Path, sdist: Path, version: str) -> None:
     with tempfile.TemporaryDirectory(prefix="poker-xai-release-smoke-") as temporary:
         work = Path(temporary)
+        _smoke_one(None, version, work, source=source)
         _smoke_one(wheel, version, work)
         _smoke_one(sdist, version, work)
 
@@ -525,7 +589,7 @@ def verify(
         compare_hashes = {path.name: _hash(path) for path in (compare_wheel, compare_sdist)}
         if hashes != compare_hashes:
             raise VerificationError("independent release builds are not byte-for-byte reproducible")
-    smoke_archives(wheel, sdist, version)
+    smoke_release_surfaces(source, wheel, sdist, version)
     result: dict[str, object] = {
         "distribution": DIST_NAME,
         "version": version,
@@ -539,7 +603,15 @@ def verify(
         "artifacts": hashes,
         "reproducible": compare_dist is not None,
         "offline_smoke": True,
-        "smoke_mode": "archive-extraction-existing-python",
+        "smoke_mode": "source-and-archive-extraction-existing-python",
+        "smoke_surfaces": ["source-checkout", "unpacked-wheel", "unpacked-sdist"],
+        "smoke_checks": [
+            "--version",
+            "--help",
+            "minimal-session",
+            "manifest-round-trip",
+            "entry-point-metadata",
+        ],
     }
     if report is not None:
         report.parent.mkdir(parents=True, exist_ok=True)
