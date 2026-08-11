@@ -15,6 +15,8 @@ DIST_NAME = "poker-xai"
 NORMALIZED_NAME = "poker_xai"
 MANIFEST_NAME = "artifact-manifest.json"
 CHECKSUM_NAME = "SHA256SUMS"
+INTERNAL_LAYOUT = "internal"
+FLAT_LAYOUT = "flat"
 SMOKE_SURFACES = ["source-checkout", "unpacked-wheel", "unpacked-sdist"]
 SMOKE_CHECKS = [
     "--version",
@@ -62,26 +64,44 @@ def _checksum_entries(path: Path) -> dict[str, str]:
     return result
 
 
-def verify_bundle(bundle: Path, version: str) -> dict[str, object]:
+def _bundle_files(bundle: Path, version: str, layout: str) -> tuple[Path, Path, Path, Path]:
     wheel_name = f"{NORMALIZED_NAME}-{version}-py3-none-any.whl"
     sdist_name = f"{NORMALIZED_NAME}-{version}.tar.gz"
-    relative = {
-        f"dist/{wheel_name}",
-        f"dist/{sdist_name}",
-        f"evidence/{MANIFEST_NAME}",
-        f"evidence/{CHECKSUM_NAME}",
-    }
+    if layout == INTERNAL_LAYOUT:
+        relative = {
+            f"dist/{wheel_name}",
+            f"dist/{sdist_name}",
+            f"evidence/{MANIFEST_NAME}",
+            f"evidence/{CHECKSUM_NAME}",
+        }
+        expected_directories = {"dist", "evidence"}
+        wheel = bundle / "dist" / wheel_name
+        sdist = bundle / "dist" / sdist_name
+        manifest_path = bundle / "evidence" / MANIFEST_NAME
+        checksums_path = bundle / "evidence" / CHECKSUM_NAME
+    elif layout == FLAT_LAYOUT:
+        relative = {wheel_name, sdist_name, MANIFEST_NAME, CHECKSUM_NAME}
+        expected_directories = set()
+        wheel = bundle / wheel_name
+        sdist = bundle / sdist_name
+        manifest_path = bundle / MANIFEST_NAME
+        checksums_path = bundle / CHECKSUM_NAME
+    else:
+        raise BundleVerificationError("release bundle issue: category=layout")
+
     actual = {path.relative_to(bundle).as_posix() for path in bundle.rglob("*") if path.is_file()}
     directories = {
         path.relative_to(bundle).as_posix() for path in bundle.rglob("*") if path.is_dir()
     }
-    if actual != relative or directories != {"dist", "evidence"}:
+    if actual != relative or directories != expected_directories:
         raise BundleVerificationError("release bundle issue: category=exact-four-file-allowlist")
+    return wheel, sdist, manifest_path, checksums_path
 
-    wheel = bundle / "dist" / wheel_name
-    sdist = bundle / "dist" / sdist_name
-    manifest_path = bundle / "evidence" / MANIFEST_NAME
-    checksums_path = bundle / "evidence" / CHECKSUM_NAME
+
+def verify_bundle(
+    bundle: Path, version: str, *, layout: str = INTERNAL_LAYOUT
+) -> dict[str, object]:
+    wheel, sdist, manifest_path, checksums_path = _bundle_files(bundle, version, layout)
     for path in (wheel, sdist, manifest_path, checksums_path):
         category = path_issue(path.name)
         if category is not None:
@@ -144,9 +164,15 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--bundle", type=Path, required=True)
     parser.add_argument("--expected-version", required=True)
+    parser.add_argument(
+        "--layout",
+        choices=(INTERNAL_LAYOUT, FLAT_LAYOUT),
+        default=INTERNAL_LAYOUT,
+        help="internal workflow bundle or flat GitHub Release download directory",
+    )
     args = parser.parse_args()
     try:
-        verify_bundle(args.bundle.resolve(), args.expected_version)
+        verify_bundle(args.bundle.resolve(), args.expected_version, layout=args.layout)
     except BundleVerificationError as exc:
         print(str(exc), file=sys.stderr)
         return 1

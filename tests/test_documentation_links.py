@@ -15,7 +15,11 @@ REFERENCE_LINK = re.compile(
 
 
 def _documentation_files() -> tuple[Path, ...]:
-    return (ROOT / "README.md", *sorted((ROOT / "docs").rglob("*.md")))
+    return (
+        ROOT / "README.md",
+        ROOT / "CONTRIBUTING.md",
+        *sorted((ROOT / "docs").rglob("*.md")),
+    )
 
 
 def _relative_targets(markdown: str) -> tuple[str, ...]:
@@ -48,6 +52,7 @@ def test_public_documentation_index_has_required_pages() -> None:
         "architecture.md",
         "dpl_and_run_manifest.md",
         "hero_session.md",
+        "releasing.md",
         "release_verification.md",
         "responsible_use.md",
     ):
