@@ -56,6 +56,13 @@ If the change affects packaging, entry points, or release verification, also run
 python -m pytest -p no:cacheprovider tests/test_release_artifacts.py tests/phase6/test_gate_b_v2_packaging.py
 ```
 
+## Maintainer releases
+
+Maintainers publishing a GitHub prerelease must follow the complete
+[release checklist](docs/releasing.md), including the required CI and review
+gates, the unchanged four-asset workflow bundle, and the post-publication flat
+download verification.
+
 Open an issue when the problem or proposed direction needs discussion. For a pull
 request, explain the motivation, summarize the focused change, and list the checks you
 ran. Update documentation and tests when behavior changes.

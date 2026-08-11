@@ -16,6 +16,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
+CURRENT_VERSION = "0.1.0a6"
 sys.path.insert(0, str(SCRIPTS))
 
 
@@ -63,7 +64,7 @@ def test_release_toolchains_are_fully_pinned_and_match_project_metadata() -> Non
         "wheel": "0.45.1",
     }
     assert project["build-system"]["requires"] == [f"setuptools=={build['setuptools']}"]
-    assert project["project"]["version"] == "0.1.0a5"
+    assert project["project"]["version"] == CURRENT_VERSION
     direct = {value.lower() for value in project["project"]["dependencies"]}
     assert "pydantic==2.11.7" in direct
     assert "pyyaml==6.0.2" in direct
@@ -106,6 +107,17 @@ def test_release_workflow_keeps_exact_python_and_offline_cross_platform_gates() 
         "Upload final four-file release bundle"
     )
     assert "Get-FileHash" not in workflow
+    final_verifier = (SCRIPTS / "verify_release_bundle.py").read_text(encoding="utf-8")
+    for forbidden in (
+        "subprocess",
+        "socket",
+        "urllib",
+        "requests",
+        "zipfile",
+        "tarfile",
+        "pip",
+    ):
+        assert forbidden not in final_verifier
 
 
 def test_sdist_document_contract_is_exact_and_wheel_package_data_stays_explicit(
@@ -114,6 +126,7 @@ def test_sdist_document_contract_is_exact_and_wheel_package_data_stays_explicit(
     tracked = {
         "CONTRIBUTING.md",
         "docs/README.md",
+        "docs/releasing.md",
         "docs/release_verification.md",
         "docs/not-public.txt",
         "src/experiments/README.md",
@@ -130,6 +143,7 @@ def test_sdist_document_contract_is_exact_and_wheel_package_data_stays_explicit(
     assert release._tracked_sdist_documents(ROOT) == {
         "CONTRIBUTING.md",
         "docs/README.md",
+        "docs/releasing.md",
         "docs/release_verification.md",
         "src/experiments/README.md",
         "src/poker_ai/README.md",
@@ -144,12 +158,13 @@ def test_sdist_document_contract_is_exact_and_wheel_package_data_stays_explicit(
 
 
 def test_release_verifier_checks_unpacked_documentation_links(tmp_path: Path) -> None:
-    project = tmp_path / "poker_xai-0.1.0a5"
+    project = tmp_path / f"poker_xai-{CURRENT_VERSION}"
     docs = project / "docs"
     component = project / "src" / "poker_core"
     docs.mkdir(parents=True)
     component.mkdir(parents=True)
     (project / "README.md").write_text("[Docs](docs/README.md)\n", encoding="utf-8")
+    (project / "CONTRIBUTING.md").write_text("[Docs](docs/README.md)\n", encoding="utf-8")
     (docs / "README.md").write_text("[Component](../src/poker_core/README.md)\n", encoding="utf-8")
     component_readme = component / "README.md"
     component_readme.write_text("# Component\n", encoding="utf-8")
@@ -168,15 +183,15 @@ def test_sdist_document_bytes_must_equal_the_tracked_git_blob(
     monkeypatch.setattr(release, "_tracked_top_level_sdist_tests", lambda _source: set())
     monkeypatch.setattr(release, "_tracked_sdist_documents", lambda _source: {"docs/README.md"})
     monkeypatch.setattr(release, "_git_blob", lambda _source, _path: b"tracked\n")
-    sdist = tmp_path / "poker_xai-0.1.0a5.tar.gz"
+    sdist = tmp_path / f"poker_xai-{CURRENT_VERSION}.tar.gz"
     with tarfile.open(sdist, mode="w:gz") as archive:
-        info = tarfile.TarInfo("poker_xai-0.1.0a5/docs/README.md")
+        info = tarfile.TarInfo(f"poker_xai-{CURRENT_VERSION}/docs/README.md")
         data = b"changed\n"
         info.size = len(data)
         archive.addfile(info, io.BytesIO(data))
 
     with pytest.raises(release.VerificationError, match="tracked-payload-byte-mismatch"):
-        release.verify_sdist(sdist, ROOT, "0.1.0a5")
+        release.verify_sdist(sdist, ROOT, CURRENT_VERSION)
 
 
 def test_sdist_rejects_generated_metadata_outside_the_exact_allowlist(
@@ -186,30 +201,30 @@ def test_sdist_rejects_generated_metadata_outside_the_exact_allowlist(
     monkeypatch.setattr(release, "_tracked_top_level_sdist_tests", lambda _source: set())
     monkeypatch.setattr(release, "_tracked_sdist_documents", lambda _source: set())
     monkeypatch.setattr(release, "_git_blob", lambda _source, _path: b"tracked\n")
-    sdist = tmp_path / "poker_xai-0.1.0a5.tar.gz"
+    sdist = tmp_path / f"poker_xai-{CURRENT_VERSION}.tar.gz"
     with tarfile.open(sdist, mode="w:gz") as archive:
         for relative in ("LICENSE", "MANIFEST.in", "README.md", "pyproject.toml"):
-            info = tarfile.TarInfo(f"poker_xai-0.1.0a5/{relative}")
+            info = tarfile.TarInfo(f"poker_xai-{CURRENT_VERSION}/{relative}")
             data = b"tracked\n"
             info.size = len(data)
             archive.addfile(info, io.BytesIO(data))
-        info = tarfile.TarInfo("poker_xai-0.1.0a5/src/poker_xai.egg-info/unexpected.txt")
+        info = tarfile.TarInfo(f"poker_xai-{CURRENT_VERSION}/src/poker_xai.egg-info/unexpected.txt")
         data = b"generated\n"
         info.size = len(data)
         archive.addfile(info, io.BytesIO(data))
 
     with pytest.raises(release.VerificationError, match="generated metadata allowlist"):
-        release.verify_sdist(sdist, ROOT, "0.1.0a5")
+        release.verify_sdist(sdist, ROOT, CURRENT_VERSION)
 
 
-def _release_bundle(tmp_path: Path) -> tuple[Path, Path, Path, Path, Path]:
-    release_bundle = tmp_path / "release-bundle"
-    dist = release_bundle / "dist"
-    evidence = release_bundle / "evidence"
+def _release_bundle(tmp_path: Path, layout: str) -> tuple[Path, Path, Path, Path, Path]:
+    staging = tmp_path / "fixture-staging"
+    dist = staging / "dist"
+    evidence = staging / "evidence"
     dist.mkdir(parents=True)
     evidence.mkdir()
-    wheel = dist / "poker_xai-0.1.0a5-py3-none-any.whl"
-    sdist = dist / "poker_xai-0.1.0a5.tar.gz"
+    wheel = dist / f"poker_xai-{CURRENT_VERSION}-py3-none-any.whl"
+    sdist = dist / f"poker_xai-{CURRENT_VERSION}.tar.gz"
     wheel.write_bytes(b"wheel\n")
     sdist.write_bytes(b"sdist\n")
 
@@ -221,7 +236,7 @@ def _release_bundle(tmp_path: Path) -> tuple[Path, Path, Path, Path, Path]:
         json.dumps(
             {
                 "distribution": "poker-xai",
-                "version": "0.1.0a5",
+                "version": CURRENT_VERSION,
                 "source_commit": "a" * 40,
                 "artifacts": {wheel.name: digest(wheel), sdist.name: digest(sdist)},
                 "reproducible": True,
@@ -248,34 +263,134 @@ def _release_bundle(tmp_path: Path) -> tuple[Path, Path, Path, Path, Path]:
         encoding="utf-8",
     )
     checksum = evidence / "SHA256SUMS"
-    checksums.write_checksums(dist, manifest, checksum, "0.1.0a5")
-    return release_bundle, wheel, sdist, manifest, checksum
+    checksums.write_checksums(dist, manifest, checksum, CURRENT_VERSION)
+
+    if layout == bundle.INTERNAL_LAYOUT:
+        return staging, wheel, sdist, manifest, checksum
+    if layout != bundle.FLAT_LAYOUT:
+        raise AssertionError(f"unsupported test layout: {layout}")
+
+    release_bundle = tmp_path / "release-bundle"
+    release_bundle.mkdir()
+    flattened = []
+    for path in (wheel, sdist, manifest, checksum):
+        flattened.append(path.replace(release_bundle / path.name))
+    evidence.rmdir()
+    dist.rmdir()
+    staging.rmdir()
+    return release_bundle, *flattened
 
 
-def test_final_release_bundle_is_exact_self_verifying_four_file_set(tmp_path: Path) -> None:
-    release_bundle, wheel, sdist, manifest, checksum = _release_bundle(tmp_path)
+def _rewrite_checksums(wheel: Path, sdist: Path, manifest: Path, checksum: Path) -> None:
+    candidates = sorted((wheel, sdist, manifest), key=lambda path: path.name)
+    checksum.write_text(
+        "".join(
+            f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n" for path in candidates
+        ),
+        encoding="ascii",
+        newline="\n",
+    )
 
-    result = bundle.verify_bundle(release_bundle, "0.1.0a5")
 
-    assert result["version"] == "0.1.0a5"
+def _file_bytes(root: Path) -> dict[str, bytes]:
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+
+
+@pytest.mark.parametrize("layout", [bundle.INTERNAL_LAYOUT, bundle.FLAT_LAYOUT])
+def test_final_release_bundle_is_exact_self_verifying_four_file_set(
+    tmp_path: Path, layout: str
+) -> None:
+    release_bundle, wheel, sdist, manifest, checksum = _release_bundle(tmp_path, layout)
+    before = _file_bytes(release_bundle)
+
+    result = bundle.verify_bundle(release_bundle, CURRENT_VERSION, layout=layout)
+
+    assert _file_bytes(release_bundle) == before
+    assert result["version"] == CURRENT_VERSION
     checksum_names = {line.split("  ", 1)[1] for line in checksum.read_text().splitlines()}
     assert checksum_names == {wheel.name, sdist.name, manifest.name}
     assert all("/" not in name and "\\" not in name for name in checksum_names)
+
+
+def test_internal_checksum_writer_does_not_replace_final_evidence(tmp_path: Path) -> None:
+    release_bundle, _, _, manifest, checksum = _release_bundle(tmp_path, bundle.INTERNAL_LAYOUT)
     with pytest.raises(checksums.ChecksumError, match="already exists"):
-        checksums.write_checksums(release_bundle / "dist", manifest, checksum, "0.1.0a5")
+        checksums.write_checksums(release_bundle / "dist", manifest, checksum, CURRENT_VERSION)
 
 
-def test_final_release_bundle_rejects_extra_or_changed_assets(tmp_path: Path) -> None:
-    release_bundle, wheel, *_ = _release_bundle(tmp_path)
-    extra = release_bundle / "evidence" / "extra.txt"
+@pytest.mark.parametrize("layout", [bundle.INTERNAL_LAYOUT, bundle.FLAT_LAYOUT])
+def test_release_bundle_rejects_missing_asset(tmp_path: Path, layout: str) -> None:
+    release_bundle, _, _, manifest, _ = _release_bundle(tmp_path, layout)
+    manifest.unlink()
+    with pytest.raises(bundle.BundleVerificationError, match="exact-four-file-allowlist"):
+        bundle.verify_bundle(release_bundle, CURRENT_VERSION, layout=layout)
+
+
+@pytest.mark.parametrize("layout", [bundle.INTERNAL_LAYOUT, bundle.FLAT_LAYOUT])
+def test_release_bundle_rejects_extra_asset(tmp_path: Path, layout: str) -> None:
+    release_bundle, *_ = _release_bundle(tmp_path, layout)
+    extra = release_bundle / "extra.txt"
     extra.write_text("extra\n", encoding="utf-8")
     with pytest.raises(bundle.BundleVerificationError, match="exact-four-file-allowlist"):
-        bundle.verify_bundle(release_bundle, "0.1.0a5")
+        bundle.verify_bundle(release_bundle, CURRENT_VERSION, layout=layout)
 
-    extra.unlink()
+
+@pytest.mark.parametrize("layout", [bundle.INTERNAL_LAYOUT, bundle.FLAT_LAYOUT])
+def test_release_bundle_rejects_checksum_mismatch(tmp_path: Path, layout: str) -> None:
+    release_bundle, wheel, *_ = _release_bundle(tmp_path, layout)
     wheel.write_bytes(b"changed\n")
     with pytest.raises(bundle.BundleVerificationError, match="checksum-mismatch"):
-        bundle.verify_bundle(release_bundle, "0.1.0a5")
+        bundle.verify_bundle(release_bundle, CURRENT_VERSION, layout=layout)
+
+
+@pytest.mark.parametrize("layout", [bundle.INTERNAL_LAYOUT, bundle.FLAT_LAYOUT])
+def test_release_bundle_rejects_manifest_mismatch(tmp_path: Path, layout: str) -> None:
+    release_bundle, wheel, sdist, manifest, checksum = _release_bundle(tmp_path, layout)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["offline_smoke"] = False
+    manifest.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _rewrite_checksums(wheel, sdist, manifest, checksum)
+    with pytest.raises(bundle.BundleVerificationError, match="manifest-offline-smoke"):
+        bundle.verify_bundle(release_bundle, CURRENT_VERSION, layout=layout)
+
+
+@pytest.mark.parametrize("layout", [bundle.INTERNAL_LAYOUT, bundle.FLAT_LAYOUT])
+def test_release_bundle_rejects_checksum_self_target(tmp_path: Path, layout: str) -> None:
+    release_bundle, _, _, manifest, checksum = _release_bundle(tmp_path, layout)
+    lines = checksum.read_text(encoding="ascii").splitlines()
+    manifest_index = next(
+        index for index, line in enumerate(lines) if line.endswith(f"  {manifest.name}")
+    )
+    digest = lines[manifest_index].split("  ", 1)[0]
+    lines[manifest_index] = f"{digest}  {checksum.name}"
+    checksum.write_text("\n".join(lines) + "\n", encoding="ascii", newline="\n")
+    with pytest.raises(bundle.BundleVerificationError, match="checksum-asset-allowlist"):
+        bundle.verify_bundle(release_bundle, CURRENT_VERSION, layout=layout)
+
+
+def test_flat_release_bundle_cli_uses_the_same_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    release_bundle, *_ = _release_bundle(tmp_path, bundle.FLAT_LAYOUT)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "verify_release_bundle.py",
+            "--bundle",
+            str(release_bundle),
+            "--layout",
+            bundle.FLAT_LAYOUT,
+            "--expected-version",
+            CURRENT_VERSION,
+        ],
+    )
+    assert bundle.main() == 0
+    assert capsys.readouterr().out == "release bundle verification: passed\n"
 
 
 @pytest.mark.parametrize(
@@ -319,14 +434,14 @@ def test_publication_content_policy_covers_high_confidence_credentials(
 
 
 def test_distribution_directory_must_contain_only_wheel_and_sdist(tmp_path: Path) -> None:
-    wheel = tmp_path / "poker_xai-0.1.0a5-py3-none-any.whl"
-    sdist = tmp_path / "poker_xai-0.1.0a5.tar.gz"
+    wheel = tmp_path / f"poker_xai-{CURRENT_VERSION}-py3-none-any.whl"
+    sdist = tmp_path / f"poker_xai-{CURRENT_VERSION}.tar.gz"
     wheel.touch()
     sdist.touch()
-    assert release._distribution_files(tmp_path, "0.1.0a5") == (wheel, sdist)
+    assert release._distribution_files(tmp_path, CURRENT_VERSION) == (wheel, sdist)
     (tmp_path / "temporary.tmp").touch()
     with pytest.raises(release.VerificationError, match="exactly one expected wheel"):
-        release._distribution_files(tmp_path, "0.1.0a5")
+        release._distribution_files(tmp_path, CURRENT_VERSION)
 
 
 def test_sdist_normalization_is_byte_reproducible(tmp_path: Path) -> None:
@@ -334,7 +449,7 @@ def test_sdist_normalization_is_byte_reproducible(tmp_path: Path) -> None:
     for index in range(2):
         path = tmp_path / f"input-{index}.tar.gz"
         with tarfile.open(path, mode="w:gz") as archive:
-            info = tarfile.TarInfo("poker_xai-0.1.0a5/module.py")
+            info = tarfile.TarInfo(f"poker_xai-{CURRENT_VERSION}/module.py")
             data = b"VALUE = 1\n"
             info.size = len(data)
             info.mtime = 100 + index
@@ -352,7 +467,7 @@ def test_wheel_rejects_unsafe_empty_directory(
     with zipfile.ZipFile(wheel, mode="w") as archive:
         archive.writestr("pkg/__pycache__/", b"")
     with pytest.raises(release.VerificationError, match="local-or-build-path"):
-        release.verify_wheel(wheel, ROOT, "0.1.0a5")
+        release.verify_wheel(wheel, ROOT, CURRENT_VERSION)
 
 
 def test_sdist_rejects_unsafe_empty_directory(
@@ -361,14 +476,14 @@ def test_sdist_rejects_unsafe_empty_directory(
     monkeypatch.setattr(release, "_tracked_payload", lambda _source: set())
     sdist = tmp_path / "unsafe.tar.gz"
     with tarfile.open(sdist, mode="w:gz") as archive:
-        root = tarfile.TarInfo("poker_xai-0.1.0a5")
+        root = tarfile.TarInfo(f"poker_xai-{CURRENT_VERSION}")
         root.type = tarfile.DIRTYPE
         archive.addfile(root)
-        unsafe = tarfile.TarInfo("poker_xai-0.1.0a5/build")
+        unsafe = tarfile.TarInfo(f"poker_xai-{CURRENT_VERSION}/build")
         unsafe.type = tarfile.DIRTYPE
         archive.addfile(unsafe)
     with pytest.raises(release.VerificationError, match="local-or-build-path"):
-        release.verify_sdist(sdist, ROOT, "0.1.0a5")
+        release.verify_sdist(sdist, ROOT, CURRENT_VERSION)
 
 
 def test_wheel_payload_must_equal_the_tracked_git_blob(
@@ -380,4 +495,4 @@ def test_wheel_payload_must_equal_the_tracked_git_blob(
     with zipfile.ZipFile(wheel, mode="w") as archive:
         archive.writestr("module.py", b"transformed\n")
     with pytest.raises(release.VerificationError, match="tracked-payload-byte-mismatch"):
-        release.verify_wheel(wheel, ROOT, "0.1.0a5")
+        release.verify_wheel(wheel, ROOT, CURRENT_VERSION)

@@ -173,7 +173,11 @@ def _relative_documentation_targets(markdown: str) -> tuple[str, ...]:
 
 def verify_documentation_links(project: Path) -> None:
     root = project.resolve()
-    documents = (root / "README.md", *sorted((root / "docs").rglob("*.md")))
+    documents = (
+        root / "README.md",
+        root / "CONTRIBUTING.md",
+        *sorted((root / "docs").rglob("*.md")),
+    )
     if not documents or any(not document.is_file() for document in documents):
         _fail("documentation", "documentation-file-missing")
     for document in documents:

@@ -193,6 +193,7 @@ release attaches only the wheel, sdist, `artifact-manifest.json`, and
 Before using a release, follow the [GitHub Release verification
 guide](docs/release_verification.md) to confirm the exact four uploaded assets,
 their checksums, and the recorded offline smoke results without installing them.
+Maintainers should use the complete [GitHub prerelease checklist](docs/releasing.md).
 
 ## License
 

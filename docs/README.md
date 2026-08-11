@@ -14,6 +14,8 @@ scope and development status.
   current safety and solver limitations.
 - [GitHub Release verification](release_verification.md) explains how to obtain
   and check the exact four release assets without installing them.
+- [Maintainer release checklist](releasing.md) covers version update, review,
+  tagging, manual workflow approval, prerelease publication, and re-verification.
 
 Generated JSON Schemas are not checked in. Maintainers can generate them with
 `python cli/export_schemas.py --out-dir docs/schemas`; the Pydantic models remain
