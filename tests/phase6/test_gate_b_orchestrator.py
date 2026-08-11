@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import ast
 import copy
-import importlib.metadata
 import inspect
 import io
 import json
@@ -14,6 +13,7 @@ import stat
 import sys
 import sysconfig
 import textwrap
+import tomllib
 from collections.abc import Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -3186,6 +3186,9 @@ def _real_dependency_lock(repository_root: Path) -> dict[str, object]:
         purelib = Path(sysconfig.get_path("purelib")).resolve()
         pyvenv = (Path(sys.prefix) / "pyvenv.cfg").resolve()
     project_name = "poker-xai"
+    project_version = tomllib.loads(
+        (repository_root / "pyproject.toml").read_text(encoding="utf-8")
+    )["project"]["version"]
     return {
         "schema_version": DEPENDENCY_LOCK_SCHEMA_VERSION,
         "lock_scope": "complete-installed-environment-snapshot",
@@ -3195,7 +3198,7 @@ def _real_dependency_lock(repository_root: Path) -> dict[str, object]:
             "name": project_name,
             "repository_path": ".",
             "source": "repository",
-            "version": importlib.metadata.version(project_name),
+            "version": project_version,
         },
         "python": {
             "base_executable_path": str(base_executable),
