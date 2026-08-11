@@ -1,6 +1,18 @@
-# docs
+# poker-xai documentation
 
-Public-facing documentation: architecture, the DPL / Reason Ontology contracts,
-tutorials and `responsible_use.md`. Generated JSON Schemas are written to
-`docs/schemas/` by `python cli/export_schemas.py`. Placeholder until the
-contracts are documented in prose (Phase 0+).
+This is the public documentation index for the simulation-only `poker-xai`
+research framework. Start with the repository [README](../README.md) for project
+scope and development status.
+
+- [Architecture](architecture.md) describes the current component boundaries and
+  the normal Hero-session data flow.
+- [DPL and RunManifest contracts](dpl_and_run_manifest.md) explains DPL v1/v2
+  loading compatibility, current DPL v3 writes, and the RunManifest audit record.
+- [Normal Hero session tutorial](hero_session.md) covers `--version`, `--help`, a
+  minimal offline session, its output bundle, and the legacy source wrapper.
+- [Responsible use](responsible_use.md) records the intended research use and the
+  current safety and solver limitations.
+
+Generated JSON Schemas are not checked in. Maintainers can generate them with
+`python cli/export_schemas.py --out-dir docs/schemas`; the Pydantic models remain
+the canonical validators for cross-field semantics.

@@ -19,7 +19,7 @@ from poker_ai.leak import (
     LeakDetectorConfig,
     leaky_fixture_action_baseline_table,
 )
-from poker_ai.runtime_provenance import collect_runtime_provenance
+from poker_ai.runtime_provenance import collect_runtime_provenance, resolve_package_version
 from poker_ai.session import run_session, write_session_bundle
 
 CONSOLE_ENTRYPOINT = "poker-xai-run-session"
@@ -47,8 +47,14 @@ class _LeakyFixtureExploitProvider:
         return RuleExploitResult(policy=dict(base_policy))
 
 
-def _parser() -> argparse.ArgumentParser:
+def _parser(*, entrypoint: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"{entrypoint} {resolve_package_version()}",
+        help="show the executing poker-xai distribution version and exit",
+    )
     parser.add_argument(
         "--seed", type=int, default=20260704, help="master seed (default: 20260704)"
     )
@@ -99,7 +105,7 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None, *, entrypoint: str = CONSOLE_ENTRYPOINT) -> int:
     """Run a normal Hero session and record the exact invocation provenance."""
     raw_argv = list(sys.argv[1:] if argv is None else argv)
-    args = _parser().parse_args(raw_argv)
+    args = _parser(entrypoint=entrypoint).parse_args(raw_argv)
 
     safety_alpha = (
         args.safety_alpha if args.safety_alpha is not None else (1.0 if args.leaky_fixture else 0.0)
