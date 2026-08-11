@@ -116,9 +116,16 @@ production data.
 
 ## Status
 
-Early development. Phase 0 (frozen contracts) lives in `src/poker_core`:
-the DPL schema, the Reason Ontology and the RunManifest. Other packages are
-placeholders filled in over later phases.
+Early alpha, simulation-only development. The frozen core contracts now use DPL
+v3 with read-only DPL v1/v2 loading compatibility, alongside the Reason Ontology
+and RunManifest. Normal Hero sessions use CFR+ to produce exact combo- and
+position-specific `vs_bet` policies for facing-all-in river decisions; the
+default is 40 iterations, average delay 0, and no checkpoints, with the observed
+all-in bet matched to the solver bet size. Leak detection, SafetyMixer,
+opponent-synthesis/node-lock, template explanation, and Phase 6 evaluation and
+Gate B v2 contracts are implemented. The river adapter remains limited to
+facing an all-in, has a higher computation cost than the retained stub, and 40
+iterations is not a convergence guarantee.
 
 ## Responsible use
 
