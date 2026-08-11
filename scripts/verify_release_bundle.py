@@ -22,6 +22,7 @@ SMOKE_CHECKS = [
     "minimal-session",
     "manifest-round-trip",
     "entry-point-metadata",
+    "documentation-relative-links",
 ]
 
 

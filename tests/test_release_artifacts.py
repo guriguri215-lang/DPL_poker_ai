@@ -10,6 +10,7 @@ import tarfile
 import tomllib
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -62,7 +63,7 @@ def test_release_toolchains_are_fully_pinned_and_match_project_metadata() -> Non
         "wheel": "0.45.1",
     }
     assert project["build-system"]["requires"] == [f"setuptools=={build['setuptools']}"]
-    assert project["project"]["version"] == "0.1.0a4"
+    assert project["project"]["version"] == "0.1.0a5"
     direct = {value.lower() for value in project["project"]["dependencies"]}
     assert "pydantic==2.11.7" in direct
     assert "pyyaml==6.0.2" in direct
@@ -98,6 +99,7 @@ def test_release_workflow_keeps_exact_python_and_offline_cross_platform_gates() 
     assert "manifest.code.package_version" in verifier
     assert "loaded['poker-xai-run-session'](['--version'])" in verifier
     assert "source-checkout" in verifier
+    assert "verify_documentation_links(documentation_root)" in verifier
     assert workflow.count("verify_release_bundle.py") == 3
     assert "control/scripts/write_release_checksums.py" in workflow
     assert workflow.index("Verify final four-file release bundle") < workflow.index(
@@ -106,14 +108,108 @@ def test_release_workflow_keeps_exact_python_and_offline_cross_platform_gates() 
     assert "Get-FileHash" not in workflow
 
 
+def test_sdist_document_contract_is_exact_and_wheel_package_data_stays_explicit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tracked = {
+        "CONTRIBUTING.md",
+        "docs/README.md",
+        "docs/release_verification.md",
+        "docs/not-public.txt",
+        "src/experiments/README.md",
+        "src/poker_ai/README.md",
+        "src/poker_ai/notes.md",
+    }
+    stdout = b"\0".join(path.encode() for path in sorted(tracked)) + b"\0"
+    monkeypatch.setattr(
+        release.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=stdout),
+    )
+
+    assert release._tracked_sdist_documents(ROOT) == {
+        "CONTRIBUTING.md",
+        "docs/README.md",
+        "docs/release_verification.md",
+        "src/experiments/README.md",
+        "src/poker_ai/README.md",
+    }
+    assert (ROOT / "MANIFEST.in").read_text(encoding="utf-8").splitlines() == [
+        "include CONTRIBUTING.md",
+        "recursive-include docs *.md",
+        "recursive-include src README.md",
+    ]
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert project["tool"]["setuptools"]["include-package-data"] is False
+
+
+def test_release_verifier_checks_unpacked_documentation_links(tmp_path: Path) -> None:
+    project = tmp_path / "poker_xai-0.1.0a5"
+    docs = project / "docs"
+    component = project / "src" / "poker_core"
+    docs.mkdir(parents=True)
+    component.mkdir(parents=True)
+    (project / "README.md").write_text("[Docs](docs/README.md)\n", encoding="utf-8")
+    (docs / "README.md").write_text("[Component](../src/poker_core/README.md)\n", encoding="utf-8")
+    component_readme = component / "README.md"
+    component_readme.write_text("# Component\n", encoding="utf-8")
+
+    release.verify_documentation_links(project)
+
+    component_readme.unlink()
+    with pytest.raises(release.VerificationError, match="documentation-link-missing"):
+        release.verify_documentation_links(project)
+
+
+def test_sdist_document_bytes_must_equal_the_tracked_git_blob(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(release, "_tracked_payload", lambda _source: set())
+    monkeypatch.setattr(release, "_tracked_top_level_sdist_tests", lambda _source: set())
+    monkeypatch.setattr(release, "_tracked_sdist_documents", lambda _source: {"docs/README.md"})
+    monkeypatch.setattr(release, "_git_blob", lambda _source, _path: b"tracked\n")
+    sdist = tmp_path / "poker_xai-0.1.0a5.tar.gz"
+    with tarfile.open(sdist, mode="w:gz") as archive:
+        info = tarfile.TarInfo("poker_xai-0.1.0a5/docs/README.md")
+        data = b"changed\n"
+        info.size = len(data)
+        archive.addfile(info, io.BytesIO(data))
+
+    with pytest.raises(release.VerificationError, match="tracked-payload-byte-mismatch"):
+        release.verify_sdist(sdist, ROOT, "0.1.0a5")
+
+
+def test_sdist_rejects_generated_metadata_outside_the_exact_allowlist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(release, "_tracked_payload", lambda _source: set())
+    monkeypatch.setattr(release, "_tracked_top_level_sdist_tests", lambda _source: set())
+    monkeypatch.setattr(release, "_tracked_sdist_documents", lambda _source: set())
+    monkeypatch.setattr(release, "_git_blob", lambda _source, _path: b"tracked\n")
+    sdist = tmp_path / "poker_xai-0.1.0a5.tar.gz"
+    with tarfile.open(sdist, mode="w:gz") as archive:
+        for relative in ("LICENSE", "MANIFEST.in", "README.md", "pyproject.toml"):
+            info = tarfile.TarInfo(f"poker_xai-0.1.0a5/{relative}")
+            data = b"tracked\n"
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+        info = tarfile.TarInfo("poker_xai-0.1.0a5/src/poker_xai.egg-info/unexpected.txt")
+        data = b"generated\n"
+        info.size = len(data)
+        archive.addfile(info, io.BytesIO(data))
+
+    with pytest.raises(release.VerificationError, match="generated metadata allowlist"):
+        release.verify_sdist(sdist, ROOT, "0.1.0a5")
+
+
 def _release_bundle(tmp_path: Path) -> tuple[Path, Path, Path, Path, Path]:
     release_bundle = tmp_path / "release-bundle"
     dist = release_bundle / "dist"
     evidence = release_bundle / "evidence"
     dist.mkdir(parents=True)
     evidence.mkdir()
-    wheel = dist / "poker_xai-0.1.0a4-py3-none-any.whl"
-    sdist = dist / "poker_xai-0.1.0a4.tar.gz"
+    wheel = dist / "poker_xai-0.1.0a5-py3-none-any.whl"
+    sdist = dist / "poker_xai-0.1.0a5.tar.gz"
     wheel.write_bytes(b"wheel\n")
     sdist.write_bytes(b"sdist\n")
 
@@ -125,7 +221,7 @@ def _release_bundle(tmp_path: Path) -> tuple[Path, Path, Path, Path, Path]:
         json.dumps(
             {
                 "distribution": "poker-xai",
-                "version": "0.1.0a4",
+                "version": "0.1.0a5",
                 "source_commit": "a" * 40,
                 "artifacts": {wheel.name: digest(wheel), sdist.name: digest(sdist)},
                 "reproducible": True,
@@ -142,6 +238,7 @@ def _release_bundle(tmp_path: Path) -> tuple[Path, Path, Path, Path, Path]:
                     "minimal-session",
                     "manifest-round-trip",
                     "entry-point-metadata",
+                    "documentation-relative-links",
                 ],
             },
             indent=2,
@@ -151,21 +248,21 @@ def _release_bundle(tmp_path: Path) -> tuple[Path, Path, Path, Path, Path]:
         encoding="utf-8",
     )
     checksum = evidence / "SHA256SUMS"
-    checksums.write_checksums(dist, manifest, checksum, "0.1.0a4")
+    checksums.write_checksums(dist, manifest, checksum, "0.1.0a5")
     return release_bundle, wheel, sdist, manifest, checksum
 
 
 def test_final_release_bundle_is_exact_self_verifying_four_file_set(tmp_path: Path) -> None:
     release_bundle, wheel, sdist, manifest, checksum = _release_bundle(tmp_path)
 
-    result = bundle.verify_bundle(release_bundle, "0.1.0a4")
+    result = bundle.verify_bundle(release_bundle, "0.1.0a5")
 
-    assert result["version"] == "0.1.0a4"
+    assert result["version"] == "0.1.0a5"
     checksum_names = {line.split("  ", 1)[1] for line in checksum.read_text().splitlines()}
     assert checksum_names == {wheel.name, sdist.name, manifest.name}
     assert all("/" not in name and "\\" not in name for name in checksum_names)
     with pytest.raises(checksums.ChecksumError, match="already exists"):
-        checksums.write_checksums(release_bundle / "dist", manifest, checksum, "0.1.0a4")
+        checksums.write_checksums(release_bundle / "dist", manifest, checksum, "0.1.0a5")
 
 
 def test_final_release_bundle_rejects_extra_or_changed_assets(tmp_path: Path) -> None:
@@ -173,12 +270,12 @@ def test_final_release_bundle_rejects_extra_or_changed_assets(tmp_path: Path) ->
     extra = release_bundle / "evidence" / "extra.txt"
     extra.write_text("extra\n", encoding="utf-8")
     with pytest.raises(bundle.BundleVerificationError, match="exact-four-file-allowlist"):
-        bundle.verify_bundle(release_bundle, "0.1.0a4")
+        bundle.verify_bundle(release_bundle, "0.1.0a5")
 
     extra.unlink()
     wheel.write_bytes(b"changed\n")
     with pytest.raises(bundle.BundleVerificationError, match="checksum-mismatch"):
-        bundle.verify_bundle(release_bundle, "0.1.0a4")
+        bundle.verify_bundle(release_bundle, "0.1.0a5")
 
 
 @pytest.mark.parametrize(
@@ -222,14 +319,14 @@ def test_publication_content_policy_covers_high_confidence_credentials(
 
 
 def test_distribution_directory_must_contain_only_wheel_and_sdist(tmp_path: Path) -> None:
-    wheel = tmp_path / "poker_xai-0.1.0a4-py3-none-any.whl"
-    sdist = tmp_path / "poker_xai-0.1.0a4.tar.gz"
+    wheel = tmp_path / "poker_xai-0.1.0a5-py3-none-any.whl"
+    sdist = tmp_path / "poker_xai-0.1.0a5.tar.gz"
     wheel.touch()
     sdist.touch()
-    assert release._distribution_files(tmp_path, "0.1.0a4") == (wheel, sdist)
+    assert release._distribution_files(tmp_path, "0.1.0a5") == (wheel, sdist)
     (tmp_path / "temporary.tmp").touch()
     with pytest.raises(release.VerificationError, match="exactly one expected wheel"):
-        release._distribution_files(tmp_path, "0.1.0a4")
+        release._distribution_files(tmp_path, "0.1.0a5")
 
 
 def test_sdist_normalization_is_byte_reproducible(tmp_path: Path) -> None:
@@ -237,7 +334,7 @@ def test_sdist_normalization_is_byte_reproducible(tmp_path: Path) -> None:
     for index in range(2):
         path = tmp_path / f"input-{index}.tar.gz"
         with tarfile.open(path, mode="w:gz") as archive:
-            info = tarfile.TarInfo("poker_xai-0.1.0a4/module.py")
+            info = tarfile.TarInfo("poker_xai-0.1.0a5/module.py")
             data = b"VALUE = 1\n"
             info.size = len(data)
             info.mtime = 100 + index
@@ -255,7 +352,7 @@ def test_wheel_rejects_unsafe_empty_directory(
     with zipfile.ZipFile(wheel, mode="w") as archive:
         archive.writestr("pkg/__pycache__/", b"")
     with pytest.raises(release.VerificationError, match="local-or-build-path"):
-        release.verify_wheel(wheel, ROOT, "0.1.0a4")
+        release.verify_wheel(wheel, ROOT, "0.1.0a5")
 
 
 def test_sdist_rejects_unsafe_empty_directory(
@@ -264,14 +361,14 @@ def test_sdist_rejects_unsafe_empty_directory(
     monkeypatch.setattr(release, "_tracked_payload", lambda _source: set())
     sdist = tmp_path / "unsafe.tar.gz"
     with tarfile.open(sdist, mode="w:gz") as archive:
-        root = tarfile.TarInfo("poker_xai-0.1.0a4")
+        root = tarfile.TarInfo("poker_xai-0.1.0a5")
         root.type = tarfile.DIRTYPE
         archive.addfile(root)
-        unsafe = tarfile.TarInfo("poker_xai-0.1.0a4/build")
+        unsafe = tarfile.TarInfo("poker_xai-0.1.0a5/build")
         unsafe.type = tarfile.DIRTYPE
         archive.addfile(unsafe)
     with pytest.raises(release.VerificationError, match="local-or-build-path"):
-        release.verify_sdist(sdist, ROOT, "0.1.0a4")
+        release.verify_sdist(sdist, ROOT, "0.1.0a5")
 
 
 def test_wheel_payload_must_equal_the_tracked_git_blob(
@@ -283,4 +380,4 @@ def test_wheel_payload_must_equal_the_tracked_git_blob(
     with zipfile.ZipFile(wheel, mode="w") as archive:
         archive.writestr("module.py", b"transformed\n")
     with pytest.raises(release.VerificationError, match="tracked-payload-byte-mismatch"):
-        release.verify_wheel(wheel, ROOT, "0.1.0a4")
+        release.verify_wheel(wheel, ROOT, "0.1.0a5")
