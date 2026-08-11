@@ -34,6 +34,18 @@ def test_unknown_git_commit_sentinel_allowed(valid_manifest):
     assert manifest.code.git_commit == "unknown"
 
 
+def test_unknown_dirty_state_round_trips_as_null(valid_manifest):
+    valid_manifest["code"]["git_dirty"] = None
+    manifest = RunManifest.model_validate(valid_manifest)
+    assert manifest.code.git_dirty is None
+    assert RunManifest.model_validate_json(manifest.model_dump_json()) == manifest
+
+
+def test_omitted_dirty_state_keeps_legacy_false_default(valid_manifest):
+    del valid_manifest["code"]["git_dirty"]
+    assert RunManifest.model_validate(valid_manifest).code.git_dirty is False
+
+
 def test_entrypoint_required(valid_manifest):
     del valid_manifest["code"]["entrypoint"]
     with pytest.raises(ValidationError):

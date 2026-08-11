@@ -47,9 +47,14 @@ LLM layer remain separate later-phase concerns.
   DPLs and a `RunManifest`, and writes JSONL + manifest under a gitignored output
   directory.
 
-Run it: `python cli/run_session.py --seed 20260704 --hands 200` (CFR+ defaults:
-`--solver-iterations 40 --solver-average-delay 0`).
-To exercise a positive safety mix: `python cli/run_session.py --safety-alpha 0.5`.
+Run the distributed CLI with
+`poker-xai-run-session --seed 20260704 --hands 200` (CFR+ defaults:
+`--solver-iterations 40 --solver-average-delay 0`). The compatible source-tree
+wrapper remains `python cli/run_session.py --seed 20260704 --hands 200`.
+To exercise a positive safety mix: `poker-xai-run-session --safety-alpha 0.5`.
+Both paths use the packaged `poker_ai.run_session_cli` implementation and record
+their actual entrypoint, raw arguments, package version, and anchored-or-unknown
+Git provenance in the RunManifest.
 
 ## Frozen at 0.1.0 (Q3 / Q4 / Q5)
 

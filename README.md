@@ -52,6 +52,38 @@ report or discuss work, and submit changes through
 [Pull requests](https://github.com/guriguri215-lang/DPL_poker_ai/pulls).
 Please keep pull requests small and focused so they are easy to review and verify.
 
+## Normal Hero session CLI
+
+The distributed command runs the normal simulated Hero session and writes DPL
+v3 JSONL plus its RunManifest sidecar:
+
+```bash
+poker-xai-run-session --seed 20260704 --hands 5 --out-dir experiments_output/quickstart
+```
+
+The historical source-checkout command is a compatibility wrapper around the
+same packaged module:
+
+```bash
+python cli/run_session.py --seed 20260704 --hands 5 --out-dir experiments_output/quickstart
+```
+
+RunManifest provenance follows an explicit no-guessing contract. When the
+executing module is the exact `src/poker_ai` tree, the package version comes
+from that project's `pyproject.toml`; its Git commit and dirty state are read
+only when Git confirms the same project root. An installed or unpacked wheel
+uses only distribution metadata that locates the executing module. An unpacked
+sdist likewise uses its own `pyproject.toml`. If version metadata is unavailable,
+`package_version` is `unknown`; outside a confirmed Git source checkout,
+`git_commit` is `unknown` and `git_dirty` is `null`. The current working
+directory and unrelated installations are never used as substitutes.
+
+The manifest records `poker-xai-run-session` or `cli/run_session.py` as the
+actual entrypoint and preserves the complete argument vector after the
+entrypoint, before argument parsing. The normal river adapter is limited to
+facing an all-in. CFR+ defaults to 40 iterations, which is not a convergence
+guarantee.
+
 ## Gate B v2 one-shot CLI
 
 The Windows-only Gate B v2 production route is started by the repository

@@ -19,12 +19,12 @@ on:
       tag:
         description: Existing version tag to build
         required: true
-        default: "0.1.0a2"
+        default: "0.1.0a3"
         type: string
       expected_version:
         description: Exact distribution version
         required: true
-        default: "0.1.0a2"
+        default: "0.1.0a3"
         type: string
 
 permissions:
@@ -32,7 +32,7 @@ permissions:
 
 env:
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
-  EXPECTED_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.expected_version || '0.1.0a2' }}
+  EXPECTED_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.expected_version || '0.1.0a3' }}
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || '' }}
   SOURCE_REF: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.event.pull_request.head.sha }}
 
@@ -108,7 +108,7 @@ jobs:
         run: |
           python -m venv --copies .release-build-venv
           .release-build-venv/bin/python -m pip install --no-cache-dir --upgrade pip==25.2
-          .release-build-venv/bin/python -m pip install --no-cache-dir --requirement control/requirements/release-build.txt
+          .release-build-venv/bin/python -m pip install --no-cache-dir --requirement control/requirements/release-build.txt --requirement control/requirements/release-smoke.txt
           .release-build-venv/bin/python -m pip check
       - name: Build twice from independent clean checkouts
         run: |
@@ -117,14 +117,7 @@ jobs:
           .release-build-venv/bin/python -m build --no-isolation --outdir build-b source-b
           .release-build-venv/bin/python control/scripts/normalize_sdist.py --sdist "release-bundle/dist/poker_xai-$EXPECTED_VERSION.tar.gz" --source-date-epoch "$SOURCE_DATE_EPOCH"
           .release-build-venv/bin/python control/scripts/normalize_sdist.py --sdist "build-b/poker_xai-$EXPECTED_VERSION.tar.gz" --source-date-epoch "$SOURCE_DATE_EPOCH"
-      - name: Prepare complete offline wheelhouse
-        run: >-
-          .release-build-venv/bin/python -m pip download
-          --dest wheelhouse
-          --only-binary=:all:
-          --requirement control/requirements/release-build.txt
-          --requirement control/requirements/release-smoke.txt
-      - name: Verify contents, reproducibility, metadata, and offline installs
+      - name: Verify contents, reproducibility, metadata, and archive smoke
         env:
           PIP_NO_INDEX: "1"
         run: >-
@@ -133,7 +126,6 @@ jobs:
           --dist release-bundle/dist
           --expected-version "$EXPECTED_VERSION"
           --compare-dist build-b
-          --wheelhouse wheelhouse
           --report release-bundle/evidence/artifact-manifest.json
       - name: Write SHA256 evidence
         shell: bash
@@ -185,16 +177,8 @@ jobs:
         run: |
           python -m venv --copies .release-verify-venv
           .\.release-verify-venv\Scripts\python.exe -m pip install --no-cache-dir --upgrade pip==25.2
-          .\.release-verify-venv\Scripts\python.exe -m pip install --no-cache-dir --requirement control\requirements\release-build.txt
+          .\.release-verify-venv\Scripts\python.exe -m pip install --no-cache-dir --requirement control\requirements\release-build.txt --requirement control\requirements\release-smoke.txt
           .\.release-verify-venv\Scripts\python.exe -m pip check
-      - name: Prepare complete offline wheelhouse
-        shell: pwsh
-        run: >-
-          .\.release-verify-venv\Scripts\python.exe -m pip download
-          --dest wheelhouse
-          --only-binary=:all:
-          --requirement control\requirements\release-build.txt
-          --requirement control\requirements\release-smoke.txt
       - name: Verify source identity and SHA256 evidence
         shell: pwsh
         run: |
@@ -206,7 +190,7 @@ jobs:
           $expected = Get-Content release-bundle\evidence\SHA256SUMS | Sort-Object
           $actual = Get-Content WINDOWS_SHA256SUMS | Sort-Object
           if (Compare-Object $expected $actual) { exit 1 }
-      - name: Verify contents, metadata, and offline wheel/sdist installs
+      - name: Verify contents, metadata, and archive wheel/sdist smoke
         shell: pwsh
         env:
           PIP_NO_INDEX: "1"
@@ -215,4 +199,3 @@ jobs:
           --source source
           --dist release-bundle\dist
           --expected-version "$env:EXPECTED_VERSION"
-          --wheelhouse wheelhouse

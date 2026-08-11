@@ -56,7 +56,10 @@ class CodeProvenance(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     git_commit: str
-    git_dirty: bool = False
+    # ``None`` explicitly means that a source worktree could not be identified
+    # or inspected.  The False default preserves loading semantics for older
+    # manifests that omitted this field.
+    git_dirty: bool | None = False
     package_version: str = Field(min_length=1)
     python_version: str = Field(min_length=1)
     entrypoint: str = Field(min_length=1)

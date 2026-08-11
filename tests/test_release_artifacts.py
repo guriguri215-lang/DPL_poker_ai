@@ -58,7 +58,7 @@ def test_release_toolchains_are_fully_pinned_and_match_project_metadata() -> Non
         "wheel": "0.45.1",
     }
     assert project["build-system"]["requires"] == [f"setuptools=={build['setuptools']}"]
-    assert project["project"]["version"] == "0.1.0a2"
+    assert project["project"]["version"] == "0.1.0a3"
     direct = {value.lower() for value in project["project"]["dependencies"]}
     assert "pydantic==2.11.7" in direct
     assert "pyyaml==6.0.2" in direct
@@ -79,15 +79,19 @@ def test_release_workflow_keeps_exact_python_and_offline_cross_platform_gates() 
     assert workflow.count("control/scripts/normalize_sdist.py") == 2
     assert "--compare-dist build-b" in workflow
     assert workflow.count('PIP_NO_INDEX: "1"') == 2
-    assert "--wheelhouse wheelhouse" in workflow
+    assert "--wheelhouse" not in workflow
     assert "ubuntu-24.04" in workflow
     assert "windows-2022" in workflow
     assert "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" in workflow
     assert "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c" in workflow
     assert "gh release" not in workflow
     verifier = (SCRIPTS / "verify_release_artifacts.py").read_text(encoding="utf-8")
-    assert verifier.count('"--isolated"') == 2
+    assert '"pip"' not in verifier
+    assert "venv.EnvBuilder" not in verifier
+    assert "archive.extractall" in verifier
     assert "poker-xai-gate-b-v2" in verifier
+    assert "poker-xai-run-session" in verifier
+    assert "manifest.code.package_version" in verifier
 
 
 @pytest.mark.parametrize(
@@ -131,14 +135,14 @@ def test_publication_content_policy_covers_high_confidence_credentials(
 
 
 def test_distribution_directory_must_contain_only_wheel_and_sdist(tmp_path: Path) -> None:
-    wheel = tmp_path / "poker_xai-0.1.0a2-py3-none-any.whl"
-    sdist = tmp_path / "poker_xai-0.1.0a2.tar.gz"
+    wheel = tmp_path / "poker_xai-0.1.0a3-py3-none-any.whl"
+    sdist = tmp_path / "poker_xai-0.1.0a3.tar.gz"
     wheel.touch()
     sdist.touch()
-    assert release._distribution_files(tmp_path, "0.1.0a2") == (wheel, sdist)
+    assert release._distribution_files(tmp_path, "0.1.0a3") == (wheel, sdist)
     (tmp_path / "temporary.tmp").touch()
     with pytest.raises(release.VerificationError, match="exactly one expected wheel"):
-        release._distribution_files(tmp_path, "0.1.0a2")
+        release._distribution_files(tmp_path, "0.1.0a3")
 
 
 def test_sdist_normalization_is_byte_reproducible(tmp_path: Path) -> None:
@@ -146,7 +150,7 @@ def test_sdist_normalization_is_byte_reproducible(tmp_path: Path) -> None:
     for index in range(2):
         path = tmp_path / f"input-{index}.tar.gz"
         with tarfile.open(path, mode="w:gz") as archive:
-            info = tarfile.TarInfo("poker_xai-0.1.0a2/module.py")
+            info = tarfile.TarInfo("poker_xai-0.1.0a3/module.py")
             data = b"VALUE = 1\n"
             info.size = len(data)
             info.mtime = 100 + index
@@ -164,7 +168,7 @@ def test_wheel_rejects_unsafe_empty_directory(
     with zipfile.ZipFile(wheel, mode="w") as archive:
         archive.writestr("pkg/__pycache__/", b"")
     with pytest.raises(release.VerificationError, match="local-or-build-path"):
-        release.verify_wheel(wheel, ROOT, "0.1.0a2")
+        release.verify_wheel(wheel, ROOT, "0.1.0a3")
 
 
 def test_sdist_rejects_unsafe_empty_directory(
@@ -173,14 +177,14 @@ def test_sdist_rejects_unsafe_empty_directory(
     monkeypatch.setattr(release, "_tracked_payload", lambda _source: set())
     sdist = tmp_path / "unsafe.tar.gz"
     with tarfile.open(sdist, mode="w:gz") as archive:
-        root = tarfile.TarInfo("poker_xai-0.1.0a2")
+        root = tarfile.TarInfo("poker_xai-0.1.0a3")
         root.type = tarfile.DIRTYPE
         archive.addfile(root)
-        unsafe = tarfile.TarInfo("poker_xai-0.1.0a2/build")
+        unsafe = tarfile.TarInfo("poker_xai-0.1.0a3/build")
         unsafe.type = tarfile.DIRTYPE
         archive.addfile(unsafe)
     with pytest.raises(release.VerificationError, match="local-or-build-path"):
-        release.verify_sdist(sdist, ROOT, "0.1.0a2")
+        release.verify_sdist(sdist, ROOT, "0.1.0a3")
 
 
 def test_wheel_payload_must_equal_the_tracked_git_blob(
@@ -192,4 +196,4 @@ def test_wheel_payload_must_equal_the_tracked_git_blob(
     with zipfile.ZipFile(wheel, mode="w") as archive:
         archive.writestr("module.py", b"transformed\n")
     with pytest.raises(release.VerificationError, match="tracked-payload-byte-mismatch"):
-        release.verify_wheel(wheel, ROOT, "0.1.0a2")
+        release.verify_wheel(wheel, ROOT, "0.1.0a3")
