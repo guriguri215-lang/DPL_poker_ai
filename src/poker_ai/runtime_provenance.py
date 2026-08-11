@@ -31,14 +31,22 @@ class RuntimeProvenance:
     git_dirty: bool | None
 
 
-def _source_project_root(module_file: Path) -> Path | None:
-    """Return the exact src-layout project root for *module_file*, if present."""
+def _source_layout_root(module_file: Path) -> Path | None:
     try:
         module_path = module_file.resolve(strict=True)
         root = module_path.parents[2]
+        expected_module = (root / "src" / _MODULE_RELATIVE_PATH).resolve()
     except (IndexError, OSError):
         return None
-    if module_path != (root / "src" / _MODULE_RELATIVE_PATH).resolve():
+    if module_path != expected_module:
+        return None
+    return root
+
+
+def _source_project_root(module_file: Path) -> Path | None:
+    """Return the exact src-layout project root for *module_file*, if verified."""
+    root = _source_layout_root(module_file)
+    if root is None:
         return None
     pyproject_path = root / "pyproject.toml"
     try:
@@ -79,9 +87,12 @@ def _matching_distribution_version(module_file: Path) -> str | None:
 def resolve_package_version(module_file: Path | None = None) -> str:
     """Return an authoritative source/artifact version or ``"unknown"``."""
     resolved_module = Path(__file__) if module_file is None else module_file
+    source_layout_root = _source_layout_root(resolved_module)
     source_root = _source_project_root(resolved_module)
     if source_root is not None:
         return _source_version(source_root) or UNKNOWN_PACKAGE_VERSION
+    if source_layout_root is not None and (source_layout_root / "pyproject.toml").is_file():
+        return UNKNOWN_PACKAGE_VERSION
     return _matching_distribution_version(resolved_module) or UNKNOWN_PACKAGE_VERSION
 
 

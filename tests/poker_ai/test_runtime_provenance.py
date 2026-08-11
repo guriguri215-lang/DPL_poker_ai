@@ -48,6 +48,33 @@ def test_source_with_unavailable_version_does_not_adopt_distribution_metadata(
     )
 
 
+def test_unverified_source_project_does_not_adopt_distribution_metadata(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root, module = _source_module(tmp_path)
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "different-project"\nversion = "9.9.9"\n',
+        encoding="utf-8",
+    )
+
+    class StaleDistribution:
+        version = "0.0.0"
+
+        @staticmethod
+        def locate_file(_path: Path) -> Path:
+            return module
+
+    monkeypatch.setattr(
+        runtime_provenance.importlib.metadata,
+        "distributions",
+        lambda **_kwargs: iter((StaleDistribution(),)),
+    )
+    assert (
+        runtime_provenance.resolve_package_version(module)
+        == runtime_provenance.UNKNOWN_PACKAGE_VERSION
+    )
+
+
 def test_artifact_version_requires_metadata_locating_the_executing_module(
     tmp_path: Path, monkeypatch
 ) -> None:
