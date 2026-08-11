@@ -52,10 +52,6 @@ def test_unverified_source_project_does_not_adopt_distribution_metadata(
     tmp_path: Path, monkeypatch
 ) -> None:
     root, module = _source_module(tmp_path)
-    (root / "pyproject.toml").write_text(
-        '[project]\nname = "different-project"\nversion = "9.9.9"\n',
-        encoding="utf-8",
-    )
 
     class StaleDistribution:
         version = "0.0.0"
@@ -69,10 +65,15 @@ def test_unverified_source_project_does_not_adopt_distribution_metadata(
         "distributions",
         lambda **_kwargs: iter((StaleDistribution(),)),
     )
-    assert (
-        runtime_provenance.resolve_package_version(module)
-        == runtime_provenance.UNKNOWN_PACKAGE_VERSION
-    )
+    for pyproject in (
+        '[project]\nname = "different-project"\nversion = "9.9.9"\n',
+        'project = "not-a-table"\n',
+    ):
+        (root / "pyproject.toml").write_text(pyproject, encoding="utf-8")
+        assert (
+            runtime_provenance.resolve_package_version(module)
+            == runtime_provenance.UNKNOWN_PACKAGE_VERSION
+        )
 
 
 def test_artifact_version_requires_metadata_locating_the_executing_module(

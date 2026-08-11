@@ -51,9 +51,9 @@ def _source_project_root(module_file: Path) -> Path | None:
     pyproject_path = root / "pyproject.toml"
     try:
         project = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))["project"]
-    except (KeyError, OSError, tomllib.TOMLDecodeError):
+    except (KeyError, OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
         return None
-    if project.get("name") != DIST_NAME:
+    if not isinstance(project, dict) or project.get("name") != DIST_NAME:
         return None
     return root
 
@@ -61,7 +61,9 @@ def _source_project_root(module_file: Path) -> Path | None:
 def _source_version(root: Path) -> str | None:
     try:
         project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["project"]
-    except (KeyError, OSError, tomllib.TOMLDecodeError):
+    except (KeyError, OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return None
+    if not isinstance(project, dict):
         return None
     version = project.get("version")
     return version if isinstance(version, str) and version else None
@@ -123,9 +125,10 @@ def resolve_git_provenance(module_file: Path | None = None) -> tuple[str, bool |
         return UNKNOWN_COMMIT, None
     try:
         actual_root = Path(top_level.stdout.decode("utf-8", "surrogateescape").strip()).resolve()
+        expected_root = source_root.resolve()
     except OSError:
         return UNKNOWN_COMMIT, None
-    if actual_root != source_root.resolve():
+    if actual_root != expected_root:
         return UNKNOWN_COMMIT, None
 
     commit_result = _run_git(source_root, "rev-parse", "--verify", "HEAD^{commit}")
