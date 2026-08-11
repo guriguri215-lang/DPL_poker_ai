@@ -442,12 +442,14 @@ else:
 assert '--out-dir' in schema_help.getvalue()
 
 gate_stdout = io.StringIO()
-gate_stderr = io.StringIO()
+gate_stderr_bytes = io.BytesIO()
+gate_stderr = io.TextIOWrapper(gate_stderr_bytes, encoding='ascii')
 with contextlib.redirect_stdout(gate_stdout), contextlib.redirect_stderr(gate_stderr):
     gate_status = loaded['poker-xai-gate-b-v2']([])
+gate_stderr.flush()
 assert gate_status == 1
 assert gate_stdout.getvalue() == ''
-assert json.loads(gate_stderr.getvalue()) == {
+assert json.loads(gate_stderr_bytes.getvalue().decode('ascii')) == {
     'schema_version': 'phase6-gate-b-v2-cli-error-v1',
     'operation': 'pre-dispatch',
     'status': 'failed',
