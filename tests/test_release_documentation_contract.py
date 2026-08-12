@@ -13,6 +13,10 @@ def _text(relative: str) -> str:
     return (ROOT / relative).read_text(encoding="utf-8")
 
 
+def _normalized(relative: str) -> str:
+    return " ".join(_text(relative).split())
+
+
 def _current_version() -> str:
     project = tomllib.loads(_text("pyproject.toml"))
     return project["project"]["version"]
@@ -23,6 +27,7 @@ def test_current_release_version_references_move_together() -> None:
     assert re.fullmatch(r"0\.1\.0a\d+", version)
     current_version_files = (
         ".github/workflows/release-artifacts.yml",
+        ".github/workflows/verify-published-release.yml",
         "docs/release_verification.md",
         "docs/releasing.md",
         "tests/test_release_artifacts.py",
@@ -32,9 +37,13 @@ def test_current_release_version_references_move_together() -> None:
     for relative in current_version_files:
         assert set(ALPHA_VERSION.findall(_text(relative))) == {version}, relative
 
-    workflow = _text(".github/workflows/release-artifacts.yml")
-    assert workflow.count(f'default: "{version}"') == 2
-    assert workflow.count(f"|| '{version}'") == 1
+    for relative in (
+        ".github/workflows/release-artifacts.yml",
+        ".github/workflows/verify-published-release.yml",
+    ):
+        workflow = _text(relative)
+        assert workflow.count(f'default: "{version}"') == 2, relative
+        assert workflow.count(f"|| '{version}'") == 1, relative
 
 
 def test_release_documents_name_the_exact_current_four_assets() -> None:
@@ -61,12 +70,62 @@ def test_release_runbook_is_linked_and_preserves_alpha_limitations() -> None:
     assert "](docs/releasing.md)" in _text("README.md")
     assert "](releasing.md)" in _text("docs/README.md")
 
-    runbook = _text("docs/releasing.md")
+    runbook = _normalized("docs/releasing.md")
     assert "facing-all-in" in runbook
     assert "40 CFR+ iterations" in runbook
     assert "not a convergence" in runbook
     assert "runtime CLI" in runbook
     assert "RunManifest" in runbook
 
+    readme = _text("README.md")
+    assert "facing-all-in" in readme
+    assert "40 iterations" in readme
+    assert "not a convergence guarantee" in readme
+
     # This is historical scope, not a current-version reference.
-    assert "Starting with `0.1.0a4`" in _text("README.md")
+    assert "Starting with `0.1.0a4`" in readme
+
+
+def test_manual_and_automated_post_publication_checks_are_documented() -> None:
+    for relative in ("docs/releasing.md", "docs/release_verification.md"):
+        document = _normalized(relative)
+        for required in (
+            "Verify published release assets",
+            "published",
+            "workflow_dispatch",
+            "contents: read",
+            "uploaded assets",
+            "source archives",
+            "new, empty directory",
+            "network-free",
+            "read-only",
+            "no-install",
+            "category",
+            "target filename",
+        ):
+            assert required in document, f"{relative}: {required}"
+        assert "does not replace or permit skipping" in document
+        assert "cannot undo a publication" in document
+
+
+def test_release_notes_contract_covers_scope_and_alpha_limitations() -> None:
+    runbook = _normalized("docs/releasing.md")
+    for required in (
+        "published-release four-asset verification workflow",
+        "continued required manual verification",
+        "release documentation contract test",
+        "exact four-asset contract",
+        "runtime CLI",
+        "dependencies",
+        "solver",
+        "action vocabulary",
+        "DPL",
+        "RunManifest",
+        "Phase 6",
+        "Gate B",
+        "explanation layer",
+        "facing-all-in",
+        "40 CFR+ iterations",
+        "not a convergence guarantee",
+    ):
+        assert required in runbook, required
