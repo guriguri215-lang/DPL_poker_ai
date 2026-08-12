@@ -94,8 +94,9 @@ or save the matched value. Do not investigate or rewrite repository history.
 Any remediation that requires history changes needs explicit human approval.
 
 The release notes must identify the normal Hero CLI's opt-in template
-explanations, independent all-item verification before artifact writes, shared
-P5-4 artifact processing, and hashed RunManifest output references. They must
+explanations, independent all-item verification before artifact writes (meaning
+the separate in-repository checker, not third-party validation), shared P5-4
+artifact processing, and hashed RunManifest output references. They must
 state that no dependency or schema was added, the existing dependencies remain
 unchanged, and the solver, action vocabulary, DPL and RunManifest schemas,
 Phase 6, and Gate B did not change.

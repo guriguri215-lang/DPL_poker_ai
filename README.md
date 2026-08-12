@@ -1,10 +1,13 @@
 # poker-xai
 
-**A research framework for explainable, verifiable safe opponent exploitation in
-poker. It is not a real-time playing bot.** It studies whether an AI's decision
-to deviate from a baseline strategy in order to exploit an opponent can be
-disclosed *faithfully* — and how to measure that faithfulness against ground
-truth.
+An early-alpha, simulation-only research framework for explainable decision
+provenance and safety-mixed opponent-exploitation experiments in poker. It is not
+a real-time playing bot. It studies whether an AI's decision to deviate from a
+baseline strategy in order to exploit an opponent can be disclosed *faithfully*
+— and how to measure that faithfulness against ground truth.
+
+`DPL_poker_ai` is the repository name; the Python distribution and CLI use
+`poker-xai`.
 
 The framework deliberately contains **no** real-time input, screen scraping,
 site APIs or automation. That capability is absent by design, not disabled.
@@ -23,17 +26,20 @@ build:
 - An **answer-key protocol** and faithfulness metrics (Reason Validity,
   numerical consistency, counterfactual consistency, calibration).
 
-The central research claim is a *faithfulness evaluation framework* for
-explainable safe exploitation, not EV performance.
+The central research claim is a faithfulness-evaluation framework for
+explanations of bounded, safety-mixed exploitation experiments—not a proof of
+safety, GTO status, solver convergence, or EV superiority.
 
 ## Can / cannot do
 
-- **Can**: define and validate the DPL / Reason Ontology / RunManifest
-  contracts, and (in later phases) solve River spots exactly, synthesise
-  opponents with known leaks, generate template explanations, and evaluate their
-  faithfulness.
-- **Cannot / will not**: play against live opponents, read screens, connect to
-  poker sites, or automate real-money play.
+- **Implemented**: DPL v3, the Reason Ontology, RunManifest verification,
+  frozen-model terminal/action EV, bounded CFR/CFR+ river experiments, synthetic
+  HARD node locks, deterministic template explanations, and source-DPL checks.
+- **Experimental and bounded**: heads-up river facing-all-in sessions and
+  finite-iteration combo- and position-specific policies. They have no
+  convergence, exact-equilibrium, or GTO certificate.
+- **Unavailable**: live input, screen scraping, poker-site APIs, and real-money
+  automation.
 
 ## Quick start
 
@@ -77,7 +83,8 @@ python cli/run_session.py --seed 20260704 --hands 5 --out-dir experiments_output
 ```
 
 Add the single `--explanations` opt-in when the same run should also produce
-deterministic template explanations and an independent verifier summary:
+deterministic template explanations and a separate in-repository verifier
+summary:
 
 ```bash
 poker-xai-run-session --seed 20260704 --hands 5 --explanations --out-dir experiments_output/quickstart
@@ -86,11 +93,15 @@ poker-xai-run-session --seed 20260704 --hands 5 --explanations --out-dir experim
 Without the flag, the session's inputs, actions, solver behavior, and output file
 set are unchanged. With it, each validated DPL produces one explanation in the
 same order. Every explanation is independently verified before any run artifact
-is written; a verification failure leaves no partial bundle from that run. The
-expanded bundle reuses the existing explanations JSONL and verifier-summary JSON
-formats, and its RunManifest records hashed references to the DPL, explanations,
-summary, and existing terminal provenance output. Generation is LLM-free,
-network-free, and adds no dependency or schema.
+is written. Here, “verified” means that a separate in-repository verifier checks
+each deterministic template against its DPL, ontology paths, source references,
+and numeric claims. It does not certify solver convergence, strategy safety or
+optimality, GTO status, external validation, or independent third-party
+reproducibility. A verification failure leaves no partial bundle from that run.
+The expanded bundle reuses the existing explanations JSONL and verifier-summary
+JSON formats, and its RunManifest records hashed references to the DPL,
+explanations, summary, and existing terminal provenance output. Generation is
+LLM-free, network-free, and adds no dependency or schema.
 
 Identify either command without starting a session or creating output files:
 
@@ -121,9 +132,11 @@ guarantee.
 
 ## Gate B v2 one-shot CLI
 
-The Windows-only Gate B v2 production route is started by the repository
-launcher. It accepts one pinned bootstrap manifest on a fixed local volume and
-stops after the initial attempt is durably `SEALED`:
+Gate B v2 is an implemented, Windows-only, one-shot validation route for approved
+local artifacts. “Production” is an internal route label, not a
+production-readiness or independent-security-certification claim. The repository
+launcher accepts one pinned bootstrap manifest on a fixed local volume and stops
+after the initial attempt is durably `SEALED`:
 
 ```powershell
 $python = (Resolve-Path .\.venv\Scripts\python.exe).Path
@@ -185,14 +198,16 @@ production data.
 
 Early alpha, simulation-only development. The frozen core contracts now use DPL
 v3 with read-only DPL v1/v2 loading compatibility, alongside the Reason Ontology
-and RunManifest. Normal Hero sessions use CFR+ to produce exact combo- and
-position-specific `vs_bet` policies for facing-all-in river decisions; the
+and RunManifest. Normal Hero sessions use CFR+ to produce finite-iteration combo-
+and position-specific `vs_bet` policies for facing-all-in river decisions; the
 default is 40 iterations, average delay 0, and no checkpoints, with the observed
-all-in bet matched to the solver bet size. Leak detection, SafetyMixer,
-opponent-synthesis/node-lock, template explanation, and Phase 6 evaluation and
-Gate B v2 contracts are implemented. The river adapter remains limited to
-facing an all-in, has a higher computation cost than the retained stub, and 40
-iterations is not a convergence guarantee.
+all-in bet matched to the solver bet size. These policies have no convergence,
+exact-equilibrium, or GTO certificate. Leak detection, the SafetyMixer convex
+mixing contract, synthetic HARD node-lock opponent synthesis, deterministic
+template explanations, source-DPL checks, Phase 6 evaluation, and Gate B v2
+contracts are implemented. Convex mixing is not a strategy-safety proof. The
+river adapter remains limited to facing an all-in and has a higher computation
+cost than the retained stub. Forty iterations is not a convergence guarantee.
 
 ## Responsible use
 

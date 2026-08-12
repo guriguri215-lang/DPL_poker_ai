@@ -1,13 +1,15 @@
 """Vertical-slice session runner: scenarios -> decisions -> validated DPL + manifest.
 
 Generates scenarios deterministically, has the stub opponent act, solves the public
-river spot with CFR+, and gives Hero the exact combo/position ``vs_bet`` StrategyTable
-entry. Each decision is assembled into a current
+river spot with CFR+, and gives Hero a finite-iteration combo- and position-specific
+``vs_bet`` StrategyTable entry. Each decision is assembled into a current
 :class:`~poker_core.dpl_schema.DecisionProvenanceLog`. Public action observations feed
 the leak detector independently; its action baseline still matches the stub opponent,
 so the normal CLI run remains leak-free. Optional rule or node-lock exploitation stays
-behind the existing DPL safety mixer. Every EV is exact ``solver_exact``. A
-:class:`~poker_core.run_manifest.RunManifest` pins the strategy and solver config.
+behind the existing DPL SafetyMixer convex-combination contract, which is not a
+strategy-safety proof. Frozen-model terminal/action EV is exact ``solver_exact``. A
+:class:`~poker_core.run_manifest.RunManifest` pins the strategy and solver config; it
+does not certify convergence, exact equilibrium, or GTO status.
 
 The DPLs are written as JSONL (one decision per line); the manifest is written as a
 sidecar JSON. Both live under a gitignored output directory.

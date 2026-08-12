@@ -1,4 +1,4 @@
-"""Independent verification for structured explanation documents.
+"""Separate in-repository checks for structured explanation documents.
 
 This module intentionally does not import the template generator. It accepts the
 contract model as data, then re-resolves cited DPL and solver diagnostic facts
