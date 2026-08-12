@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "poker-xai"
-version = "0.1.0a8"
+version = "0.1.0a9"
 description = "Early-alpha simulation framework for auditable poker decision provenance, bounded CFR experiments, synthetic leaks, and explanation checks"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -33,6 +33,7 @@ dev = [
 poker-xai-export-schemas = "poker_core.schema_export:main"
 poker-xai-gate-b-v2 = "gate_b_v2_launcher:main"
 poker-xai-run-session = "poker_ai.run_session_cli:main"
+poker-xai-verify-explanation-bundle = "poker_ai.explanation_bundle_cli:main"
 
 [tool.setuptools]
 include-package-data = false

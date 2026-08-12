@@ -66,6 +66,11 @@ contracts](docs/dpl_and_run_manifest.md), [normal Hero session
 tutorial](docs/hero_session.md), [responsible-use guidance](docs/responsible_use.md),
 and [GitHub Release verification](docs/release_verification.md).
 
+Saved normal Hero explanation bundles can be checked again without rerunning a
+session. See [offline explanation bundle verification](docs/explanation_bundle_verification.md)
+for the manifest-first, read-only API and `poker-xai-verify-explanation-bundle`
+command.
+
 ## Normal Hero session CLI
 
 The distributed command runs the normal simulated Hero session and writes DPL
@@ -102,6 +107,16 @@ The expanded bundle reuses the existing explanations JSONL and verifier-summary
 JSON formats, and its RunManifest records hashed references to the DPL,
 explanations, summary, and existing terminal provenance output. Generation is
 LLM-free, network-free, and adds no dependency or schema.
+
+The saved bundle can later be rechecked offline from its manifest:
+
+```bash
+poker-xai-verify-explanation-bundle --manifest experiments_output/quickstart/S20260704.manifest.json
+```
+
+This read-only command verifies manifest artifact paths and hashes, one-to-one
+DPL/explanation identity and order, every explanation with the existing checker,
+and the saved checker summary. It neither reruns the session nor writes output.
 
 Identify either command without starting a session or creating output files:
 

@@ -32,6 +32,7 @@ EXPECTED_ENTRY_POINTS = {
     "poker-xai-export-schemas": "poker_core.schema_export:main",
     "poker-xai-gate-b-v2": "gate_b_v2_launcher:main",
     "poker-xai-run-session": "poker_ai.run_session_cli:main",
+    "poker-xai-verify-explanation-bundle": "poker_ai.explanation_bundle_cli:main",
 }
 _WHEEL_METADATA_FILES = {
     "METADATA",
@@ -532,6 +533,8 @@ assert all(callable(value) for value in loaded.values())
 
 import poker_ai.run_session_cli as session_cli
 assert Path(session_cli.__file__).resolve().is_relative_to(import_root)
+import poker_ai.explanation_bundle_cli as explanation_bundle_cli
+assert Path(explanation_bundle_cli.__file__).resolve().is_relative_to(import_root)
 
 version_output = io.StringIO()
 try:
@@ -542,6 +545,19 @@ except SystemExit as stopped:
 else:
     raise AssertionError('session --version did not stop through argparse')
 assert version_output.getvalue() == f'poker-xai-run-session {EXPECTED_VERSION}\n'
+assert not output_root.exists()
+
+bundle_version_output = io.StringIO()
+try:
+    with contextlib.redirect_stdout(bundle_version_output):
+        loaded['poker-xai-verify-explanation-bundle'](['--version'])
+except SystemExit as stopped:
+    assert stopped.code == 0
+else:
+    raise AssertionError('bundle verifier --version did not stop through argparse')
+assert bundle_version_output.getvalue() == (
+    f'poker-xai-verify-explanation-bundle {EXPECTED_VERSION}\n'
+)
 assert not output_root.exists()
 
 help_output = io.StringIO()
@@ -555,6 +571,17 @@ else:
 assert '--solver-iterations' in help_output.getvalue()
 assert '--out-dir' in help_output.getvalue()
 assert '--version' in help_output.getvalue()
+assert not output_root.exists()
+
+bundle_help_output = io.StringIO()
+try:
+    with contextlib.redirect_stdout(bundle_help_output):
+        loaded['poker-xai-verify-explanation-bundle'](['--help'])
+except SystemExit as stopped:
+    assert stopped.code == 0
+else:
+    raise AssertionError('bundle verifier --help did not stop through argparse')
+assert '--manifest' in bundle_help_output.getvalue()
 assert not output_root.exists()
 
 schema_help = io.StringIO()
@@ -589,6 +616,7 @@ raw_argv = [
     '1',
     '--solver-iterations',
     '1',
+    '--explanations',
     '--out-dir',
     str(output_root),
 ]
@@ -615,6 +643,15 @@ assert manifest.code.argv == raw_argv
 lines = dpl_paths[0].read_text(encoding='utf-8').splitlines()
 assert len(lines) == 1
 assert DecisionProvenanceLog.model_validate_json(lines[0]).schema_version == '3.0.0'
+bundle_output = io.StringIO()
+with contextlib.redirect_stdout(bundle_output):
+    assert loaded['poker-xai-verify-explanation-bundle'](
+        ['--manifest', str(manifest_paths[0])]
+    ) == 0
+assert bundle_output.getvalue().splitlines() == [
+    'artifact_integrity=passed references=4',
+    'explanation_checker=passed total=1 summary=consistent',
+]
 """
     script = script.replace("EXPECTED_VERSION", repr(version)).replace(
         "EXPECTED_ENTRY_POINTS", repr(EXPECTED_ENTRY_POINTS)

@@ -28,5 +28,7 @@ the minimal orchestration in `poker_ai.explanation_artifacts`. That layer keeps
 the generator and verifier separate, preserves DPL order, verifies every pair
 before writing, and reuses the existing explanations JSONL and verifier-summary
 formats. It changes neither explanation schema nor generator/verifier logic.
+The manifest-first saved-bundle consumer reuses the same pairing, checker-result,
+and verifier-summary decisions; see the public [verification guide](../../docs/explanation_bundle_verification.md).
 
 Any future LLM surface layer remains a later Phase 8 task.

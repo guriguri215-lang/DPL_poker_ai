@@ -54,6 +54,9 @@ an LLM surface layer are outside the implemented normal-session path.
   paths, source references, numeric claims, and rendered templates before any
   bundle write; it does not certify convergence, safety, optimality, GTO status,
   external validation, or independent third-party reproducibility.
+- `explanation_bundle_cli.py` — the thin, offline, read-only manifest-first CLI
+  for rechecking saved normal Hero explanation bundles. It reuses the writer's
+  pairing, checker-result, and summary decisions and never runs a session.
 
 Run the distributed CLI with
 `poker-xai-run-session --seed 20260704 --hands 200` (CFR+ defaults:

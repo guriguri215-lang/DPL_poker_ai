@@ -14,6 +14,7 @@ from pathlib import Path
 
 from poker_ai.cfr_policy import DEFAULT_CFR_RIVER_POLICY_CONFIG, CfrRiverPolicyConfig
 from poker_ai.explanation_artifacts import (
+    NORMAL_HERO_EXPLANATION_ARTIFACT_ID,
     ExplanationBundleVerificationError,
     write_verified_explanation_bundle,
 )
@@ -160,7 +161,7 @@ def main(argv: list[str] | None = None, *, entrypoint: str = CONSOLE_ENTRYPOINT)
             explanation_paths = write_verified_explanation_bundle(
                 result,
                 args.out_dir,
-                artifact_id="hero_session_explanation_artifacts",
+                artifact_id=NORMAL_HERO_EXPLANATION_ARTIFACT_ID,
                 safety_alpha=safety_alpha,
                 leaky_fixture=args.leaky_fixture,
             )
