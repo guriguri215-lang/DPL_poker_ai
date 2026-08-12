@@ -88,6 +88,10 @@ snapshot with their SHA-256 hashes.
 Omitting `--explanations` retains the five-file bundle above and does not change
 the session inputs, action, solver behavior, or invocation provenance.
 
+To recheck a saved explanation bundle without rerunning the session, use the
+manifest-first, read-only command described in [Saved Hero explanation bundle
+verification](explanation_bundle_verification.md).
+
 ## Important options and limits
 
 - `--seed` defaults to `20260704`; `--hands` defaults to `200`.

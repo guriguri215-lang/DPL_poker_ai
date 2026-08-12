@@ -51,6 +51,7 @@ def test_public_documentation_index_has_required_pages() -> None:
     for target in (
         "architecture.md",
         "dpl_and_run_manifest.md",
+        "explanation_bundle_verification.md",
         "hero_session.md",
         "releasing.md",
         "release_verification.md",

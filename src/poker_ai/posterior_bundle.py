@@ -182,7 +182,7 @@ def write_posterior_artifacts(parts: PosteriorBundleParts, bundle_root: Path | s
     """Write the three immutable canonical artifacts below ``bundle_root``."""
     root = Path(bundle_root)
     for relative_path, payload in parts.artifacts.items():
-        target = _resolve_bundle_path(root, relative_path)
+        target = resolve_bundle_path(root, relative_path)
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists() and target.read_bytes() != payload:
             raise ValueError(f"refusing to overwrite immutable artifact {relative_path!r}")
@@ -256,7 +256,14 @@ def _exactly_one_output(manifest: RunManifest, name: str) -> ArtifactRef:
     return matches[0]
 
 
-def _resolve_bundle_path(root: Path, relative_path: str) -> Path:
+def resolve_bundle_path(root: Path, relative_path: str) -> Path:
+    """Resolve one normalized POSIX artifact path below ``root``.
+
+    This is the shared read/write containment gate for manifest-referenced
+    bundle files.  Resolving the final target also rejects symlinks that would
+    escape the bundle root.
+    """
+
     if not relative_path or "\\" in relative_path or ":" in relative_path:
         raise ValueError(f"bundle path must be a relative POSIX path, got {relative_path!r}")
     pure = PurePosixPath(relative_path)
@@ -272,7 +279,7 @@ def _resolve_bundle_path(root: Path, relative_path: str) -> Path:
 
 
 def _load_canonical_payload(root: Path, relative_path: str, expected_sha: str) -> object:
-    target = _resolve_bundle_path(root, relative_path)
+    target = resolve_bundle_path(root, relative_path)
     try:
         raw = target.read_bytes()
     except OSError as exc:

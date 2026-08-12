@@ -11,6 +11,8 @@ scope and development status.
 - [Normal Hero session tutorial](hero_session.md) covers `--version`, `--help`, a
   minimal offline session, its output bundle, opt-in deterministic template
   explanations with in-repository checks, and the legacy source wrapper.
+- [Saved Hero explanation bundle verification](explanation_bundle_verification.md)
+  covers the manifest-first, offline, read-only API and distribution CLI.
 - [Responsible use](responsible_use.md) records the intended research use and the
   current safety and solver limitations.
 - [GitHub Release verification](release_verification.md) explains how to obtain

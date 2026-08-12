@@ -38,6 +38,15 @@ from .decision import (
     call_fold_action_evs,
     policy_ev,
 )
+from .explanation_artifacts import (
+    NORMAL_HERO_EXPLANATION_ARTIFACT_ID,
+    ExplanationPairingIssue,
+    ExplanationSetVerification,
+    SavedExplanationBundleVerification,
+    SavedExplanationBundleVerificationError,
+    verify_explanation_pairs,
+    verify_saved_explanation_bundle,
+)
 from .exploit import (
     ExploitProvider,
     NodelockExploitConfig,
@@ -98,6 +107,7 @@ __all__ = [
     "FACING_ACTIONS",
     "FACING_ALL_IN",
     "NO_FACING_ACTIONS",
+    "NORMAL_HERO_EXPLANATION_ARTIFACT_ID",
     "SCENARIO_SCHEMA_VERSION",
     "ActionSelector",
     "ActionBaselineTable",
@@ -115,6 +125,8 @@ __all__ = [
     "CfrRiverPolicyProvider",
     "DecisionResult",
     "ExploitProvider",
+    "ExplanationPairingIssue",
+    "ExplanationSetVerification",
     "HeroAgent",
     "HiddenStrategyAccessError",
     "LeakDetector",
@@ -128,6 +140,8 @@ __all__ = [
     "RuleExploitProvider",
     "RuleExploitResult",
     "Scenario",
+    "SavedExplanationBundleVerification",
+    "SavedExplanationBundleVerificationError",
     "SessionResult",
     "StubOpponent",
     "StubBasePolicyProvider",
@@ -162,5 +176,7 @@ __all__ = [
     "write_manifest",
     "write_session_bundle",
     "validate_posterior_bundle",
+    "verify_explanation_pairs",
+    "verify_saved_explanation_bundle",
     "ValidatedPosteriorBundle",
 ]

@@ -16,7 +16,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
-CURRENT_VERSION = "0.1.0a8"
+CURRENT_VERSION = "0.1.0a9"
 sys.path.insert(0, str(SCRIPTS))
 
 
@@ -97,8 +97,10 @@ def test_release_workflow_keeps_exact_python_and_offline_cross_platform_gates() 
     assert "archive.extractall" in verifier
     assert "poker-xai-gate-b-v2" in verifier
     assert "poker-xai-run-session" in verifier
+    assert "poker-xai-verify-explanation-bundle" in verifier
     assert "manifest.code.package_version" in verifier
     assert "loaded['poker-xai-run-session'](['--version'])" in verifier
+    assert "loaded['poker-xai-verify-explanation-bundle'](['--version'])" in verifier
     assert "source-checkout" in verifier
     assert "verify_documentation_links(documentation_root)" in verifier
     assert workflow.count("verify_release_bundle.py") == 3
