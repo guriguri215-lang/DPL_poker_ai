@@ -1,0 +1,276 @@
+name: Verify published release assets
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing published prerelease tag to verify
+        required: true
+        default: "0.1.0a7"
+        type: string
+      expected_version:
+        description: Exact distribution version
+        required: true
+        default: "0.1.0a7"
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  EXPECTED_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.expected_version || '0.1.0a7' }}
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
+
+jobs:
+  verify-published-assets:
+    name: Ubuntu / Python 3.12.10 / published release assets
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Fail closed unless manual dispatch runs from main
+        shell: bash
+        run: |
+          fail() {
+            printf 'published release verification issue: category=%s filename=%s\n' "$1" "$2" >&2
+            exit 1
+          }
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            [[ "$GITHUB_REF" == "refs/heads/main" ]] || \
+              fail "manual-dispatch-ref" "release-metadata.json"
+          fi
+          [[ "$EXPECTED_VERSION" =~ ^0\.1\.0a[0-9]+$ ]] || \
+            fail "expected-version-format" "release-metadata.json"
+          [[ "$RELEASE_TAG" == "$EXPECTED_VERSION" ]] || \
+            fail "tag-expected-version-mismatch" "release-metadata.json"
+
+      - name: Check out the tagged release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python 3.12.10
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12.10"
+
+      - name: Verify tag and tagged project version
+        shell: bash
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          fail() {
+            printf 'published release verification issue: category=%s filename=%s\n' "$1" "$2" >&2
+            exit 1
+          }
+          source_sha="$(git -C source rev-parse HEAD 2>/dev/null)" || \
+            fail "tag-source-read" "release-metadata.json"
+          tag_sha="$(git -C source rev-list -n 1 "refs/tags/$RELEASE_TAG" 2>/dev/null)" || \
+            fail "tag-source-read" "release-metadata.json"
+          [[ "$source_sha" == "$tag_sha" ]] || \
+            fail "tag-source-mismatch" "release-metadata.json"
+          python - "$EXPECTED_VERSION" <<'PY'
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          expected = sys.argv[1]
+          try:
+              project = tomllib.loads(Path("source/pyproject.toml").read_text(encoding="utf-8"))
+              actual = project["project"]["version"]
+          except (OSError, KeyError, TypeError, tomllib.TOMLDecodeError):
+              print(
+                  "published release verification issue: "
+                  "category=project-version-read filename=pyproject.toml",
+                  file=sys.stderr,
+              )
+              raise SystemExit(1) from None
+          if actual != expected:
+              print(
+                  "published release verification issue: "
+                  "category=project-version-mismatch filename=pyproject.toml",
+                  file=sys.stderr,
+              )
+              raise SystemExit(1)
+          PY
+
+      # This networked step stores public metadata outside the asset directory.
+      - name: Retrieve published release metadata
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          metadata="$RUNNER_TEMP/release-metadata.json"
+          if [[ -e "$metadata" ]]; then
+            printf '%s\n' \
+              'published release verification issue: category=metadata-path-not-new filename=release-metadata.json' \
+              >&2
+            exit 1
+          fi
+          if ! gh api --method GET \
+            "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
+            > "$metadata" 2>/dev/null
+          then
+            printf '%s\n' \
+              'published release verification issue: category=metadata-download filename=release-metadata.json' \
+              >&2
+            exit 1
+          fi
+
+      - name: Verify prerelease identity and exact uploaded asset names
+        shell: bash
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          python - "$RUNNER_TEMP/release-metadata.json" "$RELEASE_TAG" "$EXPECTED_VERSION" <<'PY'
+          import json
+          import sys
+          from collections import Counter
+          from pathlib import Path
+
+          metadata = Path(sys.argv[1])
+          release_tag = sys.argv[2]
+          version = sys.argv[3]
+
+          def fail(category: str, filename: str) -> None:
+              print(
+                  f"published release verification issue: category={category} filename={filename}",
+                  file=sys.stderr,
+              )
+              raise SystemExit(1)
+
+          try:
+              payload = json.loads(metadata.read_text(encoding="utf-8"))
+          except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+              fail("metadata-json", "release-metadata.json")
+          if not isinstance(payload, dict):
+              fail("metadata-shape", "release-metadata.json")
+          if payload.get("draft") is not False or not payload.get("published_at"):
+              fail("release-not-published", "release-metadata.json")
+          if payload.get("prerelease") is not True:
+              fail("release-not-prerelease", "release-metadata.json")
+          if payload.get("tag_name") != release_tag:
+              fail("release-tag-mismatch", "release-metadata.json")
+
+          expected = {
+              f"poker_xai-{version}-py3-none-any.whl",
+              f"poker_xai-{version}.tar.gz",
+              "artifact-manifest.json",
+              "SHA256SUMS",
+          }
+          assets = payload.get("assets")
+          if not isinstance(assets, list):
+              fail("uploaded-assets-shape", "release-metadata.json")
+          names: list[str] = []
+          for asset in assets:
+              if not isinstance(asset, dict) or not isinstance(asset.get("name"), str):
+                  fail("uploaded-asset-shape", "release-metadata.json")
+              name = asset["name"]
+              names.append(name)
+              if asset.get("state") != "uploaded":
+                  fail("asset-not-uploaded", name)
+
+          duplicates = sorted(name for name, count in Counter(names).items() if count != 1)
+          missing = sorted(expected - set(names))
+          unexpected = sorted(set(names) - expected)
+          issues = [
+              *(("duplicate-uploaded-asset", name) for name in duplicates),
+              *(("missing-uploaded-asset", name) for name in missing),
+              *(("unexpected-uploaded-asset", name) for name in unexpected),
+          ]
+          if issues:
+              for category, filename in issues:
+                  print(
+                      f"published release verification issue: "
+                      f"category={category} filename={filename}",
+                      file=sys.stderr,
+                  )
+              raise SystemExit(1)
+          PY
+
+      - name: Create a new empty asset directory
+        id: bundle
+        shell: bash
+        run: |
+          bundle="$(mktemp -d "$RUNNER_TEMP/published-release-assets.XXXXXX")"
+          if [[ -n "$(find "$bundle" -mindepth 1 -print -quit)" ]]; then
+            printf '%s\n' \
+              'published release verification issue: category=download-directory-not-empty filename=published-release-assets' \
+              >&2
+            exit 1
+          fi
+          echo "path=$bundle" >> "$GITHUB_OUTPUT"
+
+      # This is the only networked asset-acquisition step.
+      - name: Download all uploaded release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "${{ steps.bundle.outputs.path }}" \
+            2>/dev/null
+          then
+            printf '%s\n' \
+              'published release verification issue: category=asset-download filename=published-release-assets' \
+              >&2
+            exit 1
+          fi
+
+      - name: Confirm the downloaded filename allowlist
+        shell: bash
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          python - "${{ steps.bundle.outputs.path }}" "$EXPECTED_VERSION" <<'PY'
+          import sys
+          from pathlib import Path
+
+          bundle = Path(sys.argv[1])
+          version = sys.argv[2]
+          expected = {
+              f"poker_xai-{version}-py3-none-any.whl",
+              f"poker_xai-{version}.tar.gz",
+              "artifact-manifest.json",
+              "SHA256SUMS",
+          }
+          actual = {
+              path.relative_to(bundle).as_posix()
+              for path in bundle.rglob("*")
+              if path.is_file()
+          }
+          directories = sorted(
+              path.relative_to(bundle).as_posix()
+              for path in bundle.rglob("*")
+              if path.is_dir()
+          )
+          issues = [
+              *(("missing-downloaded-asset", name) for name in sorted(expected - actual)),
+              *(("unexpected-downloaded-asset", name) for name in sorted(actual - expected)),
+              *(("unexpected-download-directory", name) for name in directories),
+          ]
+          if issues:
+              for category, filename in issues:
+                  print(
+                      f"published release verification issue: "
+                      f"category={category} filename={filename}",
+                      file=sys.stderr,
+                  )
+              raise SystemExit(1)
+          PY
+
+      # No token is present in this local, network-free, read-only verification step.
+      - name: Verify the flat bundle with the tagged source
+        shell: bash
+        env:
+          PIP_NO_INDEX: "1"
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: >-
+          python source/scripts/verify_release_bundle.py
+          --bundle "${{ steps.bundle.outputs.path }}"
+          --layout flat
+          --expected-version "$EXPECTED_VERSION"
