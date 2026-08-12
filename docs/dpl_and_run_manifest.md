@@ -34,6 +34,14 @@ reproducibility sidecar for a session. Schema version `1.0.0` records:
 - configuration references with roles and SHA-256 hashes;
 - opponent identity/split and output references.
 
+The normal writer without explanation opt-in preserves its historical output
+set. With `--explanations`, schema version `1.0.0` is unchanged and the existing
+`ArtifactRef` list contains SHA-256 references for the DPL JSONL, explanations
+JSONL, verifier-summary JSON, and the terminal action-statistics provenance
+snapshot. Paths are relative to the bundle, so the manifest does not embed a
+local absolute path. The manifest is written only after the explanation set has
+passed independent one-to-one verification.
+
 Structural loading is deliberately separate from compatibility checking. An old
 manifest can remain structurally readable even when its recorded ontology is not
 the current one; `ontology_matches_current()` reports that compatibility

@@ -15,7 +15,9 @@ live-play automation.
   best-response, node-lock, evaluation, and frozen river-scenario solving code.
 - [`poker_ai`](../src/poker_ai/README.md) connects public observations to a Hero
   base policy, leak detection, optional exploitation, SafetyMixer, action
-  selection, DPL validation, and session output.
+  selection, DPL validation, and session output. Its small explanation-artifact
+  orchestration layer connects completed sessions to the existing generator and
+  verifier without moving either implementation across component boundaries.
 - [`opponents`](../src/opponents/README.md) owns versioned synthetic opponent
   models used by the research and evaluation paths.
 - [`explanation`](../src/explanation/README.md) renders and verifies explanations
@@ -42,8 +44,16 @@ The normal session implemented by
 6. Each decision is validated as a current DPL v3 record. The session also builds
    a RunManifest containing invocation, version, seed, and hashed configuration
    references.
-7. The writer validates the posterior provenance bundle, then writes DPL JSONL,
-   the RunManifest sidecar, and the supporting `provenance/` JSON files.
+7. Without explanation opt-in, the existing writer validates the posterior
+   provenance bundle, then writes DPL JSONL, the RunManifest sidecar, and the
+   supporting `provenance/` JSON files exactly as before.
+8. With `--explanations`, one deterministic `ExplanationDocument` is generated
+   for each validated DPL in input order. The independent verifier checks all
+   pairs, including their session/hand reference, before the output directory is
+   changed. Only a fully verified set is written using the existing explanations
+   JSONL and verifier-summary formats. The unchanged RunManifest schema uses its
+   existing hashed `ArtifactRef` outputs for DPL, explanations, summary, and the
+   terminal posterior-provenance snapshot.
 
 The [DPL and RunManifest page](dpl_and_run_manifest.md) describes the two public
 contracts. The [session tutorial](hero_session.md) shows the supported command.
