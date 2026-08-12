@@ -1,5 +1,5 @@
-"""experiments: session runner, league, answer-key trainer, evaluator, reports.
+"""Reserved, currently empty experiments namespace.
 
-Placeholder package; implemented from Phase 6 onward. All experiments are
-manifest-driven (see :class:`poker_core.run_manifest.RunManifest`).
+Implemented Phase 6 code lives under :mod:`phase6`; this package intentionally
+contains no experiment implementation.
 """

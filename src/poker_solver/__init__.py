@@ -1,12 +1,14 @@
-"""poker_solver: the game-theoretic solver and its independent verifier.
+"""poker_solver: finite-iteration solvers and fixed-profile evaluators.
 
 Phase 3 builds this package as: P3-1 the *verification layer* --
 an extensive-form game tree, an exact strategy-profile EV evaluator, and a
 best-response / exploitability module that is deliberately independent of any CFR
 code (ADR-0017 sec.4). P3-2 adds full-tree vanilla CFR on top of those measuring
-instruments. P3-3 adds CFR+, independent convergence metrics, and an in-memory
-frozen-river-scenario solve entry point. P3-4 adds StrategyTable baseline artifact
-generation from solved river phases. Phase 4 adds node-lock configuration,
+instruments. P3-3 adds CFR+, independently computed exploitability/value metrics,
+and an in-memory bounded frozen-river-scenario experiment entry point. P3-4 adds
+StrategyTable baseline artifact generation from finite-iteration river policies.
+These measurements do not certify convergence, exact equilibrium, or GTO status.
+Phase 4 adds node-lock configuration,
 river application helpers, EV deltas, resolve-mode worst-case metrics, and
 sensitivity analysis.
 

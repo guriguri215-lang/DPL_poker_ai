@@ -9,8 +9,8 @@ scope and development status.
 - [DPL and RunManifest contracts](dpl_and_run_manifest.md) explains DPL v1/v2
   loading compatibility, current DPL v3 writes, and the RunManifest audit record.
 - [Normal Hero session tutorial](hero_session.md) covers `--version`, `--help`, a
-  minimal offline session, its output bundle, opt-in verified template
-  explanations, and the legacy source wrapper.
+  minimal offline session, its output bundle, opt-in deterministic template
+  explanations with in-repository checks, and the legacy source wrapper.
 - [Responsible use](responsible_use.md) records the intended research use and the
   current safety and solver limitations.
 - [GitHub Release verification](release_verification.md) explains how to obtain

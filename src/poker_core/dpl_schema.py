@@ -15,10 +15,13 @@ Key contracts encoded here:
   closed-world explanation whitelist and must be a subset of the reasons actually
   recorded in those three fields -- an explanation can only cite a reason the
   decision actually rests on.
-* The final policy is a genuine safety mix: ``final_policy`` must equal
+* The final policy follows the named SafetyMixer convex-mixing contract:
+  ``final_policy`` must equal
   ``(1 - safety_alpha) * base_policy + safety_alpha * exploit_policy`` over the
   union of actions (within :data:`MIXING_ABS_TOL`). By default ``selected_action``
   must be carried with positive probability by ``final_policy`` (Spec 6.8/6.9).
+  This validates the formula and distribution consistency, not strategy safety
+  or optimality.
   ADR-0018 permits an independent post-SafetyMixer epsilon sampler to execute a
   legal action outside ``final_policy``; such decisions must record
   ``execution_sampling`` and ``MIX_EPSILON`` without redefining ``final_policy``.

@@ -2,8 +2,9 @@
 
 Phase 5 starts with a structured explanation object and an LLM-free template
 renderer. The DPL remains the source of truth; explanations cite DPL and optional
-solver diagnostic fields explicitly so a later independent verifier can audit
-the output.
+solver diagnostic fields explicitly so the separate in-repository verifier can
+check the output. Its checks do not constitute external validation or certify
+solver convergence, strategy safety, optimality, or GTO status.
 """
 
 from .contract import (

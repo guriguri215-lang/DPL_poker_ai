@@ -59,7 +59,7 @@ The manifest records the actual entry point, the full argument vector, the
 resolved-or-`unknown` package/Git provenance, the master seed, and hashed solver
 and configuration references.
 
-## Opt in to verified explanations
+## Opt in to in-repository-checked explanations
 
 Add one flag to the same command; no separate top-level command is introduced:
 
@@ -76,11 +76,14 @@ The flag adds these existing-format files:
 The DPL and explanations preserve count and order, and every explanation's
 `dpl_ref` is `session_id:hand_id` for the corresponding DPL. Generation uses the
 deterministic template generator with no LLM, network input, or additional
-dependency. The independent verifier checks every explanation before the
-writer creates or changes the run bundle; if any item fails, no artifact from
-that attempted run is written. On success, the existing RunManifest schema
-references the DPL, explanations, summary, and terminal provenance snapshot
-with their SHA-256 hashes.
+dependency. The separate in-repository verifier checks every explanation against
+its DPL, ontology paths, source references, numeric claims, and rendered template
+before the writer creates or changes the run bundle; if any item fails, no
+artifact from that attempted run is written. These checks do not certify solver
+convergence, strategy safety or optimality, GTO status, external validation, or
+independent third-party reproducibility. On success, the existing RunManifest
+schema references the DPL, explanations, summary, and terminal provenance
+snapshot with their SHA-256 hashes.
 
 Omitting `--explanations` retains the five-file bundle above and does not change
 the session inputs, action, solver behavior, or invocation provenance.

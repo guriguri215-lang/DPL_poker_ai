@@ -1,7 +1,8 @@
-"""Convergence metrics for CFR-family solvers (P3-3).
+"""Finite-iteration exploitability and value diagnostics for CFR solvers (P3-3).
 
-This module is allowed to import the independent evaluator and best-response
-verifier. Solver implementations themselves stay free of those imports.
+This module may import the CFR-independent evaluator and best-response checker.
+Solver implementations themselves stay free of those imports. The diagnostics
+do not certify convergence, exact equilibrium, or GTO status.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ class ConvergenceCheckpoint:
 
 @dataclass(frozen=True, slots=True)
 class ConvergenceMetrics:
-    """Final convergence summary plus optional checkpoints."""
+    """Final finite-iteration diagnostics plus optional checkpoints."""
 
     iterations: int
     final_exploitability: float
@@ -37,7 +38,7 @@ class ConvergenceMetrics:
 
 @dataclass(frozen=True, slots=True)
 class CFRPlusResult:
-    """CFR+ average strategy and independently measured convergence metrics."""
+    """CFR+ average strategy with exploitability and value diagnostics."""
 
     profile: StrategyProfile
     metrics: ConvergenceMetrics
@@ -50,7 +51,7 @@ def solve_cfr_plus_with_metrics(
     checkpoints: Iterable[int] = (),
     average_delay: int = 0,
 ) -> CFRPlusResult:
-    """Run CFR+ and measure exploitability/value with independent verifier code."""
+    """Run CFR+ and measure exploitability/value with CFR-independent code."""
     if iterations < 0:
         raise ValueError(f"iterations must be non-negative, got {iterations}")
     solver = CFRPlus(game, average_delay=average_delay)

@@ -1,3 +1,4 @@
 # experiments
 
-Session runner, league, post-session answer-key trainer, evaluator and weakness reports. All manifest-driven. Placeholder until Phase 6.
+This namespace is reserved and currently empty. Implemented Phase 6 evaluation,
+training, validation, and Gate B code lives under [`src/phase6`](../phase6).

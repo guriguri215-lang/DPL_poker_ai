@@ -1,15 +1,16 @@
 # poker_ai
 
-Hero-side pipeline: observation, CFR river base strategy, action-only leak detection,
-SafetyMixer, ActionSelector and the session runner. The original Phase 2 river MVP
-(ADR-0007) is now connected to the combo-granular CFR solver for all-in decisions.
+Hero-side pipeline: observation, finite-iteration CFR river base strategy,
+action-only leak detection, SafetyMixer, ActionSelector and the session runner.
+The original Phase 2 river MVP (ADR-0007) is connected to the combo-granular CFR
+solver for bounded all-in decisions.
 
 ## Task 3 vertical slice
 
 Scenario → stub opponent public action → observation tracking → CFR `vs_bet` strategy
 → minimal action-only LeakDetector → optional exploit provider → SafetyMixer →
-Decision Provenance Log (JSONL) → schema validation. Showdown-required leaks and the
-LLM layer remain separate later-phase concerns.
+Decision Provenance Log (JSONL) → schema validation. Showdown-required leaks and
+an LLM surface layer are outside the implemented normal-session path.
 
 - `actions.py` — the river action vocabulary; task 3 realises only facing an all-in
   (`FOLD` / `CALL`), whose terminals are showdown-determined so every EV is exact.
@@ -22,8 +23,9 @@ LLM layer remain separate later-phase concerns.
   Hero's own range, not an absolute hand category, so upper bands can be empty for
   small/concentrated ranges (ADR-0015).
 - `cfr_policy.py` — the normal base-policy provider. It maps the observed all-in bet
-  to the river solver bet size and returns Hero's exact combo/position `vs_bet`
-  `StrategyTable` entry under an explicit iterations/average-delay config.
+  to the river solver bet size and returns Hero's finite-iteration combo- and
+  position-specific `vs_bet` `StrategyTable` entry under an explicit
+  iterations/average-delay config.
 - `base_policy.py` — the provider boundary and compatibility-only adapter for the
   hand-authored `0.0.1-stub` strategy.
 - `baseline_strategy.py` + `baseline_strategy.yaml` — the retained **stub** fixture
@@ -40,21 +42,32 @@ LLM layer remain separate later-phase concerns.
   `LEAK_R008` records by shifting fold mass into calls only when exact per-action EV
   improves over the base policy.
 - `mixer.py` — the SafetyMixer (`final = (1-alpha)*base + alpha*exploit`, the DPL
-  mixing contract) and the seeded ActionSelector.
+  convex-mixing contract) and the seeded ActionSelector. This formula produces a
+  valid mixture; it is not a strategy-safety proof.
 - `decision.py` — Hero's decision on the public `Observation`, with the exact
   `incremental_ev_from_current_node` EV (`solver_exact`, ADR-0008).
 - `session.py` — the runner that records public opponent actions, assembles validated
   DPLs and a `RunManifest`, and writes JSONL + manifest under a gitignored output
   directory.
+- `explanation_artifacts.py` — one-to-one orchestration for deterministic template
+  explanations and a separate in-repository verifier. It checks DPL/ontology
+  paths, source references, numeric claims, and rendered templates before any
+  bundle write; it does not certify convergence, safety, optimality, GTO status,
+  external validation, or independent third-party reproducibility.
 
 Run the distributed CLI with
 `poker-xai-run-session --seed 20260704 --hands 200` (CFR+ defaults:
 `--solver-iterations 40 --solver-average-delay 0`). The compatible source-tree
 wrapper remains `python cli/run_session.py --seed 20260704 --hands 200`.
-To exercise a positive safety mix: `poker-xai-run-session --safety-alpha 0.5`.
+To exercise a positive convex mixer blend:
+`poker-xai-run-session --safety-alpha 0.5`.
 Both paths use the packaged `poker_ai.run_session_cli` implementation and record
 their actual entrypoint, raw arguments, package version, and anchored-or-unknown
 Git provenance in the RunManifest.
+
+The normal adapter is limited to heads-up river decisions facing an all-in. Its
+40-iteration default is a bounded experiment setting, not a convergence,
+exact-equilibrium, or GTO certificate.
 
 ## Frozen at 0.1.0 (Q3 / Q4 / Q5)
 

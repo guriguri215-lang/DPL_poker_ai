@@ -1,9 +1,10 @@
-"""Verified template-explanation artifacts for a completed Hero session.
+"""In-repository-checked template artifacts for a completed Hero session.
 
 This module is deliberately an orchestration boundary.  The deterministic
-generator and the independent verifier remain separate in :mod:`explanation`;
-this layer only applies them one-for-one to an already validated session and
-writes the existing P5-4 artifact formats after every explanation has passed.
+generator and verifier remain separate implementations in :mod:`explanation`;
+this layer applies them one-for-one to an already validated session and writes
+the existing P5-4 artifact formats after every explanation has passed. These
+checks are not independent third-party validation.
 """
 
 from __future__ import annotations
@@ -51,7 +52,7 @@ class ExplanationBundleVerificationError(ValueError):
 def generate_and_verify_explanations(
     logs: list[DecisionProvenanceLog],
 ) -> list[ExplanationDocument]:
-    """Generate explanations in DPL order and independently verify every item.
+    """Generate in DPL order and check every item with the separate verifier.
 
     All verifier results are collected before failure is reported.  The caller
     can therefore invoke this function before creating an output directory and
@@ -87,7 +88,7 @@ def write_verified_explanation_bundle(
     """
 
     # This must remain the first operation with side effects deferred: generation
-    # and every independent verification complete before the output tree exists.
+    # and every separate verifier check complete before the output tree exists.
     explanations = generate_and_verify_explanations(result.logs)
 
     root = Path(out_dir)

@@ -1,6 +1,7 @@
 # poker_solver
 
-The game-theoretic solver and its independent verifier.
+Finite-iteration game-theoretic solvers, exact fixed-profile EV evaluation, and a
+CFR-independent best-response checker.
 
 **P3-1 (implemented): the verification layer.** Built *before* the CFR core so
 that reach-probability and turn-sign mistakes cannot hide inside "it looks
@@ -24,9 +25,12 @@ converged" (ADR-0017, REV-20260705-phase2-gate2-fable5 sec.5/sec.6):
 Units are big blinds (ADR-0017 sec.1). Player 0 is the hero; the game is
 two-player zero-sum (`u0 + u1 = 0` at every leaf).
 
-**P3-2/P3-3/P3-4 (implemented): solving and artifacts.** The package now includes
-the vanilla CFR core, CFR+, independent convergence metrics, frozen river scenario
-solves, and StrategyTable baseline artifact generation from solved hero phases.
+**P3-2/P3-3/P3-4 (implemented): finite-iteration policy generation and
+artifacts.** The package includes the vanilla CFR core, CFR+, independently
+computed exploitability/value metrics, bounded frozen-river scenario experiments,
+and StrategyTable baseline artifact generation from finite-iteration Hero
+policies. These measurements do not constitute a convergence, exact-equilibrium,
+or GTO certificate.
 
 **Phase 4 node-lock solver (implemented).** `nodelock.py` validates HARD/SOFT/
 DISABLE lock configs, projects aggregate river action targets into per-combo

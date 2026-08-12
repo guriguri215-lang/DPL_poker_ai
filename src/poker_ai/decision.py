@@ -1,4 +1,4 @@
-"""Hero decision: lookup base policy -> rule exploit -> safety mix -> exact EV.
+"""Hero decision: base policy -> rule exploit -> configured convex mix -> exact EV.
 
 Hero receives an :class:`Observation` -- only *public* information (board, pot,
 facing bet, position, its own combo and range, and the opponent's *assumed range*).
@@ -18,6 +18,8 @@ incremental EV of calling is ``win*(P+B) + tie*(P/2) - lose*B`` (chips gained
 relative to the decision node; ``ev_definition = "incremental_ev_from_current_node"``,
 Solver spec 8.3). The policy EV is the probability-weighted mean of the per-action
 EVs, which is exact because each terminal EV is exact.
+
+The configured policy mixture is not a strategy-safety proof.
 """
 
 from __future__ import annotations

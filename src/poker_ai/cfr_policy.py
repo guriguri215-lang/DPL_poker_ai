@@ -62,7 +62,7 @@ DEFAULT_CFR_RIVER_POLICY_CONFIG = CfrRiverPolicyConfig(
 
 
 class CfrRiverPolicyProvider:
-    """Solve the observed river spot and expose Hero's exact ``vs_bet`` combo policy."""
+    """Expose Hero's finite-iteration combo- and position-specific ``vs_bet`` policy."""
 
     source = CFR_RIVER_POLICY_SOURCE
 

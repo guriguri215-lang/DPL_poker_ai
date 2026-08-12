@@ -3,8 +3,8 @@
 The contract is intentionally separate from the frozen DPL schema: a DPL remains
 the source of truth, while this object records exactly which DPL or solver
 diagnostic fields a generated explanation cites. Template generation fills this
-model deterministically; Phase 5's independent verifier will later check the same
-facts without sharing generator code.
+model deterministically; a separate in-repository verifier checks the same facts
+without sharing generator code. This is not independent third-party validation.
 """
 
 from __future__ import annotations

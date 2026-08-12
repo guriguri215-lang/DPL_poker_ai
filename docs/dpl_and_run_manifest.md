@@ -40,7 +40,9 @@ set. With `--explanations`, schema version `1.0.0` is unchanged and the existing
 JSONL, verifier-summary JSON, and the terminal action-statistics provenance
 snapshot. Paths are relative to the bundle, so the manifest does not embed a
 local absolute path. The manifest is written only after the explanation set has
-passed independent one-to-one verification.
+passed one-to-one checks by the separate in-repository verifier. Those checks do
+not constitute external validation or certify solver convergence, strategy
+safety, optimality, or GTO status.
 
 Structural loading is deliberately separate from compatibility checking. An old
 manifest can remain structurally readable even when its recorded ontology is not

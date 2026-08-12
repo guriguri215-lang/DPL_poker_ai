@@ -1,8 +1,9 @@
 """SafetyMixer, ActionSelector and ExecutionSampler.
 
-The SafetyMixer forms the realised policy as the safety mixture
+The SafetyMixer forms the realised policy as the configured convex mixture
 ``final = (1 - alpha) * base + alpha * exploit`` over the union of actions -- the
 exact formula the frozen DPL validates (``dpl_schema._check_mixing_consistency``).
+The component name and formula do not prove strategy safety or optimality.
 The default CLI run keeps ``alpha = 0`` for baseline compatibility, while Phase 2
 fixtures may pass ``alpha > 0`` to exercise the rule-based exploit boundary.
 
