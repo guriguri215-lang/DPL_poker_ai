@@ -1,9 +1,9 @@
 """Distributed CLI for a normal simulated Hero session.
 
-The command writes validated DPL v3 JSONL plus a RunManifest sidecar.  The river
-adapter remains limited to facing an all-in.  Solver iterations and average
-delay are explicit inputs; the 40-iteration default is not a convergence
-guarantee.
+The command writes validated DPL v3 JSONL plus a RunManifest sidecar and can
+opt in to verified template-explanation artifacts.  The river adapter remains
+limited to facing an all-in.  Solver iterations and average delay are explicit
+inputs; the 40-iteration default is not a convergence guarantee.
 """
 
 from __future__ import annotations
@@ -13,6 +13,10 @@ import sys
 from pathlib import Path
 
 from poker_ai.cfr_policy import DEFAULT_CFR_RIVER_POLICY_CONFIG, CfrRiverPolicyConfig
+from poker_ai.explanation_artifacts import (
+    ExplanationBundleVerificationError,
+    write_verified_explanation_bundle,
+)
 from poker_ai.exploit import RuleExploitResult
 from poker_ai.leak import (
     LeakDetector,
@@ -94,6 +98,14 @@ def _parser(*, entrypoint: str) -> argparse.ArgumentParser:
         help="use a public fixture baseline that produces leak/exploit smoke output",
     )
     parser.add_argument(
+        "--explanations",
+        action="store_true",
+        help=(
+            "generate template explanations and independently verify every item "
+            "before writing the expanded bundle"
+        ),
+    )
+    parser.add_argument(
         "--out-dir",
         type=Path,
         default=Path("experiments_output/task3_vertical_slice"),
@@ -142,7 +154,23 @@ def main(argv: list[str] | None = None, *, entrypoint: str = CONSOLE_ENTRYPOINT)
             checkpoints=(),
         ),
     )
-    jsonl_path, manifest_path = write_session_bundle(result, args.out_dir)
+    explanation_paths = None
+    if args.explanations:
+        try:
+            explanation_paths = write_verified_explanation_bundle(
+                result,
+                args.out_dir,
+                artifact_id="hero_session_explanation_artifacts",
+                safety_alpha=safety_alpha,
+                leaky_fixture=args.leaky_fixture,
+            )
+        except ExplanationBundleVerificationError as exc:
+            print(f"explanation verification failed: {exc}", file=sys.stderr)
+            return 1
+        jsonl_path = explanation_paths.dpl
+        manifest_path = explanation_paths.manifest
+    else:
+        jsonl_path, manifest_path = write_session_bundle(result, args.out_dir)
 
     detected_leaks = sum(len(log.detected_leaks) for log in result.logs)
     mixed_decisions = sum(1 for log in result.logs if log.mix_reasons)
@@ -150,6 +178,10 @@ def main(argv: list[str] | None = None, *, entrypoint: str = CONSOLE_ENTRYPOINT)
     print(f"detected_leaks={detected_leaks}")
     print(f"mixed_decisions={mixed_decisions}")
     print(f"wrote {jsonl_path}")
+    if explanation_paths is not None:
+        print(f"explanations_verified={len(result.logs)}")
+        print(f"wrote {explanation_paths.explanations}")
+        print(f"wrote {explanation_paths.verifier_summary}")
     print(f"wrote {manifest_path}")
     return 0
 

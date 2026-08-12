@@ -20,4 +20,10 @@ Phase 5 keeps generation deterministic and LLM-free:
   units. Detected leak numeric claims are limited to whitelisted leak reasons,
   and solver diagnostics input requires matching explanation-side claims.
 
+The normal Hero `--explanations` path and the historical P5-4 artifact CLI share
+the minimal orchestration in `poker_ai.explanation_artifacts`. That layer keeps
+the generator and verifier separate, preserves DPL order, verifies every pair
+before writing, and reuses the existing explanations JSONL and verifier-summary
+formats. It changes neither explanation schema nor generator/verifier logic.
+
 Any future LLM surface layer remains a later Phase 8 task.

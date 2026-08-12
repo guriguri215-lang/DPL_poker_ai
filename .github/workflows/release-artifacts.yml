@@ -25,12 +25,12 @@ on:
       tag:
         description: Existing version tag to build
         required: true
-        default: "0.1.0a7"
+        default: "0.1.0a8"
         type: string
       expected_version:
         description: Exact distribution version
         required: true
-        default: "0.1.0a7"
+        default: "0.1.0a8"
         type: string
 
 permissions:
@@ -38,7 +38,7 @@ permissions:
 
 env:
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
-  EXPECTED_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.expected_version || '0.1.0a7' }}
+  EXPECTED_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.expected_version || '0.1.0a8' }}
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || '' }}
   SOURCE_REF: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.event.pull_request.head.sha }}
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import math
@@ -9,6 +10,12 @@ from pathlib import Path
 
 import pytest
 
+from explanation import (
+    ExplanationDocument,
+    VerificationIssue,
+    VerificationResult,
+    verify_explanation,
+)
 from poker_ai.base_policy import StubBasePolicyProvider
 from poker_ai.cfr_policy import (
     CFR_RIVER_POLICY_SOURCE,
@@ -316,7 +323,7 @@ def test_different_seed_changes_output():
 def test_manifest_is_valid_and_pins_versions_and_configs():
     manifest = build_manifest(20260704, HANDS, git_commit="unknown")
     assert isinstance(manifest, RunManifest)
-    assert manifest.code.package_version == "0.1.0a7"
+    assert manifest.code.package_version == "0.1.0a8"
     assert manifest.code.git_dirty is None
     assert manifest.code.entrypoint == "poker_ai.session.run_session"
     assert manifest.code.argv == []
@@ -403,9 +410,141 @@ def test_leaky_fixture_cli_smoke_writes_detected_leaks_and_mix(tmp_path, capsys)
     assert any(log.safety_alpha > 0.0 and log.mix_reasons for log in logs)
     assert any(log.exploit_policy == {"CALL": 1.0} for log in logs)
     assert manifest.versions.baseline_table_version == "fixture-action-baseline"
-    assert manifest.code.package_version == "0.1.0a7"
+    assert manifest.code.package_version == "0.1.0a8"
     assert manifest.code.entrypoint == "cli/run_session.py"
     assert manifest.code.argv == raw_argv
+    assert {
+        path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*") if path.is_file()
+    } == {
+        "S20260704.dpl.jsonl",
+        "S20260704.manifest.json",
+        "provenance/action_baseline_table.json",
+        "provenance/action_stats_terminal_snapshots.json",
+        "provenance/leak_confidence_estimator.json",
+    }
+
+
+@pytest.mark.parametrize("leaky_fixture", [False, True])
+def test_explanations_flag_writes_verified_one_to_one_bundle(
+    tmp_path,
+    capsys,
+    leaky_fixture,
+):
+    from poker_ai import run_session_cli
+
+    raw_argv = [
+        "--seed",
+        "20260704",
+        "--hands",
+        "3",
+        "--solver-iterations",
+        "1",
+        "--explanations",
+        "--out-dir",
+        str(tmp_path),
+    ]
+    if leaky_fixture:
+        raw_argv.insert(-2, "--leaky-fixture")
+
+    assert run_session_cli.main(raw_argv) == 0
+    assert "explanations_verified=3" in capsys.readouterr().out
+
+    dpl_path = tmp_path / "S20260704.dpl.jsonl"
+    explanations_path = tmp_path / "S20260704.explanations.jsonl"
+    summary_path = tmp_path / "S20260704.verifier_summary.json"
+    manifest_path = tmp_path / "S20260704.manifest.json"
+    dpls = [
+        DecisionProvenanceLog.model_validate(json.loads(line))
+        for line in dpl_path.read_text(encoding="utf-8").splitlines()
+    ]
+    explanations = [
+        ExplanationDocument.model_validate(json.loads(line))
+        for line in explanations_path.read_text(encoding="utf-8").splitlines()
+    ]
+
+    assert len(dpls) == len(explanations) == 3
+    assert [item.dpl_ref for item in explanations] == [
+        f"{dpl.session_id}:{dpl.hand_id}" for dpl in dpls
+    ]
+    for dpl, explanation in zip(dpls, explanations, strict=True):
+        verified = verify_explanation(explanation, dpl)
+        assert verified.passed, verified.issues
+    if leaky_fixture:
+        assert all(dpl.detected_leaks for dpl in dpls)
+        assert any(dpl.mix_reasons for dpl in dpls)
+    else:
+        assert all(not dpl.detected_leaks for dpl in dpls)
+
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary["metadata"]["artifact_id"] == "hero_session_explanation_artifacts"
+    assert summary["metadata"]["leaky_fixture"] is leaky_fixture
+    assert summary["session"]["session_id"] == "S20260704"
+    assert summary["session"]["dpl_count"] == summary["session"]["explanation_count"] == 3
+    assert summary["verification"] == {
+        "total": 3,
+        "passed": 3,
+        "failed": 0,
+        "pass_rate": 1.0,
+        "failures": [],
+    }
+
+    manifest = RunManifest.model_validate(json.loads(manifest_path.read_text(encoding="utf-8")))
+    assert manifest.code.argv == raw_argv
+    assert [output.name for output in manifest.outputs] == [
+        "action_stats_terminal_snapshots",
+        "S20260704.dpl.jsonl",
+        "S20260704.explanations.jsonl",
+        "S20260704.verifier_summary.json",
+    ]
+    for output in manifest.outputs:
+        assert not Path(output.path).is_absolute()
+        target = tmp_path / output.path
+        assert target.is_file()
+        assert output.sha256 == hashlib.sha256(target.read_bytes()).hexdigest()
+
+
+def test_explanation_verification_failure_checks_all_and_writes_nothing(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    from poker_ai import explanation_artifacts, run_session_cli
+
+    out_dir = tmp_path / "fresh"
+    verified_refs = []
+
+    def reject(_explanation, dpl):
+        verified_refs.append(f"{dpl.session_id}:{dpl.hand_id}")
+        return VerificationResult(
+            (
+                VerificationIssue(
+                    code="injected_failure",
+                    location="test",
+                    message="injected verification failure",
+                ),
+            )
+        )
+
+    monkeypatch.setattr(explanation_artifacts, "verify_explanation", reject)
+    rc = run_session_cli.main(
+        [
+            "--seed",
+            "20260704",
+            "--hands",
+            "3",
+            "--solver-iterations",
+            "1",
+            "--explanations",
+            "--out-dir",
+            str(out_dir),
+        ]
+    )
+
+    assert rc == 1
+    assert len(verified_refs) == 3
+    assert len(set(verified_refs)) == 3
+    assert "explanation verification failed" in capsys.readouterr().err
+    assert not out_dir.exists()
 
 
 def test_distributed_session_entrypoint_and_help_are_available(capsys):
@@ -424,6 +563,7 @@ def test_distributed_session_entrypoint_and_help_are_available(capsys):
     help_text = capsys.readouterr().out
     assert "--version" in help_text
     assert "--solver-iterations" in help_text
+    assert "--explanations" in help_text
     assert "--out-dir" in help_text
 
 
@@ -440,14 +580,14 @@ def test_session_version_commands_exit_without_starting_or_writing(tmp_path, mon
     with pytest.raises(SystemExit) as console_stopped:
         run_session_cli.main(["--version"])
     assert console_stopped.value.code == 0
-    assert capsys.readouterr().out == "poker-xai-run-session 0.1.0a7\n"
+    assert capsys.readouterr().out == "poker-xai-run-session 0.1.0a8\n"
     assert tuple(tmp_path.iterdir()) == ()
 
     compatibility_cli = _load_cli_module()
     with pytest.raises(SystemExit) as wrapper_stopped:
         compatibility_cli.main(["--version"])
     assert wrapper_stopped.value.code == 0
-    assert capsys.readouterr().out == "cli/run_session.py 0.1.0a7\n"
+    assert capsys.readouterr().out == "cli/run_session.py 0.1.0a8\n"
     assert tuple(tmp_path.iterdir()) == ()
 
 

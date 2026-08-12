@@ -111,6 +111,11 @@ def test_manual_and_automated_post_publication_checks_are_documented() -> None:
 def test_release_notes_contract_covers_scope_and_alpha_limitations() -> None:
     runbook = _normalized("docs/releasing.md")
     for required in (
+        "opt-in template explanations",
+        "independent all-item verification before artifact writes",
+        "shared P5-4 artifact processing",
+        "hashed RunManifest output references",
+        "no dependency or schema was added",
         "published-release four-asset verification workflow",
         "continued required manual verification",
         "release documentation contract test",

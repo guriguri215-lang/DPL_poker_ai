@@ -76,6 +76,22 @@ same packaged module:
 python cli/run_session.py --seed 20260704 --hands 5 --out-dir experiments_output/quickstart
 ```
 
+Add the single `--explanations` opt-in when the same run should also produce
+deterministic template explanations and an independent verifier summary:
+
+```bash
+poker-xai-run-session --seed 20260704 --hands 5 --explanations --out-dir experiments_output/quickstart
+```
+
+Without the flag, the session's inputs, actions, solver behavior, and output file
+set are unchanged. With it, each validated DPL produces one explanation in the
+same order. Every explanation is independently verified before any run artifact
+is written; a verification failure leaves no partial bundle from that run. The
+expanded bundle reuses the existing explanations JSONL and verifier-summary JSON
+formats, and its RunManifest records hashed references to the DPL, explanations,
+summary, and existing terminal provenance output. Generation is LLM-free,
+network-free, and adds no dependency or schema.
+
 Identify either command without starting a session or creating output files:
 
 ```bash
