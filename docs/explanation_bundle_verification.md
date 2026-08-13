@@ -17,7 +17,8 @@ bundles. The manifest's directory is the bundle root. Verification fails closed
 unless every existing RunManifest `ArtifactRef` has a normalized relative POSIX
 path inside that root, a SHA-256 digest, and a readable file with exactly that
 digest. The DPL JSONL, explanations JSONL, verifier-summary JSON, and manifest
-are required.
+are required. Current normal Hero bundles also carry the hashed post-session
+evaluation artifact; saved older bundles without it remain supported.
 
 After artifact integrity passes, the command uses the existing version-aware DPL
 loader and existing explanation checker. It requires the DPLs and
@@ -30,9 +31,11 @@ the writer.
 A successful command reports only these two result classes:
 
 ```text
-artifact_integrity=passed references=4
+artifact_integrity=passed references=5
 explanation_checker=passed total=3 summary=consistent
 ```
+
+An older four-reference bundle reports `references=4` instead.
 
 On failure, the command emits no partial success result and returns nonzero. It
 reports a category and target filename without writing output or changing the

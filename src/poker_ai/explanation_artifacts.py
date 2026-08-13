@@ -30,6 +30,11 @@ from explanation import (
 from poker_core.dpl_schema import DecisionProvenanceLog, load_dpl_json
 from poker_core.run_manifest import ArtifactRef, RunManifest
 
+from .opponent import OpponentAnswerKey
+from .post_session_evaluation import (
+    build_post_session_artifact,
+    post_session_evaluation_filename,
+)
 from .posterior_bundle import resolve_bundle_path, sha256_bytes, write_posterior_artifacts
 from .session import SessionResult, write_jsonl, write_manifest
 
@@ -44,6 +49,7 @@ class ExplanationBundlePaths:
     explanations: Path
     verifier_summary: Path
     manifest: Path
+    post_session_evaluation: Path | None = None
 
 
 class ExplanationBundleVerificationError(ValueError):
@@ -272,23 +278,38 @@ def write_verified_explanation_bundle(
     artifact_id: str,
     safety_alpha: float,
     leaky_fixture: bool,
+    answer_key: OpponentAnswerKey | None = None,
     reference_root: Path | str | None = None,
     dpl_filename: str | None = None,
     explanations_filename: str | None = None,
     summary_filename: str | None = None,
     manifest_filename: str | None = None,
 ) -> ExplanationBundlePaths:
-    """Verify all explanations, then write the existing four-output bundle.
+    """Verify all explanations, then write the expanded normal-Hero bundle.
 
     The DPL, explanation JSONL, verifier summary, and existing terminal posterior
     provenance output are all referenced with SHA-256 hashes through the current
     :class:`~poker_core.run_manifest.ArtifactRef` contract.  No DPL or
-    RunManifest schema extension is involved.
+    RunManifest schema extension is involved.  When the completed normal Hero
+    environment supplies its answer key, the same manifest also references one
+    deterministic post-session evaluation and next-settings artifact. Historical
+    P5-4 callers omit the answer key and retain their existing output set.
     """
 
     # This must remain the first operation with side effects deferred: generation
     # and every separate verifier check complete before the output tree exists.
     explanations, verification = _generate_and_verify_explanation_set(result.logs)
+    post_session_artifact = None
+    if answer_key is not None:
+        post_session_artifact = build_post_session_artifact(
+            session_id=result.session_id,
+            logs=result.logs,
+            manifest=result.manifest,
+            posterior_bundle=result.posterior_bundle,
+            answer_key=answer_key,
+            explanations=explanations,
+            checker_results=verification.checker_results,
+        )
 
     root = Path(out_dir)
     refs_root = Path(reference_root) if reference_root is not None else root
@@ -296,6 +317,11 @@ def write_verified_explanation_bundle(
     explanations_path = root / (explanations_filename or f"{result.session_id}.explanations.jsonl")
     summary_path = root / (summary_filename or f"{result.session_id}.verifier_summary.json")
     manifest_path = root / (manifest_filename or f"{result.session_id}.manifest.json")
+    post_session_path = (
+        root / post_session_evaluation_filename(result.session_id)
+        if post_session_artifact is not None
+        else None
+    )
 
     summary = _summary_payload(
         artifact_id=artifact_id,
@@ -324,6 +350,8 @@ def write_verified_explanation_bundle(
         json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    if post_session_path is not None and post_session_artifact is not None:
+        post_session_path.write_bytes(post_session_artifact.canonical_bytes())
 
     manifest = result.manifest.model_copy(deep=True)
     manifest.outputs = [
@@ -331,6 +359,7 @@ def write_verified_explanation_bundle(
         _artifact_ref(refs_root, dpl_path),
         _artifact_ref(refs_root, explanations_path),
         _artifact_ref(refs_root, summary_path),
+        *([_artifact_ref(refs_root, post_session_path)] if post_session_path is not None else []),
     ]
     write_manifest(manifest, manifest_path)
     return ExplanationBundlePaths(
@@ -338,6 +367,7 @@ def write_verified_explanation_bundle(
         explanations=explanations_path,
         verifier_summary=summary_path,
         manifest=manifest_path,
+        post_session_evaluation=post_session_path,
     )
 
 

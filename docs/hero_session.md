@@ -71,7 +71,9 @@ The flag adds these existing-format files:
 
 - `S00000007.explanations.jsonl`, with one `ExplanationDocument` per DPL line;
 - `S00000007.verifier_summary.json`, with all-item verification counts and any
-  failures (a successful published bundle has none).
+  failures (a successful published bundle has none);
+- `S00000007.post_session_evaluation.json`, a canonical versioned Phase 8
+  evaluation plus the proposed next-session settings.
 
 The DPL and explanations preserve count and order, and every explanation's
 `dpl_ref` is `session_id:hand_id` for the corresponding DPL. Generation uses the
@@ -82,8 +84,30 @@ before the writer creates or changes the run bundle; if any item fails, no
 artifact from that attempted run is written. These checks do not certify solver
 convergence, strategy safety or optimality, GTO status, external validation, or
 independent third-party reproducibility. On success, the existing RunManifest
-schema references the DPL, explanations, summary, and terminal provenance
-snapshot with their SHA-256 hashes.
+schema references the DPL, explanations, summary, terminal provenance snapshot,
+and post-session evaluation with relative paths and SHA-256 hashes.
+
+The answer key remains environment-only throughout every decision and is
+revealed only after `run_session` has returned all validated DPLs. The initial
+MVP makes the following deterministic assumptions because the specification
+does not prescribe formulas or numeric update steps:
+
+- detection accuracy is `(TP + TN) / (TP + FP + FN + TN)` over reached,
+  structurally eligible, non-boundary terminal candidates;
+- estimation error is the unweighted mean absolute observed-rate error over
+  reached terminal candidates;
+- EV gain is the per-decision mean of exact `final_ev - base_ev`;
+- over-adjustment means exact `final_ev < base_ev`, while under-adjustment means
+  exact `exploit_ev > final_ev`;
+- explanation validity requires both the existing explanation verifier and
+  truth-positive cited LEAK reasons.
+
+A false positive, negative mean EV gain, or over-adjustment keeps the existing
+detector estimator but sets its three existing confidence gates to `1.0`, safety
+alpha to `0.0`, and epsilon to `0.0`. Otherwise every current value is retained.
+In particular, false negatives and under-adjustment do not lower a threshold or
+raise alpha/epsilon in this slice. The artifact is a proposal only: a later
+normal Hero session does not yet load or consume it automatically.
 
 Omitting `--explanations` retains the five-file bundle above and does not change
 the session inputs, action, solver behavior, or invocation provenance.

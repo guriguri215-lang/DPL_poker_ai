@@ -71,6 +71,12 @@ The normal session implemented by
    existing explanations JSONL and verifier-summary formats. The unchanged
    RunManifest schema uses its existing hashed `ArtifactRef` outputs for DPL,
    explanations, summary, and the terminal posterior-provenance snapshot.
+9. After every decision and every explanation check has completed, the
+   environment reveals the fixed stub answer key to the post-session evaluator.
+   It compares all terminal posterior candidates with ground truth, aggregates
+   existing exact DPL EV and verifier results, and writes one canonical evaluation
+   plus conservative next-session settings. The answer key is never passed to
+   Hero. The generated settings are not yet consumed by a later normal session.
 
 The [DPL and RunManifest page](dpl_and_run_manifest.md) describes the two public
 contracts. The [session tutorial](hero_session.md) shows the supported command.
@@ -82,3 +88,7 @@ so the legal actions are `FOLD` and `CALL`. It does not expand the other action
 branches. The default CFR+ budget is 40 iterations with average delay 0 and no
 checkpoints. Forty iterations is an alpha default, not a convergence guarantee;
 the resulting policy has no exact-equilibrium or GTO certificate.
+
+The current Phase 8 slice ends at a hashed next-session setting artifact. Loading
+that learned setting into a subsequent normal Hero session, and carrying it
+through a sequence of sessions, remains outside this slice.

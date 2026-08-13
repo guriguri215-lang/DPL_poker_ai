@@ -24,6 +24,7 @@ from poker_ai.leak import (
     LeakDetectorConfig,
     leaky_fixture_action_baseline_table,
 )
+from poker_ai.opponent import reveal_stub_opponent_answer_key
 from poker_ai.runtime_provenance import collect_runtime_provenance, resolve_package_version
 from poker_ai.session import run_session, write_session_bundle
 
@@ -137,6 +138,11 @@ def main(argv: list[str] | None = None, *, entrypoint: str = CONSOLE_ENTRYPOINT)
     )
     explanation_paths = None
     if args.explanations:
+        # The environment reveals this only after run_session has completed every
+        # Hero decision. It is passed to post-session evaluation, never to Hero.
+        answer_key = reveal_stub_opponent_answer_key(
+            opponent_model_id=result.manifest.opponents[0].opponent_id
+        )
         try:
             explanation_paths = write_verified_explanation_bundle(
                 result,
@@ -144,6 +150,7 @@ def main(argv: list[str] | None = None, *, entrypoint: str = CONSOLE_ENTRYPOINT)
                 artifact_id=NORMAL_HERO_EXPLANATION_ARTIFACT_ID,
                 safety_alpha=safety_alpha,
                 leaky_fixture=args.leaky_fixture,
+                answer_key=answer_key,
             )
         except ExplanationBundleVerificationError as exc:
             print(f"explanation verification failed: {exc}", file=sys.stderr)
@@ -163,6 +170,7 @@ def main(argv: list[str] | None = None, *, entrypoint: str = CONSOLE_ENTRYPOINT)
         print(f"explanations_verified={len(result.logs)}")
         print(f"wrote {explanation_paths.explanations}")
         print(f"wrote {explanation_paths.verifier_summary}")
+        print(f"wrote {explanation_paths.post_session_evaluation}")
     print(f"wrote {manifest_path}")
     return 0
 

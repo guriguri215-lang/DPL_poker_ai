@@ -488,6 +488,7 @@ def test_explanations_flag_writes_verified_one_to_one_bundle(
     dpl_path = tmp_path / "S20260704.dpl.jsonl"
     explanations_path = tmp_path / "S20260704.explanations.jsonl"
     summary_path = tmp_path / "S20260704.verifier_summary.json"
+    evaluation_path = tmp_path / "S20260704.post_session_evaluation.json"
     manifest_path = tmp_path / "S20260704.manifest.json"
     dpls = [
         DecisionProvenanceLog.model_validate(json.loads(line))
@@ -524,6 +525,32 @@ def test_explanations_flag_writes_verified_one_to_one_bundle(
         "failures": [],
     }
 
+    evaluation_bytes = evaluation_path.read_bytes()
+    evaluation = json.loads(evaluation_bytes)
+    assert evaluation_bytes == (
+        json.dumps(evaluation, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n"
+    ).encode("utf-8")
+    assert evaluation["schema_version"] == "1.0.0"
+    assert evaluation["artifact_type"] == "post_session_answer_key_evaluation"
+    metrics = evaluation["evaluation"]
+    assert metrics["session_id"] == "S20260704"
+    assert metrics["opponent_model_id"] == "stub_jam_all"
+    assert metrics["leak_detection_accuracy"] == 1.0
+    assert metrics["average_estimation_error"] == 0.0
+    assert metrics["over_adjustment_count"] == 0
+    assert metrics["under_adjustment_count"] == 0
+    assert metrics["explanation_validity_score"] == 1.0
+    next_settings = evaluation["next_session_settings"]
+    if leaky_fixture:
+        assert metrics["exploit_ev_gain_vs_base"] > 0.0
+        assert next_settings["safety_alpha"] == 1.0
+        assert next_settings["leak_detector_config"]["min_confidence"] == 0.5
+    else:
+        assert metrics["exploit_ev_gain_vs_base"] == 0.0
+        assert next_settings["safety_alpha"] == 0.0
+        assert next_settings["leak_detector_config"]["min_confidence"] == 0.95
+    assert next_settings["epsilon"] == 0.0
+
     manifest = RunManifest.model_validate(json.loads(manifest_path.read_text(encoding="utf-8")))
     assert manifest.code.argv == raw_argv
     assert [output.name for output in manifest.outputs] == [
@@ -531,6 +558,7 @@ def test_explanations_flag_writes_verified_one_to_one_bundle(
         "S20260704.dpl.jsonl",
         "S20260704.explanations.jsonl",
         "S20260704.verifier_summary.json",
+        "S20260704.post_session_evaluation.json",
     ]
     for output in manifest.outputs:
         assert not Path(output.path).is_absolute()
@@ -581,6 +609,86 @@ def test_explanation_verification_failure_checks_all_and_writes_nothing(
     assert len(set(verified_refs)) == 3
     assert "explanation verification failed" in capsys.readouterr().err
     assert not out_dir.exists()
+
+
+def test_explanation_generation_failure_writes_nothing(tmp_path, monkeypatch):
+    from poker_ai import explanation_artifacts, run_session_cli
+
+    out_dir = tmp_path / "fresh"
+
+    def reject(_dpl):
+        raise RuntimeError("injected explanation generation failure")
+
+    monkeypatch.setattr(explanation_artifacts, "generate_template_explanation", reject)
+    with pytest.raises(RuntimeError, match="injected explanation generation failure"):
+        run_session_cli.main(
+            [
+                "--seed",
+                "20260704",
+                "--hands",
+                "1",
+                "--solver-iterations",
+                "1",
+                "--explanations",
+                "--out-dir",
+                str(out_dir),
+            ]
+        )
+    assert not out_dir.exists()
+
+
+def test_answer_key_reveal_occurs_after_all_decisions_without_hidden_strategy_read(
+    tmp_path,
+    monkeypatch,
+):
+    from poker_ai import run_session_cli
+    from poker_ai.decision import HeroAgent
+    from poker_ai.opponent import StubOpponent
+
+    events: list[str] = []
+    hidden_reads: list[str] = []
+    original_decide = HeroAgent.decide
+    original_reveal = run_session_cli.reveal_stub_opponent_answer_key
+
+    def recording_decide(self, *args, **kwargs):
+        result = original_decide(self, *args, **kwargs)
+        events.append("decision-complete")
+        return result
+
+    def recording_reveal(*, opponent_model_id):
+        events.append("answer-key-revealed")
+        return original_reveal(opponent_model_id=opponent_model_id)
+
+    def forbidden_hidden_strategy_read(_self):
+        hidden_reads.append("read")
+        raise AssertionError("normal Hero must not read hidden_strategy")
+
+    monkeypatch.setattr(HeroAgent, "decide", recording_decide)
+    monkeypatch.setattr(run_session_cli, "reveal_stub_opponent_answer_key", recording_reveal)
+    monkeypatch.setattr(
+        StubOpponent,
+        "hidden_strategy",
+        property(forbidden_hidden_strategy_read),
+    )
+
+    assert (
+        run_session_cli.main(
+            [
+                "--seed",
+                "7",
+                "--hands",
+                "3",
+                "--solver-iterations",
+                "1",
+                "--explanations",
+                "--out-dir",
+                str(tmp_path),
+            ]
+        )
+        == 0
+    )
+    assert events == ["decision-complete"] * 3 + ["answer-key-revealed"]
+    assert hidden_reads == []
 
 
 def test_distributed_session_entrypoint_and_help_are_available(capsys):

@@ -34,7 +34,8 @@ safety, GTO status, solver convergence, or EV superiority.
 
 - **Implemented**: DPL v3, the Reason Ontology, RunManifest verification,
   frozen-model terminal/action EV, bounded CFR/CFR+ river experiments, synthetic
-  HARD node locks, deterministic template explanations, and source-DPL checks.
+  HARD node locks, deterministic template explanations, source-DPL checks, and
+  post-session answer-key evaluation with a conservative next-setting artifact.
 - **Experimental and bounded**: heads-up river facing-all-in sessions and
   finite-iteration combo- and position-specific policies. They have no
   convergence, exact-equilibrium, or GTO certificate.
@@ -105,8 +106,20 @@ optimality, GTO status, external validation, or independent third-party
 reproducibility. A verification failure leaves no partial bundle from that run.
 The expanded bundle reuses the existing explanations JSONL and verifier-summary
 JSON formats, and its RunManifest records hashed references to the DPL,
-explanations, summary, and existing terminal provenance output. Generation is
-LLM-free, network-free, and adds no dependency or schema.
+explanations, summary, existing terminal provenance output, and one versioned
+`*.post_session_evaluation.json` artifact. Only after every Hero decision has
+completed does the environment reveal the fixed stub answer key to this
+evaluation. The artifact deterministically records the Phase 8 metrics and a
+next-session setting composed only from the existing `LeakDetectorConfig`
+thresholds, safety alpha, and epsilon. False positives, negative mean exact EV
+gain, or over-adjustment make those settings maximally conservative; false
+negatives and under-adjustment do not automatically increase aggression.
+Generation is LLM-free, network-free, and adds no dependency or DPL/RunManifest
+schema change.
+
+This slice produces and verifies the next-session setting but does not yet make
+a later normal Hero session consume it automatically. That consecutive-session
+handoff remains a separate boundary.
 
 The saved bundle can later be rechecked offline from its manifest:
 
