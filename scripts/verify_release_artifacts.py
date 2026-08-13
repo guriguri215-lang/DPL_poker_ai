@@ -649,7 +649,7 @@ with contextlib.redirect_stdout(bundle_output):
         ['--manifest', str(manifest_paths[0])]
     ) == 0
 assert bundle_output.getvalue().splitlines() == [
-    'artifact_integrity=passed references=4',
+    'artifact_integrity=passed references=5',
     'explanation_checker=passed total=1 summary=consistent',
 ]
 """

@@ -99,7 +99,7 @@ def test_saved_normal_and_leaky_bundles_pass_read_only_verification(tmp_path, le
 
     result = verify_saved_explanation_bundle(manifest_path)
 
-    assert result.artifact_count == 4
+    assert result.artifact_count == 5
     assert result.dpl_count == result.explanation_count == 3
     assert result.checker_total == result.checker_passed == 3
     assert result.summary_consistent
@@ -111,6 +111,15 @@ def test_hash_mismatch_fails_without_changing_bundle(tmp_path):
     manifest_path = _write_bundle(root)
     explanations = _artifact_path(manifest_path, ".explanations.jsonl")
     explanations.write_bytes(explanations.read_bytes() + b" ")
+
+    _assert_failure_is_read_only(root, manifest_path, "artifact-hash-mismatch")
+
+
+def test_post_session_evaluation_tamper_is_rejected_by_artifact_hash(tmp_path):
+    root = tmp_path / "bundle"
+    manifest_path = _write_bundle(root)
+    evaluation = _artifact_path(manifest_path, ".post_session_evaluation.json")
+    evaluation.write_bytes(evaluation.read_bytes() + b" ")
 
     _assert_failure_is_read_only(root, manifest_path, "artifact-hash-mismatch")
 
@@ -224,6 +233,18 @@ def test_a8_normal_bundle_format_remains_loadable(tmp_path):
     manifest_path = _write_bundle(root)
     manifest = _payload(manifest_path)
     manifest["code"]["package_version"] = "0.1.0a8"
+    evaluation_refs = [
+        item
+        for item in manifest["outputs"]
+        if item["path"].endswith(".post_session_evaluation.json")
+    ]
+    assert len(evaluation_refs) == 1
+    (root / evaluation_refs[0]["path"]).unlink()
+    manifest["outputs"] = [
+        item
+        for item in manifest["outputs"]
+        if not item["path"].endswith(".post_session_evaluation.json")
+    ]
     _write_payload(manifest_path, manifest)
 
     result = verify_saved_explanation_bundle(manifest_path)
@@ -242,7 +263,7 @@ def test_distribution_cli_reports_only_bundle_and_checker_results(tmp_path, caps
     captured = capsys.readouterr()
     assert captured.err == ""
     assert captured.out.splitlines() == [
-        "artifact_integrity=passed references=4",
+        "artifact_integrity=passed references=5",
         "explanation_checker=passed total=3 summary=consistent",
     ]
     assert _snapshot(root) == before

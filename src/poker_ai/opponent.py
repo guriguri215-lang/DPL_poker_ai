@@ -15,6 +15,7 @@ the separate, clearly-named :meth:`act` method, which Hero is never handed.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 from poker_core.range_model import Range
@@ -32,6 +33,54 @@ class OpponentAction:
     action: str
     #: All-in bet size in big blinds (the amount Hero must call).
     bet_size: float
+
+
+@dataclass(frozen=True)
+class OpponentAnswerKey:
+    """Environment-only terminal action probabilities revealed after a session."""
+
+    opponent_model_id: str
+    action_probabilities: tuple[tuple[str, float], ...]
+
+    def __post_init__(self) -> None:
+        if not self.opponent_model_id:
+            raise ValueError("opponent_model_id must not be empty")
+        actions = [action for action, _probability in self.action_probabilities]
+        if not actions or any(not action for action in actions):
+            raise ValueError("answer-key actions must be non-empty")
+        if actions != sorted(actions) or len(actions) != len(set(actions)):
+            raise ValueError("answer-key actions must be unique and sorted")
+        probabilities = [probability for _action, probability in self.action_probabilities]
+        if any(
+            not math.isfinite(probability) or not 0.0 <= probability <= 1.0
+            for probability in probabilities
+        ):
+            raise ValueError("answer-key probabilities must be finite and in [0, 1]")
+        if not math.isclose(math.fsum(probabilities), 1.0, rel_tol=0.0, abs_tol=1e-12):
+            raise ValueError("answer-key probabilities must sum to 1.0")
+
+    def action_group_rate(self, action_group: tuple[str, ...] | list[str]) -> float:
+        """Return the true probability of one terminal-snapshot action group."""
+
+        if not action_group or any(not action for action in action_group):
+            raise ValueError("action_group must contain non-empty action labels")
+        if len(action_group) != len(set(action_group)):
+            raise ValueError("action_group must not contain duplicate actions")
+        probabilities = dict(self.action_probabilities)
+        return math.fsum(probabilities.get(action, 0.0) for action in action_group)
+
+
+def reveal_stub_opponent_answer_key(*, opponent_model_id: str) -> OpponentAnswerKey:
+    """Reveal the fixed stub policy for environment-side post-session evaluation.
+
+    Session orchestration calls this only after every Hero decision has completed.
+    Hero decision code is never given this value or this function.
+    """
+
+    return OpponentAnswerKey(
+        opponent_model_id=opponent_model_id,
+        action_probabilities=(("BET_ALL_IN", 1.0),),
+    )
 
 
 @dataclass
