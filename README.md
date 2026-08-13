@@ -117,9 +117,22 @@ negatives and under-adjustment do not automatically increase aggression.
 Generation is LLM-free, network-free, and adds no dependency or DPL/RunManifest
 schema change.
 
-This slice produces and verifies the next-session setting but does not yet make
-a later normal Hero session consume it automatically. That consecutive-session
-handoff remains a separate boundary.
+Pass that completed session's RunManifest explicitly to make the verified
+settings the defaults for one later normal Hero session:
+
+```bash
+poker-xai-run-session --seed 20260705 --hands 5 --previous-session-manifest experiments_output/quickstart/S20260704.manifest.json --out-dir experiments_output/quickstart-next
+```
+
+Before Hero starts, the command reuses the saved explanation-bundle verifier,
+relative-path containment, every `ArtifactRef` SHA-256, and canonical JSON
+handling. It requires exactly one supported post-session evaluation whose
+session and opponent match the supplied manifest, then restores only the
+existing `LeakDetectorConfig`, safety alpha, and epsilon. Explicit
+`--safety-alpha` and `--exploration-epsilon` values, including `0.0`, override
+the restored defaults. Omitting `--previous-session-manifest` preserves the
+earlier normal and `--leaky-fixture` defaults. There is no implicit manifest
+discovery, latest-file search, session registry, or automatic session loop.
 
 The saved bundle can later be rechecked offline from its manifest:
 
