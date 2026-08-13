@@ -18,7 +18,7 @@ from poker_ai.explanation_artifacts import (
     ExplanationBundleVerificationError,
     write_verified_explanation_bundle,
 )
-from poker_ai.exploit import RuleExploitResult
+from poker_ai.exploit import RuleExploitProvider
 from poker_ai.leak import (
     LeakDetector,
     LeakDetectorConfig,
@@ -30,26 +30,6 @@ from poker_ai.session import run_session, write_session_bundle
 CONSOLE_ENTRYPOINT = "poker-xai-run-session"
 LEGACY_ENTRYPOINT = "cli/run_session.py"
 MODULE_ENTRYPOINT = "python -m poker_ai.run_session_cli"
-
-
-class _LeakyFixtureExploitProvider:
-    """CLI smoke helper: force a CALL exploit when the public fixture detects R008."""
-
-    def build(self, **kwargs: object) -> RuleExploitResult:
-        base_policy = kwargs["base_policy"]
-        detected_leaks = kwargs["detected_leaks"]
-        legal_actions = kwargs["legal_actions"]
-        if (
-            isinstance(base_policy, dict)
-            and "CALL" in legal_actions
-            and any(leak.reason_id == "LEAK_R008" for leak in detected_leaks)
-        ):
-            return RuleExploitResult(
-                policy={"CALL": 1.0},
-                applied_leak_reason_ids=("LEAK_R008",),
-                trigger_reasons=("TRG_R001", "TRG_R002"),
-            )
-        return RuleExploitResult(policy=dict(base_policy))
 
 
 def _parser(*, entrypoint: str) -> argparse.ArgumentParser:
@@ -134,7 +114,7 @@ def main(argv: list[str] | None = None, *, entrypoint: str = CONSOLE_ENTRYPOINT)
                 min_confidence=0.5,
             ),
         )
-        exploit_provider = _LeakyFixtureExploitProvider()
+        exploit_provider = RuleExploitProvider(confidence_config=leak_detector.config)
 
     provenance = collect_runtime_provenance()
     result = run_session(

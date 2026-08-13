@@ -99,8 +99,10 @@ verification](explanation_bundle_verification.md).
   `0`.
 - `--safety-alpha` and `--exploration-epsilon` default to `0.0` for a normal
   session.
-- `--leaky-fixture` is a public positive-path smoke fixture, not a production
-  opponent model.
+- `--leaky-fixture` is a public positive-path smoke fixture that connects the
+  detected leak to the rule-based exploit provider. The provider changes policy
+  only when its candidate improves the existing exact action EV; otherwise it
+  retains the base policy. This is not a production opponent model.
 - `--explanations` is an artifact-output opt-in; it does not affect policy or
   action selection.
 
