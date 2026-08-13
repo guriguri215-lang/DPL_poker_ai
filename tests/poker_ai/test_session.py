@@ -381,7 +381,11 @@ def test_leaky_fixture_cli_smoke_writes_detected_leaks_and_mix(tmp_path, capsys)
         "--seed",
         "20260704",
         "--hands",
-        "3",
+        "12",
+        "--solver-iterations",
+        "1",
+        "--safety-alpha",
+        "0.25",
         "--leaky-fixture",
         "--out-dir",
         str(tmp_path),
@@ -391,7 +395,7 @@ def test_leaky_fixture_cli_smoke_writes_detected_leaks_and_mix(tmp_path, capsys)
 
     assert rc == 0
     out = capsys.readouterr().out
-    assert "detected_leaks=3" in out
+    assert "detected_leaks=12" in out
     assert "mixed_decisions=" in out
     jsonl_path = tmp_path / "S20260704.dpl.jsonl"
     manifest_path = tmp_path / "S20260704.manifest.json"
@@ -401,14 +405,45 @@ def test_leaky_fixture_cli_smoke_writes_detected_leaks_and_mix(tmp_path, capsys)
     ]
     manifest = RunManifest.model_validate(json.loads(manifest_path.read_text(encoding="utf-8")))
 
-    assert len(logs) == 3
+    assert len(logs) == 12
     assert all(log.detected_leaks for log in logs)
     assert all(
         log.baseline_table_version == leaky_fixture_action_baseline_table().table_version
         for log in logs
     )
-    assert any(log.safety_alpha > 0.0 and log.mix_reasons for log in logs)
-    assert any(log.exploit_policy == {"CALL": 1.0} for log in logs)
+    improved = [log for log in logs if log.ev_estimate.exploit_ev > log.ev_estimate.base_ev]
+    unchanged = [log for log in logs if log.ev_estimate.exploit_ev == log.ev_estimate.base_ev]
+    non_improving = [
+        log
+        for log in unchanged
+        if any(leak.confidence >= 0.95 for leak in log.detected_leaks)
+        and log.base_policy.get("FOLD", 0.0) > 0.0
+        and log.ev_estimate.base_ev < 0.0
+    ]
+    assert improved
+    assert non_improving
+    for log in improved:
+        assert log.exploit_source == "rule_based"
+        assert log.trigger_reasons == ["TRG_R001", "TRG_R002"]
+        assert log.mix_reasons == ["MIX_R001"]
+        assert all(
+            log.final_policy[action]
+            == pytest.approx(
+                (1.0 - log.safety_alpha) * log.base_policy.get(action, 0.0)
+                + log.safety_alpha * log.exploit_policy.get(action, 0.0)
+            )
+            for action in set(log.base_policy) | set(log.exploit_policy)
+        )
+    for log in unchanged:
+        assert log.exploit_policy == log.base_policy
+        assert log.final_policy == log.base_policy
+        assert log.trigger_reasons == []
+        assert log.mix_reasons == []
+    estimator = json.loads(
+        (tmp_path / "provenance/leak_confidence_estimator.json").read_text(encoding="utf-8")
+    )
+    assert estimator["detector_min_confidence"] == 0.5
+    assert estimator["rule_exploit_min_confidence"] == 0.95
     assert manifest.versions.baseline_table_version == "fixture-action-baseline"
     assert manifest.code.package_version == "0.1.0a9"
     assert manifest.code.entrypoint == "cli/run_session.py"
@@ -432,11 +467,12 @@ def test_explanations_flag_writes_verified_one_to_one_bundle(
 ):
     from poker_ai import run_session_cli
 
+    hands = 12 if leaky_fixture else 3
     raw_argv = [
         "--seed",
         "20260704",
         "--hands",
-        "3",
+        str(hands),
         "--solver-iterations",
         "1",
         "--explanations",
@@ -447,7 +483,7 @@ def test_explanations_flag_writes_verified_one_to_one_bundle(
         raw_argv.insert(-2, "--leaky-fixture")
 
     assert run_session_cli.main(raw_argv) == 0
-    assert "explanations_verified=3" in capsys.readouterr().out
+    assert f"explanations_verified={hands}" in capsys.readouterr().out
 
     dpl_path = tmp_path / "S20260704.dpl.jsonl"
     explanations_path = tmp_path / "S20260704.explanations.jsonl"
@@ -462,7 +498,7 @@ def test_explanations_flag_writes_verified_one_to_one_bundle(
         for line in explanations_path.read_text(encoding="utf-8").splitlines()
     ]
 
-    assert len(dpls) == len(explanations) == 3
+    assert len(dpls) == len(explanations) == hands
     assert [item.dpl_ref for item in explanations] == [
         f"{dpl.session_id}:{dpl.hand_id}" for dpl in dpls
     ]
@@ -479,10 +515,10 @@ def test_explanations_flag_writes_verified_one_to_one_bundle(
     assert summary["metadata"]["artifact_id"] == "hero_session_explanation_artifacts"
     assert summary["metadata"]["leaky_fixture"] is leaky_fixture
     assert summary["session"]["session_id"] == "S20260704"
-    assert summary["session"]["dpl_count"] == summary["session"]["explanation_count"] == 3
+    assert summary["session"]["dpl_count"] == summary["session"]["explanation_count"] == hands
     assert summary["verification"] == {
-        "total": 3,
-        "passed": 3,
+        "total": hands,
+        "passed": hands,
         "failed": 0,
         "pass_rate": 1.0,
         "failures": [],
