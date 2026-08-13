@@ -645,6 +645,25 @@ def test_answer_key_reveal_occurs_after_all_decisions_without_hidden_strategy_re
     from poker_ai.decision import HeroAgent
     from poker_ai.opponent import StubOpponent
 
+    source_root = tmp_path / "source"
+    assert (
+        run_session_cli.main(
+            [
+                "--seed",
+                "6",
+                "--hands",
+                "1",
+                "--solver-iterations",
+                "1",
+                "--explanations",
+                "--out-dir",
+                str(source_root),
+            ]
+        )
+        == 0
+    )
+    previous_manifest = source_root / "S00000006.manifest.json"
+
     events: list[str] = []
     hidden_reads: list[str] = []
     original_decide = HeroAgent.decide
@@ -681,8 +700,10 @@ def test_answer_key_reveal_occurs_after_all_decisions_without_hidden_strategy_re
                 "--solver-iterations",
                 "1",
                 "--explanations",
+                "--previous-session-manifest",
+                str(previous_manifest),
                 "--out-dir",
-                str(tmp_path),
+                str(tmp_path / "successor"),
             ]
         )
         == 0
@@ -708,6 +729,13 @@ def test_distributed_session_entrypoint_and_help_are_available(capsys):
     assert "--version" in help_text
     assert "--solver-iterations" in help_text
     assert "--explanations" in help_text
+    assert "--previous-session-manifest" in help_text
+    previous_actions = [
+        action
+        for action in run_session_cli._parser(entrypoint="test")._actions
+        if "--previous-session-manifest" in action.option_strings
+    ]
+    assert len(previous_actions) == 1
     assert "--out-dir" in help_text
 
 

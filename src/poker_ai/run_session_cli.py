@@ -16,6 +16,8 @@ from poker_ai.cfr_policy import DEFAULT_CFR_RIVER_POLICY_CONFIG, CfrRiverPolicyC
 from poker_ai.explanation_artifacts import (
     NORMAL_HERO_EXPLANATION_ARTIFACT_ID,
     ExplanationBundleVerificationError,
+    SavedExplanationBundleVerificationError,
+    load_next_session_settings,
     write_verified_explanation_bundle,
 )
 from poker_ai.exploit import RuleExploitProvider
@@ -49,13 +51,27 @@ def _parser(*, entrypoint: str) -> argparse.ArgumentParser:
         "--safety-alpha",
         type=float,
         default=None,
-        help="SafetyMixer alpha in [0, 1] (default: 0.0, or 1.0 with --leaky-fixture)",
+        help=(
+            "SafetyMixer alpha in [0, 1] (default: restored setting, otherwise "
+            "0.0 or 1.0 with --leaky-fixture)"
+        ),
     )
     parser.add_argument(
         "--exploration-epsilon",
         type=float,
-        default=0.0,
-        help="post-SafetyMixer epsilon exploration rate in [0, 1] (default: 0.0)",
+        default=None,
+        help=(
+            "post-SafetyMixer epsilon exploration rate in [0, 1] "
+            "(default: restored setting, otherwise 0.0)"
+        ),
+    )
+    parser.add_argument(
+        "--previous-session-manifest",
+        type=Path,
+        help=(
+            "explicit prior RunManifest whose verified post-session artifact "
+            "supplies this session's default detector, alpha, and epsilon"
+        ),
     )
     parser.add_argument(
         "--solver-iterations",
@@ -101,21 +117,47 @@ def main(argv: list[str] | None = None, *, entrypoint: str = CONSOLE_ENTRYPOINT)
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     args = _parser(entrypoint=entrypoint).parse_args(raw_argv)
 
+    previous_settings = None
+    if args.previous_session_manifest is not None:
+        try:
+            previous_settings = load_next_session_settings(args.previous_session_manifest)
+        except SavedExplanationBundleVerificationError as exc:
+            print(f"previous-session settings verification failed: {exc}", file=sys.stderr)
+            return 1
+
     safety_alpha = (
-        args.safety_alpha if args.safety_alpha is not None else (1.0 if args.leaky_fixture else 0.0)
+        args.safety_alpha
+        if args.safety_alpha is not None
+        else (
+            previous_settings.safety_alpha
+            if previous_settings is not None
+            else (1.0 if args.leaky_fixture else 0.0)
+        )
+    )
+    exploration_epsilon = (
+        args.exploration_epsilon
+        if args.exploration_epsilon is not None
+        else (previous_settings.epsilon if previous_settings is not None else 0.0)
     )
     leak_detector = None
     exploit_provider = None
     if args.leaky_fixture:
-        leak_detector = LeakDetector(
-            leaky_fixture_action_baseline_table(),
-            LeakDetectorConfig(
+        detector_config = (
+            previous_settings.leak_detector_config
+            if previous_settings is not None
+            else LeakDetectorConfig(
                 min_effective_sample_size=1,
                 min_deviation=0.25,
                 min_confidence=0.5,
-            ),
+            )
+        )
+        leak_detector = LeakDetector(
+            leaky_fixture_action_baseline_table(),
+            detector_config,
         )
         exploit_provider = RuleExploitProvider(confidence_config=leak_detector.config)
+    elif previous_settings is not None:
+        leak_detector = LeakDetector(config=previous_settings.leak_detector_config)
 
     provenance = collect_runtime_provenance()
     result = run_session(
@@ -128,7 +170,7 @@ def main(argv: list[str] | None = None, *, entrypoint: str = CONSOLE_ENTRYPOINT)
         argv=raw_argv,
         leak_detector=leak_detector,
         safety_alpha=safety_alpha,
-        exploration_epsilon=args.exploration_epsilon,
+        exploration_epsilon=exploration_epsilon,
         exploit_provider=exploit_provider,
         solver_config=CfrRiverPolicyConfig(
             iterations=args.solver_iterations,

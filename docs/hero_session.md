@@ -106,8 +106,34 @@ A false positive, negative mean EV gain, or over-adjustment keeps the existing
 detector estimator but sets its three existing confidence gates to `1.0`, safety
 alpha to `0.0`, and epsilon to `0.0`. Otherwise every current value is retained.
 In particular, false negatives and under-adjustment do not lower a threshold or
-raise alpha/epsilon in this slice. The artifact is a proposal only: a later
-normal Hero session does not yet load or consume it automatically.
+raise alpha/epsilon in this slice.
+
+## Hand settings to the next session explicitly
+
+Name the completed source RunManifest; the command never searches for one:
+
+```text
+poker-xai-run-session --seed 8 --hands 1 --solver-iterations 1 --previous-session-manifest experiments_output/tutorial/S00000007.manifest.json --out-dir experiments_output/tutorial-next
+```
+
+The source must be the complete `--explanations` bundle above, because that is
+the existing opt-in that writes the post-session evaluation.
+
+Before the first Hero decision, the loader reuses the saved explanation-bundle
+verifier, validates every relative `ArtifactRef` path and SHA-256, and requires
+one canonical post-session artifact with the supported schema/type and matching
+source-session/opponent identities. It strictly reconstructs the existing
+`LeakDetectorConfig`, safety alpha, and epsilon and rejects invalid ranges. A
+failure creates no output for the attempted successor.
+
+The restored values are defaults. Explicit `--safety-alpha` and
+`--exploration-epsilon` flags take precedence, including an explicit `0.0`.
+When `--leaky-fixture` is also present, the existing fixture baseline remains
+the only baseline while the restored detector config is passed to both the
+detector and real rule exploit provider. The source's posterior/action history,
+baseline, and answer key are not transferred. There is no implicit latest-file
+search, session registry, or automatic loop; repeat the explicit handoff for
+each intended successor.
 
 Omitting `--explanations` retains the five-file bundle above and does not change
 the session inputs, action, solver behavior, or invocation provenance.
@@ -121,8 +147,11 @@ verification](explanation_bundle_verification.md).
 - `--seed` defaults to `20260704`; `--hands` defaults to `200`.
 - `--solver-iterations` defaults to `40`; `--solver-average-delay` defaults to
   `0`.
-- `--safety-alpha` and `--exploration-epsilon` default to `0.0` for a normal
-  session.
+- `--previous-session-manifest PATH` makes that verified session's detector,
+  alpha, and epsilon the defaults for this run. If omitted, normal alpha and
+  epsilon remain `0.0`.
+- Explicit `--safety-alpha` and `--exploration-epsilon` values override restored
+  defaults.
 - `--leaky-fixture` is a public positive-path smoke fixture that connects the
   detected leak to the rule-based exploit provider. The provider changes policy
   only when its candidate improves the existing exact action EV; otherwise it

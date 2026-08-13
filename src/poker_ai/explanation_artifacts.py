@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -30,12 +31,22 @@ from explanation import (
 from poker_core.dpl_schema import DecisionProvenanceLog, load_dpl_json
 from poker_core.run_manifest import ArtifactRef, RunManifest
 
+from .leak import LeakDetectorConfig
 from .opponent import OpponentAnswerKey
 from .post_session_evaluation import (
+    POST_SESSION_EVALUATION_ARTIFACT_TYPE,
+    POST_SESSION_EVALUATION_SCHEMA_VERSION,
+    POST_SESSION_EVALUATION_SUFFIX,
+    NextSessionSettings,
     build_post_session_artifact,
     post_session_evaluation_filename,
 )
-from .posterior_bundle import resolve_bundle_path, sha256_bytes, write_posterior_artifacts
+from .posterior_bundle import (
+    canonical_json_bytes,
+    resolve_bundle_path,
+    sha256_bytes,
+    write_posterior_artifacts,
+)
 from .session import SessionResult, write_jsonl, write_manifest
 
 NORMAL_HERO_EXPLANATION_ARTIFACT_ID = "hero_session_explanation_artifacts"
@@ -184,6 +195,15 @@ class SavedExplanationBundleVerificationError(ValueError):
         self.category = category
         self.filename = filename
         super().__init__(f"saved explanation bundle issue: category={category} filename={filename}")
+
+
+@dataclass(frozen=True)
+class _SavedExplanationBundleSnapshot:
+    """Manifest and artifact bytes captured by one integrity-checked read."""
+
+    manifest: RunManifest
+    manifest_filename: str
+    artifacts: Mapping[str, tuple[ArtifactRef, bytes]]
 
 
 def verify_explanation_pairs(
@@ -376,6 +396,126 @@ def verify_saved_explanation_bundle(
 ) -> SavedExplanationBundleVerification:
     """Read and verify a saved normal Hero explanation bundle without changing it."""
 
+    snapshot = _load_saved_explanation_bundle_snapshot(manifest_path)
+    return _verify_saved_explanation_bundle_snapshot(snapshot)
+
+
+def load_next_session_settings(manifest_path: Path | str) -> NextSessionSettings:
+    """Verify one prior Hero bundle and restore its explicit next-session settings.
+
+    The manifest and every referenced artifact are captured once. The existing
+    saved-explanation checks and the post-session semantic checks therefore use
+    the same hash-verified bytes instead of verifying and then rereading mutable
+    files. Only settings are returned; no baseline, posterior/action history, or
+    answer key crosses the session boundary.
+    """
+
+    snapshot = _load_saved_explanation_bundle_snapshot(manifest_path)
+    _verify_saved_explanation_bundle_snapshot(snapshot)
+    evaluation_ref, raw = _required_artifact(
+        snapshot.artifacts,
+        POST_SESSION_EVALUATION_SUFFIX,
+        snapshot.manifest_filename,
+    )
+    filename = _artifact_filename(evaluation_ref)
+    try:
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SavedExplanationBundleVerificationError(
+            "post-session-artifact-invalid", filename
+        ) from exc
+    try:
+        canonical = canonical_json_bytes(payload)
+    except (TypeError, ValueError) as exc:
+        raise SavedExplanationBundleVerificationError(
+            "post-session-artifact-invalid", filename
+        ) from exc
+    if canonical != raw:
+        raise SavedExplanationBundleVerificationError(
+            "post-session-artifact-noncanonical", filename
+        )
+    if not isinstance(payload, dict) or set(payload) != {
+        "schema_version",
+        "artifact_type",
+        "evaluation",
+        "next_session_settings",
+    }:
+        raise SavedExplanationBundleVerificationError("post-session-artifact-invalid", filename)
+    if payload["schema_version"] != POST_SESSION_EVALUATION_SCHEMA_VERSION:
+        raise SavedExplanationBundleVerificationError("post-session-schema-unsupported", filename)
+    if payload["artifact_type"] != POST_SESSION_EVALUATION_ARTIFACT_TYPE:
+        raise SavedExplanationBundleVerificationError("post-session-type-unsupported", filename)
+
+    evaluation = payload["evaluation"]
+    try:
+        _validate_post_session_evaluation(evaluation)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise SavedExplanationBundleVerificationError(
+            "post-session-artifact-invalid", filename
+        ) from exc
+    if evaluation.get("session_id") != snapshot.manifest.run_id:
+        raise SavedExplanationBundleVerificationError("post-session-session-mismatch", filename)
+    if (
+        len(snapshot.manifest.opponents) != 1
+        or evaluation.get("opponent_model_id") != snapshot.manifest.opponents[0].opponent_id
+    ):
+        raise SavedExplanationBundleVerificationError("post-session-opponent-mismatch", filename)
+
+    try:
+        return _parse_next_session_settings(payload["next_session_settings"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise SavedExplanationBundleVerificationError(
+            "post-session-settings-invalid", filename
+        ) from exc
+
+
+def _validate_post_session_evaluation(payload: object) -> None:
+    """Fail closed on the complete versioned PR #19 evaluation shape."""
+
+    fields = {
+        "session_id",
+        "opponent_model_id",
+        "leak_detection_accuracy",
+        "average_estimation_error",
+        "exploit_ev_gain_vs_base",
+        "over_adjustment_count",
+        "under_adjustment_count",
+        "explanation_validity_score",
+        "notes",
+    }
+    if not isinstance(payload, dict) or set(payload) != fields:
+        raise ValueError("evaluation fields do not match the strict contract")
+    if not isinstance(payload["session_id"], str) or not isinstance(
+        payload["opponent_model_id"], str
+    ):
+        raise TypeError("evaluation identities must be strings")
+
+    bounded_metrics = (
+        "leak_detection_accuracy",
+        "average_estimation_error",
+        "explanation_validity_score",
+    )
+    for field in bounded_metrics:
+        value = _strict_finite_float(payload[field], field)
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(f"{field} must be finite and in [0, 1]")
+    _strict_finite_float(payload["exploit_ev_gain_vs_base"], "exploit_ev_gain_vs_base")
+
+    for field in ("over_adjustment_count", "under_adjustment_count"):
+        value = payload[field]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise TypeError(f"{field} must be a nonnegative integer")
+
+    notes = payload["notes"]
+    if not isinstance(notes, list) or any(not isinstance(note, str) for note in notes):
+        raise TypeError("evaluation notes must be a list of strings")
+
+
+def _load_saved_explanation_bundle_snapshot(
+    manifest_path: Path | str,
+) -> _SavedExplanationBundleSnapshot:
+    """Capture a manifest and all of its path- and hash-verified outputs once."""
+
     path = Path(manifest_path)
     manifest_filename = path.name or "manifest.json"
     try:
@@ -420,6 +560,22 @@ def verify_saved_explanation_bundle(
         if sha256_bytes(payload) != ref.sha256:
             raise SavedExplanationBundleVerificationError("artifact-hash-mismatch", ref_filename)
         artifacts[ref.path] = (ref, payload)
+
+    return _SavedExplanationBundleSnapshot(
+        manifest=manifest,
+        manifest_filename=manifest_filename,
+        artifacts=artifacts,
+    )
+
+
+def _verify_saved_explanation_bundle_snapshot(
+    snapshot: _SavedExplanationBundleSnapshot,
+) -> SavedExplanationBundleVerification:
+    """Apply the existing explanation verifier to one captured bundle snapshot."""
+
+    manifest = snapshot.manifest
+    manifest_filename = snapshot.manifest_filename
+    artifacts = snapshot.artifacts
 
     dpl_ref, dpl_bytes = _required_artifact(artifacts, ".dpl.jsonl", manifest_filename)
     explanation_ref, explanation_bytes = _required_artifact(
@@ -509,6 +665,88 @@ def verify_saved_explanation_bundle(
         checker_total=verification.checker_total,
         checker_passed=verification.checker_passed,
     )
+
+
+def _parse_next_session_settings(payload: object) -> NextSessionSettings:
+    """Strictly reconstruct only the existing detector, alpha, and epsilon knobs."""
+
+    if not isinstance(payload, dict) or set(payload) != {
+        "leak_detector_config",
+        "safety_alpha",
+        "epsilon",
+    }:
+        raise ValueError("next_session_settings fields do not match the strict contract")
+    config_payload = payload["leak_detector_config"]
+    config_fields = {
+        "method_version",
+        "alpha0",
+        "beta0",
+        "tail",
+        "min_effective_sample_size",
+        "min_deviation",
+        "min_confidence",
+        "rule_exploit_min_confidence",
+        "nodelock_exploit_min_confidence",
+    }
+    if not isinstance(config_payload, dict) or set(config_payload) != config_fields:
+        raise ValueError("leak_detector_config fields do not match the strict contract")
+
+    numeric_fields = (
+        "alpha0",
+        "beta0",
+        "min_deviation",
+        "min_confidence",
+        "rule_exploit_min_confidence",
+        "nodelock_exploit_min_confidence",
+    )
+    numeric_values = {
+        field: _strict_finite_float(config_payload[field], field) for field in numeric_fields
+    }
+    sample_floor = config_payload["min_effective_sample_size"]
+    if isinstance(sample_floor, bool) or not isinstance(sample_floor, int):
+        raise TypeError("min_effective_sample_size must be an integer")
+    if not isinstance(config_payload["method_version"], str) or not isinstance(
+        config_payload["tail"], str
+    ):
+        raise TypeError("leak detector method_version and tail must be strings")
+
+    restored_values = {
+        "safety_alpha": _strict_finite_float(payload["safety_alpha"], "safety_alpha"),
+        "epsilon": _strict_finite_float(payload["epsilon"], "epsilon"),
+    }
+    for name, value in restored_values.items():
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(f"{name} must be finite and in [0, 1]")
+
+    return NextSessionSettings(
+        leak_detector_config=LeakDetectorConfig(
+            method_version=config_payload["method_version"],
+            alpha0=numeric_values["alpha0"],
+            beta0=numeric_values["beta0"],
+            tail=config_payload["tail"],
+            min_effective_sample_size=sample_floor,
+            min_deviation=numeric_values["min_deviation"],
+            min_confidence=numeric_values["min_confidence"],
+            rule_exploit_min_confidence=numeric_values["rule_exploit_min_confidence"],
+            nodelock_exploit_min_confidence=numeric_values["nodelock_exploit_min_confidence"],
+        ),
+        safety_alpha=restored_values["safety_alpha"],
+        epsilon=restored_values["epsilon"],
+    )
+
+
+def _strict_finite_float(value: object, field_name: str) -> float:
+    """Reject JSON booleans, non-numbers, infinities, NaN, and float overflow."""
+
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise TypeError(f"{field_name} must be numeric")
+    try:
+        converted = float(value)
+    except OverflowError as exc:
+        raise ValueError(f"{field_name} must be finite") from exc
+    if not math.isfinite(converted):
+        raise ValueError(f"{field_name} must be finite")
+    return converted
 
 
 def _verification_failures(
@@ -645,6 +883,7 @@ __all__ = [
     "SavedExplanationBundleVerification",
     "SavedExplanationBundleVerificationError",
     "generate_and_verify_explanations",
+    "load_next_session_settings",
     "verify_explanation_pairs",
     "verify_saved_explanation_bundle",
     "write_verified_explanation_bundle",

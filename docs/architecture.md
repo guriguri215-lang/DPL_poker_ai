@@ -42,6 +42,14 @@ production-readiness or independent-security-certification claim.
 The normal session implemented by
 [`poker_ai.session`](../src/poker_ai/session.py) follows this sequence:
 
+When `poker-xai-run-session` receives an explicit
+`--previous-session-manifest`, its CLI first verifies that complete saved
+explanation bundle and its single versioned post-session evaluation. It restores
+only `LeakDetectorConfig`, safety alpha, and epsilon as defaults; operator flags
+override alpha or epsilon. Any load or semantic-validation failure stops before
+this sequence begins and before a new run output directory is created. Without
+the option, the sequence uses its historical defaults unchanged.
+
 1. A seed deterministically produces simulated river scenarios.
 2. The environment lets the stub opponent act, then gives Hero only the public
    observation and assumed public range. Hero is not given the opponent's hidden
@@ -76,7 +84,9 @@ The normal session implemented by
    It compares all terminal posterior candidates with ground truth, aggregates
    existing exact DPL EV and verifier results, and writes one canonical evaluation
    plus conservative next-session settings. The answer key is never passed to
-   Hero. The generated settings are not yet consumed by a later normal session.
+   Hero. A later normal session can consume the settings only through the
+   explicit manifest-first handoff above. The resulting DPL, posterior estimator
+   artifact, and execution-sampler `ConfigRef` record the settings actually used.
 
 The [DPL and RunManifest page](dpl_and_run_manifest.md) describes the two public
 contracts. The [session tutorial](hero_session.md) shows the supported command.
@@ -89,6 +99,8 @@ branches. The default CFR+ budget is 40 iterations with average delay 0 and no
 checkpoints. Forty iterations is an alpha default, not a convergence guarantee;
 the resulting policy has no exact-equilibrium or GTO certificate.
 
-The current Phase 8 slice ends at a hashed next-session setting artifact. Loading
-that learned setting into a subsequent normal Hero session, and carrying it
-through a sequence of sessions, remains outside this slice.
+One explicit, verified handoff from a named previous RunManifest into one later
+normal Hero session is implemented. The handoff carries settings only: it does
+not carry the prior baseline, posterior/action history, or answer key. Implicit
+manifest discovery, latest-file search, a session registry, and an automatic
+multi-session loop remain outside this slice.

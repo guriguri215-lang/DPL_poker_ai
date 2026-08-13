@@ -44,6 +44,7 @@ from .explanation_artifacts import (
     ExplanationSetVerification,
     SavedExplanationBundleVerification,
     SavedExplanationBundleVerificationError,
+    load_next_session_settings,
     verify_explanation_pairs,
     verify_saved_explanation_bundle,
 )
@@ -165,6 +166,7 @@ __all__ = [
     "load_baseline_strategy",
     "load_bucket_definition",
     "load_posterior_run_bundle",
+    "load_next_session_settings",
     "nodelock_config_from_leaks",
     "policy_ev",
     "run_session",
