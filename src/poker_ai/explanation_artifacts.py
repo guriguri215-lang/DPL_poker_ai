@@ -397,7 +397,9 @@ def verify_saved_explanation_bundle(
     """Read and verify a saved normal Hero explanation bundle without changing it."""
 
     snapshot = _load_saved_explanation_bundle_snapshot(manifest_path)
-    return _verify_saved_explanation_bundle_snapshot(snapshot)
+    verification = _verify_saved_explanation_bundle_snapshot(snapshot)
+    _validated_post_session_settings(snapshot, required=False)
+    return verification
 
 
 def load_next_session_settings(manifest_path: Path | str) -> NextSessionSettings:
@@ -412,6 +414,23 @@ def load_next_session_settings(manifest_path: Path | str) -> NextSessionSettings
 
     snapshot = _load_saved_explanation_bundle_snapshot(manifest_path)
     _verify_saved_explanation_bundle_snapshot(snapshot)
+    settings = _validated_post_session_settings(snapshot, required=True)
+    assert settings is not None
+    return settings
+
+
+def _validated_post_session_settings(
+    snapshot: _SavedExplanationBundleSnapshot,
+    *,
+    required: bool,
+) -> NextSessionSettings | None:
+    """Validate one current post-session artifact from the captured bundle bytes."""
+
+    has_reference = any(
+        path.endswith(POST_SESSION_EVALUATION_SUFFIX) for path in snapshot.artifacts
+    )
+    if not has_reference and not required:
+        return None
     evaluation_ref, raw = _required_artifact(
         snapshot.artifacts,
         POST_SESSION_EVALUATION_SUFFIX,
