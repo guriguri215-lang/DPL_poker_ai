@@ -26,7 +26,11 @@ loader and existing explanation checker. It requires the DPLs and
 matching session ID and hand ID at each position. Every available pair is
 checked. Finally, the saved verifier summary must agree with the shared session
 counts, checker totals, pass/fail result, pass rate, and artifact paths used by
-the writer.
+the writer. When a post-session evaluation is present, the verifier applies the
+same captured-bytes validation as the successor-session consumer: exactly one
+reference, canonical JSON, supported schema and artifact type, the complete
+evaluation and next-settings shapes, matching session and opponent identities,
+finite metrics, valid counts and notes, and existing configuration ranges.
 
 A successful command reports only these two result classes:
 
@@ -51,9 +55,9 @@ result = verify_saved_explanation_bundle(
 )
 ```
 
-This verifies artifact integrity and the in-repository explanation checker only.
-It does not certify solver convergence, strategy safety or optimality, GTO
-status, external or third-party validation, or reproduction of a research
-result. The source session remains limited to a Hero decision while facing an
-all-in. Its default 40 CFR+ iterations are a fixed early-alpha computation
-budget, not a convergence guarantee.
+This verifies artifact integrity, saved-artifact semantics, and the
+in-repository explanation checker only. It does not certify solver convergence,
+strategy safety or optimality, GTO status, external or third-party validation,
+or reproduction of a research result. The source session remains limited to a
+Hero decision while facing an all-in. Its default 40 CFR+ iterations are a fixed
+early-alpha computation budget, not a convergence guarantee.

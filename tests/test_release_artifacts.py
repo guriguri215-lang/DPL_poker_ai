@@ -16,7 +16,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
-CURRENT_VERSION = "0.1.0a9"
+CURRENT_VERSION = "0.1.0a10"
 sys.path.insert(0, str(SCRIPTS))
 
 
@@ -101,6 +101,9 @@ def test_release_workflow_keeps_exact_python_and_offline_cross_platform_gates() 
     assert "manifest.code.package_version" in verifier
     assert "loaded['poker-xai-run-session'](['--version'])" in verifier
     assert "loaded['poker-xai-verify-explanation-bundle'](['--version'])" in verifier
+    assert "loaded['poker-xai-run-session'](first_argv)" in verifier
+    assert "loaded['poker-xai-run-session'](second_argv)" in verifier
+    assert "'--previous-session-manifest'" in verifier
     assert "source-checkout" in verifier
     assert "verify_documentation_links(documentation_root)" in verifier
     assert workflow.count("verify_release_bundle.py") == 3
@@ -252,8 +255,10 @@ def _release_bundle(tmp_path: Path, layout: str) -> tuple[Path, Path, Path, Path
                 "smoke_checks": [
                     "--version",
                     "--help",
-                    "minimal-session",
+                    "two-consecutive-hero-sessions",
+                    "explicit-previous-session-manifest",
                     "manifest-round-trip",
+                    "saved-explanation-bundle-verification",
                     "entry-point-metadata",
                     "documentation-relative-links",
                 ],

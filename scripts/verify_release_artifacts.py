@@ -609,7 +609,8 @@ assert json.loads(gate_stderr_bytes.getvalue().decode('ascii')) == {
     'error_code': 'gate_b_invalid_preflight',
 }
 
-raw_argv = [
+first_output_root = output_root / 'first'
+first_argv = [
     '--seed',
     '7',
     '--hands',
@@ -617,41 +618,76 @@ raw_argv = [
     '--solver-iterations',
     '1',
     '--explanations',
+    '--safety-alpha',
+    '0.25',
+    '--exploration-epsilon',
+    '0.2',
     '--out-dir',
-    str(output_root),
+    str(first_output_root),
 ]
 with contextlib.redirect_stdout(io.StringIO()):
-    assert loaded['poker-xai-run-session'](raw_argv) == 0
+    assert loaded['poker-xai-run-session'](first_argv) == 0
 
 from poker_core.dpl_schema import DecisionProvenanceLog
 from poker_core.run_manifest import RunManifest
 
-manifest_paths = list(output_root.glob('*.manifest.json'))
-dpl_paths = list(output_root.glob('*.dpl.jsonl'))
-assert len(manifest_paths) == len(dpl_paths) == 1
-manifest = RunManifest.model_validate_json(manifest_paths[0].read_text(encoding='utf-8'))
-assert RunManifest.model_validate_json(manifest.model_dump_json()) == manifest
-assert manifest.code.package_version == EXPECTED_VERSION
-if source_project is None:
-    assert manifest.code.git_commit == 'unknown'
-    assert manifest.code.git_dirty is None
-else:
-    assert len(manifest.code.git_commit) == 40
-    assert isinstance(manifest.code.git_dirty, bool)
-assert manifest.code.entrypoint == 'poker-xai-run-session'
-assert manifest.code.argv == raw_argv
-lines = dpl_paths[0].read_text(encoding='utf-8').splitlines()
-assert len(lines) == 1
-assert DecisionProvenanceLog.model_validate_json(lines[0]).schema_version == '3.0.0'
-bundle_output = io.StringIO()
-with contextlib.redirect_stdout(bundle_output):
-    assert loaded['poker-xai-verify-explanation-bundle'](
-        ['--manifest', str(manifest_paths[0])]
-    ) == 0
-assert bundle_output.getvalue().splitlines() == [
-    'artifact_integrity=passed references=5',
-    'explanation_checker=passed total=1 summary=consistent',
+first_manifest_paths = list(first_output_root.glob('*.manifest.json'))
+assert len(first_manifest_paths) == 1
+first_manifest_path = first_manifest_paths[0]
+
+second_output_root = output_root / 'second'
+second_argv = [
+    '--seed',
+    '8',
+    '--hands',
+    '1',
+    '--solver-iterations',
+    '1',
+    '--explanations',
+    '--previous-session-manifest',
+    str(first_manifest_path),
+    '--out-dir',
+    str(second_output_root),
 ]
+with contextlib.redirect_stdout(io.StringIO()):
+    assert loaded['poker-xai-run-session'](second_argv) == 0
+
+for session_root, raw_argv in (
+    (first_output_root, first_argv),
+    (second_output_root, second_argv),
+):
+    manifest_paths = list(session_root.glob('*.manifest.json'))
+    dpl_paths = list(session_root.glob('*.dpl.jsonl'))
+    assert len(manifest_paths) == len(dpl_paths) == 1
+    manifest = RunManifest.model_validate_json(manifest_paths[0].read_text(encoding='utf-8'))
+    assert RunManifest.model_validate_json(manifest.model_dump_json()) == manifest
+    assert manifest.code.package_version == EXPECTED_VERSION
+    if source_project is None:
+        assert manifest.code.git_commit == 'unknown'
+        assert manifest.code.git_dirty is None
+    else:
+        assert len(manifest.code.git_commit) == 40
+        assert isinstance(manifest.code.git_dirty, bool)
+    assert manifest.code.entrypoint == 'poker-xai-run-session'
+    assert manifest.code.argv == raw_argv
+    lines = dpl_paths[0].read_text(encoding='utf-8').splitlines()
+    assert len(lines) == 1
+    dpl = DecisionProvenanceLog.model_validate_json(lines[0])
+    assert dpl.schema_version == '3.0.0'
+    if raw_argv is second_argv:
+        assert dpl.safety_alpha == 0.25
+        execution_samplers = [item for item in manifest.configs if item.name == 'execution_sampler']
+        assert len(execution_samplers) == 1
+        assert execution_samplers[0].path == 'inline:epsilon-uniform-v1:epsilon=0.2'
+    bundle_output = io.StringIO()
+    with contextlib.redirect_stdout(bundle_output):
+        assert loaded['poker-xai-verify-explanation-bundle'](
+            ['--manifest', str(manifest_paths[0])]
+        ) == 0
+    assert bundle_output.getvalue().splitlines() == [
+        'artifact_integrity=passed references=5',
+        'explanation_checker=passed total=1 summary=consistent',
+    ]
 """
     script = script.replace("EXPECTED_VERSION", repr(version)).replace(
         "EXPECTED_ENTRY_POINTS", repr(EXPECTED_ENTRY_POINTS)
@@ -720,8 +756,10 @@ def verify(
         "smoke_checks": [
             "--version",
             "--help",
-            "minimal-session",
+            "two-consecutive-hero-sessions",
+            "explicit-previous-session-manifest",
             "manifest-round-trip",
+            "saved-explanation-bundle-verification",
             "entry-point-metadata",
             "documentation-relative-links",
         ],
