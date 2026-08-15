@@ -216,6 +216,97 @@ def test_false_negative_holds_settings_and_never_auto_increases_aggression(base_
     assert first.canonical_bytes() == second.canonical_bytes()
 
 
+def test_explanation_validity_binds_same_reason_to_each_situation_truth(base_log):
+    positive_situation = "validity-truth-positive"
+    negative_situation = "validity-truth-negative"
+    logs = []
+    for hand_id, situation_key in (
+        ("validity-positive-hand", positive_situation),
+        ("validity-negative-hand", negative_situation),
+    ):
+        payload = deepcopy(base_log.model_dump(mode="json"))
+        payload["hand_id"] = hand_id
+        payload["detected_leaks"] = [
+            {
+                "reason_id": "LEAK_R008",
+                "leak_type": "bet_too_often_when_checked_to",
+                "situation_key": situation_key,
+                "observed_rate": 1.0,
+                "baseline_rate": 0.0,
+                "effective_sample_size": 1,
+                "confidence": 0.75,
+                "direction": "decrease_bet_frequency_when_checked_to",
+            }
+        ]
+        payload["allowed_reason_ids"] = ["LEAK_R008"]
+        logs.append(DecisionProvenanceLog.model_validate(payload))
+
+    assert len({log.hand_id for log in logs}) == 2
+    assert [log.detected_leaks[0].reason_id for log in logs] == ["LEAK_R008", "LEAK_R008"]
+    assert {log.detected_leaks[0].situation_key for log in logs} == {
+        positive_situation,
+        negative_situation,
+    }
+
+    explanations = [generate_template_explanation(log) for log in logs]
+    checker_results = [
+        verify_explanation(explanation, log)
+        for log, explanation in zip(logs, explanations, strict=True)
+    ]
+    assert [checker.passed for checker in checker_results] == [True, True]
+
+    answer_key = OpponentAnswerKey(
+        "fixture-opponent",
+        (("BET_ALL_IN", 0.75), ("CHECK", 0.25)),
+    )
+    # p_true(BET_ALL_IN) is 0.75: q=0.5 is truth-positive and q=0.9 is truth-negative.
+    snapshot_records = [
+        {
+            "opponent_id": "fixture-opponent",
+            "rule_id": "LEAK_R008",
+            "situation_key": positive_situation,
+            "action_group": ["BET_ALL_IN"],
+            "n": 4,
+            "k": 3,
+            "q": 0.5,
+            "candidate_eligibility": {
+                "structurally_eligible": True,
+                "detected": True,
+            },
+        },
+        {
+            "opponent_id": "fixture-opponent",
+            "rule_id": "LEAK_R008",
+            "situation_key": negative_situation,
+            "action_group": ["BET_ALL_IN"],
+            "n": 4,
+            "k": 3,
+            "q": 0.9,
+            "candidate_eligibility": {
+                "structurally_eligible": True,
+                "detected": True,
+            },
+        },
+    ]
+    artifact = evaluate_post_session(
+        session_id=logs[0].session_id,
+        opponent_model_id="fixture-opponent",
+        logs=logs,
+        snapshot_records=snapshot_records,
+        answer_key=answer_key,
+        explanations=explanations,
+        checker_results=checker_results,
+        detector_config=LeakDetectorConfig(),
+        safety_alpha=logs[0].safety_alpha,
+        epsilon=0.2,
+    )
+
+    # Both checkers passed, so validity is the mean of the two cited situation truths.
+    manual_oracle = (1 + 0) / 2
+    assert manual_oracle == 0.5
+    assert artifact.evaluation.explanation_validity_score == manual_oracle
+
+
 def test_mixed_records_use_distinct_metric_populations_and_are_order_invariant(base_log):
     records = [
         _record(
