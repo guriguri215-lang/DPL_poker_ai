@@ -4,7 +4,12 @@ from copy import deepcopy
 
 import pytest
 
-from explanation import generate_template_explanation, verify_explanation
+from explanation import (
+    VerificationIssue,
+    VerificationResult,
+    generate_template_explanation,
+    verify_explanation,
+)
 from poker_ai.base_policy import StubBasePolicyProvider
 from poker_ai.leak import LeakDetectorConfig
 from poker_ai.opponent import OpponentAnswerKey
@@ -23,17 +28,26 @@ def base_log() -> DecisionProvenanceLog:
     return result.logs[0]
 
 
-def _record(*, detected: bool, k: int, n: int) -> dict[str, object]:
+def _record(
+    *,
+    detected: bool,
+    k: int,
+    n: int,
+    action_group: tuple[str, ...] = ("BET_ALL_IN",),
+    q: float = 0.25,
+    situation_key: str = "fixture-situation",
+    structurally_eligible: bool = True,
+) -> dict[str, object]:
     return {
         "opponent_id": "fixture-opponent",
         "rule_id": "LEAK_R008",
-        "situation_key": "fixture-situation",
-        "action_group": ["BET_ALL_IN"],
+        "situation_key": situation_key,
+        "action_group": list(action_group),
         "n": n,
         "k": k,
-        "q": 0.25,
+        "q": q,
         "candidate_eligibility": {
-            "structurally_eligible": True,
+            "structurally_eligible": structurally_eligible,
             "detected": detected,
         },
     }
@@ -70,8 +84,11 @@ def _adjusted_log(
     base_ev: float,
     exploit_ev: float,
     final_ev: float,
+    hand_id: str | None = None,
 ) -> DecisionProvenanceLog:
     payload = deepcopy(base_log.model_dump(mode="json"))
+    if hand_id is not None:
+        payload["hand_id"] = hand_id
     payload.update(
         {
             "base_policy": {"FOLD": 1.0, "CALL": 0.0},
@@ -95,6 +112,38 @@ def _adjusted_log(
     return DecisionProvenanceLog.model_validate(payload)
 
 
+def _checked_explanations(logs: list[DecisionProvenanceLog]):
+    explanations = [generate_template_explanation(log) for log in logs]
+    checkers = [
+        verify_explanation(explanation, log)
+        for log, explanation in zip(logs, explanations, strict=True)
+    ]
+    assert all(checker.passed for checker in checkers)
+    return explanations, checkers
+
+
+def _evaluate_many(
+    logs: list[DecisionProvenanceLog],
+    *,
+    records: list[dict[str, object]],
+    answer_key: OpponentAnswerKey,
+    detector_config: LeakDetectorConfig,
+):
+    explanations, checkers = _checked_explanations(logs)
+    return evaluate_post_session(
+        session_id=logs[0].session_id,
+        opponent_model_id="fixture-opponent",
+        logs=logs,
+        snapshot_records=records,
+        answer_key=answer_key,
+        explanations=explanations,
+        checker_results=checkers,
+        detector_config=detector_config,
+        safety_alpha=logs[0].safety_alpha,
+        epsilon=0.2,
+    )
+
+
 def _evaluate(
     log: DecisionProvenanceLog,
     *,
@@ -102,20 +151,11 @@ def _evaluate(
     answer_key: OpponentAnswerKey,
     detector_config: LeakDetectorConfig,
 ):
-    explanation = generate_template_explanation(log)
-    checker = verify_explanation(explanation, log)
-    assert checker.passed, checker.issues
-    return evaluate_post_session(
-        session_id=log.session_id,
-        opponent_model_id="fixture-opponent",
-        logs=[log],
-        snapshot_records=[record],
+    return _evaluate_many(
+        [log],
+        records=[record],
         answer_key=answer_key,
-        explanations=[explanation],
-        checker_results=[checker],
         detector_config=detector_config,
-        safety_alpha=log.safety_alpha,
-        epsilon=0.2,
     )
 
 
@@ -174,6 +214,175 @@ def test_false_negative_holds_settings_and_never_auto_increases_aggression(base_
     assert first.next_session_settings.epsilon == 0.2
     assert first == second
     assert first.canonical_bytes() == second.canonical_bytes()
+
+
+def test_mixed_records_use_distinct_metric_populations_and_are_order_invariant(base_log):
+    records = [
+        _record(
+            detected=True,
+            k=3,
+            n=4,
+            q=0.5,
+            situation_key="tp",
+        ),
+        _record(
+            detected=False,
+            k=1,
+            n=2,
+            q=0.5,
+            situation_key="fn",
+        ),
+        _record(
+            detected=True,
+            k=1,
+            n=2,
+            action_group=("CHECK",),
+            q=0.5,
+            situation_key="fp",
+        ),
+        _record(
+            detected=False,
+            k=1,
+            n=4,
+            action_group=("CHECK",),
+            q=0.5,
+            situation_key="tn",
+        ),
+        _record(
+            detected=True,
+            k=0,
+            n=1,
+            q=0.75,
+            situation_key="truth-boundary",
+        ),
+        _record(
+            detected=True,
+            k=1,
+            n=1,
+            action_group=("CHECK",),
+            q=0.0,
+            situation_key="structurally-ineligible",
+            structurally_eligible=False,
+        ),
+        _record(
+            detected=True,
+            k=0,
+            n=0,
+            q=0.5,
+            situation_key="unreached",
+        ),
+    ]
+    answer_key = OpponentAnswerKey(
+        "fixture-opponent",
+        (("BET_ALL_IN", 0.75), ("CHECK", 0.25)),
+    )
+    config = LeakDetectorConfig(
+        min_confidence=0.6,
+        rule_exploit_min_confidence=0.7,
+        nodelock_exploit_min_confidence=0.8,
+    )
+    log = _neutral_log(base_log)
+
+    first = _evaluate_many(
+        [log],
+        records=records,
+        answer_key=answer_key,
+        detector_config=config,
+    )
+    reordered = _evaluate_many(
+        [log],
+        records=list(reversed(records)),
+        answer_key=answer_key,
+        detector_config=config,
+    )
+
+    # Accuracy sees the four TP/TN/FP/FN records: (1 + 1) / 4 = 1 / 2.
+    assert first.evaluation.leak_detection_accuracy == 0.5
+    # Error sees all six reached records: (0 + 1/4 + 1/4 + 0 + 3/4 + 3/4) / 6.
+    assert first.evaluation.average_estimation_error == pytest.approx(1 / 3)
+    assert first.evaluation.notes.count("outcome:false_positive_count=1") == 1
+    assert first.evaluation.notes.count("outcome:false_negative_count=1") == 1
+    assert first.evaluation.notes.count("outcome:next_settings=conservative") == 1
+    assert len(first.evaluation.notes) == 9
+    assert first.next_session_settings.leak_detector_config.min_confidence == 1.0
+    assert first.next_session_settings.leak_detector_config.rule_exploit_min_confidence == 1.0
+    assert first.next_session_settings.leak_detector_config.nodelock_exploit_min_confidence == 1.0
+    assert first.next_session_settings.safety_alpha == 0.0
+    assert first.next_session_settings.epsilon == 0.0
+    assert first == reordered
+    assert first.canonical_bytes() == reordered.canonical_bytes()
+
+
+def test_multiple_dpls_aggregate_exact_ev_and_bind_explanations_by_order(base_log):
+    logs = [
+        _adjusted_log(
+            base_log,
+            hand_id="multi-1",
+            base_ev=0.0,
+            exploit_ev=4.0,
+            final_ev=2.0,
+        ),
+        _adjusted_log(
+            base_log,
+            hand_id="multi-2",
+            base_ev=1.0,
+            exploit_ev=-1.0,
+            final_ev=0.0,
+        ),
+        _adjusted_log(
+            base_log,
+            hand_id="multi-3",
+            base_ev=-2.0,
+            exploit_ev=-2.0,
+            final_ev=-2.0,
+        ),
+    ]
+    record = _record(detected=False, k=0, n=1)
+    answer_key = OpponentAnswerKey("fixture-opponent", (("CHECK", 1.0),))
+    config = LeakDetectorConfig()
+
+    explanations, checkers = _checked_explanations(logs)
+    checkers[1] = VerificationResult(
+        issues=(
+            VerificationIssue(
+                code="synthetic-checker-failure",
+                location="fixture",
+                message="synthetic failed explanation checker",
+            ),
+        )
+    )
+    artifact = evaluate_post_session(
+        session_id=logs[0].session_id,
+        opponent_model_id="fixture-opponent",
+        logs=logs,
+        snapshot_records=[record],
+        answer_key=answer_key,
+        explanations=explanations,
+        checker_results=checkers,
+        detector_config=config,
+        safety_alpha=logs[0].safety_alpha,
+        epsilon=0.2,
+    )
+
+    # Exact gains are +2, -1, and 0; the first is under-adjusted and the second over-adjusted.
+    assert artifact.evaluation.exploit_ev_gain_vs_base == pytest.approx(1 / 3)
+    assert artifact.evaluation.over_adjustment_count == 1
+    assert artifact.evaluation.under_adjustment_count == 1
+    assert artifact.evaluation.explanation_validity_score == pytest.approx(2 / 3)
+
+    with pytest.raises(ValueError, match="explanation order or DPL identity does not match"):
+        evaluate_post_session(
+            session_id=logs[0].session_id,
+            opponent_model_id="fixture-opponent",
+            logs=logs,
+            snapshot_records=[record],
+            answer_key=answer_key,
+            explanations=[explanations[1], explanations[0], explanations[2]],
+            checker_results=checkers,
+            detector_config=config,
+            safety_alpha=logs[0].safety_alpha,
+            epsilon=0.2,
+        )
 
 
 @pytest.mark.parametrize(
