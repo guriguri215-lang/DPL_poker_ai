@@ -5,13 +5,14 @@ import json
 from pathlib import Path
 
 import pytest
+from post_session_validation_support import remove_post_session_artifact, snapshot_bundle
 
 from poker_ai import explanation_bundle_cli, run_session_cli
 from poker_ai.explanation_artifacts import (
     SavedExplanationBundleVerificationError,
+    load_next_session_settings,
     verify_saved_explanation_bundle,
 )
-from poker_ai.posterior_bundle import canonical_json_bytes
 
 
 def _write_bundle(root: Path, *, leaky: bool = False) -> Path:
@@ -59,24 +60,6 @@ def _refresh_hash(manifest_path: Path, suffix: str) -> None:
     _write_payload(manifest_path, manifest)
 
 
-def _rewrite_evaluation(
-    manifest_path: Path,
-    mutate,
-    *,
-    canonical: bool = True,
-) -> None:
-    evaluation = _artifact_path(manifest_path, ".post_session_evaluation.json")
-    payload = _payload(evaluation)
-    mutate(payload)
-    raw = (
-        canonical_json_bytes(payload)
-        if canonical
-        else (json.dumps(payload, ensure_ascii=True, indent=2) + "\n").encode("utf-8")
-    )
-    evaluation.write_bytes(raw)
-    _refresh_hash(manifest_path, ".post_session_evaluation.json")
-
-
 def _jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
@@ -90,31 +73,23 @@ def _write_jsonl(path: Path, records: list[dict]) -> None:
     )
 
 
-def _snapshot(root: Path) -> dict[str, bytes]:
-    return {
-        path.relative_to(root).as_posix(): path.read_bytes()
-        for path in root.rglob("*")
-        if path.is_file()
-    }
-
-
 def _assert_failure_is_read_only(
     root: Path,
     manifest_path: Path,
     category: str,
 ) -> None:
-    before = _snapshot(root)
+    before = snapshot_bundle(root)
     with pytest.raises(SavedExplanationBundleVerificationError) as raised:
         verify_saved_explanation_bundle(manifest_path)
     assert raised.value.category == category
-    assert _snapshot(root) == before
+    assert snapshot_bundle(root) == before
 
 
 @pytest.mark.parametrize("leaky", [False, True])
 def test_saved_normal_and_leaky_bundles_pass_read_only_verification(tmp_path, leaky):
     root = tmp_path / ("leaky" if leaky else "normal")
     manifest_path = _write_bundle(root, leaky=leaky)
-    before = _snapshot(root)
+    before = snapshot_bundle(root)
 
     result = verify_saved_explanation_bundle(manifest_path)
 
@@ -122,7 +97,7 @@ def test_saved_normal_and_leaky_bundles_pass_read_only_verification(tmp_path, le
     assert result.dpl_count == result.explanation_count == 3
     assert result.checker_total == result.checker_passed == 3
     assert result.summary_consistent
-    assert _snapshot(root) == before
+    assert snapshot_bundle(root) == before
 
 
 def test_hash_mismatch_fails_without_changing_bundle(tmp_path):
@@ -141,78 +116,6 @@ def test_post_session_evaluation_tamper_is_rejected_by_artifact_hash(tmp_path):
     evaluation.write_bytes(evaluation.read_bytes() + b" ")
 
     _assert_failure_is_read_only(root, manifest_path, "artifact-hash-mismatch")
-
-
-@pytest.mark.parametrize(
-    ("case", "category"),
-    [
-        ("noncanonical", "post-session-artifact-noncanonical"),
-        ("schema-unsupported", "post-session-schema-unsupported"),
-        ("type-unsupported", "post-session-type-unsupported"),
-        ("field-missing", "post-session-artifact-invalid"),
-        ("field-extra", "post-session-artifact-invalid"),
-        ("metric-nonfinite", "post-session-artifact-invalid"),
-        ("count-invalid", "post-session-artifact-invalid"),
-        ("notes-invalid", "post-session-artifact-invalid"),
-        ("session-mismatch", "post-session-session-mismatch"),
-        ("opponent-mismatch", "post-session-opponent-mismatch"),
-        ("settings-out-of-range", "post-session-settings-invalid"),
-    ],
-)
-def test_rehashed_post_session_semantic_tampering_is_rejected_read_only(
-    tmp_path,
-    case,
-    category,
-):
-    root = tmp_path / "bundle"
-    manifest_path = _write_bundle(root)
-
-    def mutate(payload):
-        if case == "schema-unsupported":
-            payload["schema_version"] = "999.0.0"
-        elif case == "type-unsupported":
-            payload["artifact_type"] = "other"
-        elif case == "field-missing":
-            payload["evaluation"].pop("notes")
-        elif case == "field-extra":
-            payload["evaluation"]["unexpected"] = "value"
-        elif case == "metric-nonfinite":
-            payload["evaluation"]["exploit_ev_gain_vs_base"] = float("nan")
-        elif case == "count-invalid":
-            payload["evaluation"]["over_adjustment_count"] = True
-        elif case == "notes-invalid":
-            payload["evaluation"]["notes"] = ["valid", 1]
-        elif case == "session-mismatch":
-            payload["evaluation"]["session_id"] = "S99999999"
-        elif case == "opponent-mismatch":
-            payload["evaluation"]["opponent_model_id"] = "other-opponent"
-        elif case == "settings-out-of-range":
-            payload["next_session_settings"]["leak_detector_config"]["min_deviation"] = 0.0
-        elif case != "noncanonical":  # pragma: no cover - exhaustive table guard
-            raise AssertionError(case)
-
-    _rewrite_evaluation(manifest_path, mutate, canonical=case != "noncanonical")
-
-    _assert_failure_is_read_only(root, manifest_path, category)
-
-
-def test_multiple_post_session_references_are_rejected_read_only(tmp_path):
-    root = tmp_path / "bundle"
-    manifest_path = _write_bundle(root)
-    evaluation = _artifact_path(manifest_path, ".post_session_evaluation.json")
-    duplicate = root / "copy.post_session_evaluation.json"
-    duplicate.write_bytes(evaluation.read_bytes())
-    manifest = _payload(manifest_path)
-    manifest["outputs"].append(
-        {
-            "name": duplicate.name,
-            "path": duplicate.name,
-            "sha256": hashlib.sha256(duplicate.read_bytes()).hexdigest(),
-        }
-    )
-    _write_payload(manifest_path, manifest)
-
-    _assert_failure_is_read_only(root, manifest_path, "required-artifact-reference")
 
 
 def test_missing_required_file_fails_without_creating_output(tmp_path):
@@ -319,35 +222,30 @@ def test_artifact_reference_cannot_escape_bundle_root(tmp_path):
     _assert_failure_is_read_only(tmp_path, manifest_path, "artifact-path-invalid")
 
 
-def test_a8_normal_bundle_format_remains_loadable(tmp_path):
+def test_a8_bundle_without_post_session_artifact_preserves_validator_difference(tmp_path):
     root = tmp_path / "bundle"
     manifest_path = _write_bundle(root)
-    manifest = _payload(manifest_path)
-    manifest["code"]["package_version"] = "0.1.0a8"
-    evaluation_refs = [
-        item
-        for item in manifest["outputs"]
-        if item["path"].endswith(".post_session_evaluation.json")
-    ]
-    assert len(evaluation_refs) == 1
-    (root / evaluation_refs[0]["path"]).unlink()
-    manifest["outputs"] = [
-        item
-        for item in manifest["outputs"]
-        if not item["path"].endswith(".post_session_evaluation.json")
-    ]
-    _write_payload(manifest_path, manifest)
+    remove_post_session_artifact(manifest_path, package_version="0.1.0a8")
+    before = snapshot_bundle(root)
 
     result = verify_saved_explanation_bundle(manifest_path)
 
     assert result.checker_passed == 3
+    assert snapshot_bundle(root) == before
+    with pytest.raises(SavedExplanationBundleVerificationError) as raised:
+        load_next_session_settings(manifest_path)
+    assert (raised.value.category, raised.value.filename) == (
+        "required-artifact-reference",
+        manifest_path.name,
+    )
+    assert snapshot_bundle(root) == before
 
 
 def test_distribution_cli_reports_only_bundle_and_checker_results(tmp_path, capsys):
     root = tmp_path / "bundle"
     manifest_path = _write_bundle(root)
     capsys.readouterr()
-    before = _snapshot(root)
+    before = snapshot_bundle(root)
 
     assert explanation_bundle_cli.main(["--manifest", str(manifest_path)]) == 0
 
@@ -357,7 +255,7 @@ def test_distribution_cli_reports_only_bundle_and_checker_results(tmp_path, caps
         "artifact_integrity=passed references=5",
         "explanation_checker=passed total=3 summary=consistent",
     ]
-    assert _snapshot(root) == before
+    assert snapshot_bundle(root) == before
 
 
 def test_distribution_cli_failure_has_no_partial_success_output(tmp_path, capsys):
@@ -366,14 +264,14 @@ def test_distribution_cli_failure_has_no_partial_success_output(tmp_path, capsys
     explanations = _artifact_path(manifest_path, ".explanations.jsonl")
     explanations.write_bytes(explanations.read_bytes() + b" ")
     capsys.readouterr()
-    before = _snapshot(root)
+    before = snapshot_bundle(root)
 
     assert explanation_bundle_cli.main(["--manifest", str(manifest_path)]) == 1
 
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "category=artifact-hash-mismatch" in captured.err
-    assert _snapshot(root) == before
+    assert snapshot_bundle(root) == before
 
 
 def test_distribution_cli_version_writes_nothing(tmp_path, monkeypatch, capsys):
