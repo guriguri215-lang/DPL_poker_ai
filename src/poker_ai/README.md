@@ -38,9 +38,10 @@ an LLM surface layer are outside the implemented normal-session path.
 - `leak.py` — MVP action-rate LeakDetector for `LEAK_R007` / `LEAK_R008`, producing
   DPL `DetectedLeak` records from public observations only. Its action baseline
   matches the stub opponent, so the normal CLI run has no detected leaks.
-- `exploit.py` — rule-based exploit provider. The MVP reacts to actionable
-  `LEAK_R008` records by shifting fold mass into calls only when exact per-action EV
-  improves over the base policy.
+- `exploit.py` — solver-backed node-lock and retained rule-based exploit
+  providers. The node-lock provider handles eligible `LEAK_R008` records, uses
+  the rule provider when the fixed river tree cannot apply the lock, and changes
+  policy only when exact per-action EV strictly improves over the base policy.
 - `mixer.py` — the SafetyMixer (`final = (1-alpha)*base + alpha*exploit`, the DPL
   convex-mixing contract) and the seeded ActionSelector. This formula produces a
   valid mixture; it is not a strategy-safety proof.
@@ -72,7 +73,7 @@ Run the distributed CLI with
 `--solver-iterations 40 --solver-average-delay 0`). The compatible source-tree
 wrapper remains `python cli/run_session.py --seed 20260704 --hands 200`.
 To exercise a positive convex mixer blend:
-`poker-xai-run-session --safety-alpha 0.5`.
+`poker-xai-run-session --leaky-fixture --safety-alpha 0.5`.
 Both paths use the packaged `poker_ai.run_session_cli` implementation and record
 their actual entrypoint, raw arguments, package version, and anchored-or-unknown
 Git provenance in the RunManifest.

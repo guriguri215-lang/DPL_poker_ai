@@ -130,10 +130,11 @@ The restored values are defaults. Explicit `--safety-alpha` and
 `--exploration-epsilon` flags take precedence, including an explicit `0.0`.
 When `--leaky-fixture` is also present, the existing fixture baseline remains
 the only baseline while the restored detector config is passed to both the
-detector and real rule exploit provider. The source's posterior/action history,
-baseline, and answer key are not transferred. There is no implicit latest-file
-search, session registry, or automatic loop; repeat the explicit handoff for
-each intended successor.
+detector and real solver-backed node-lock provider. Its node-lock confidence
+gate and retained rule-based fallback use the restored thresholds. The source's
+posterior/action history, baseline, and answer key are not transferred. There
+is no implicit latest-file search, session registry, or automatic loop; repeat
+the explicit handoff for each intended successor.
 
 Omitting `--explanations` retains the five-file bundle above and does not change
 the session inputs, action, solver behavior, or invocation provenance.
@@ -153,9 +154,13 @@ verification](explanation_bundle_verification.md).
 - Explicit `--safety-alpha` and `--exploration-epsilon` values override restored
   defaults.
 - `--leaky-fixture` is a public positive-path smoke fixture that connects the
-  detected leak to the rule-based exploit provider. The provider changes policy
-  only when its candidate improves the existing exact action EV; otherwise it
-  retains the base policy. This is not a production opponent model.
+  detected leak to the solver-backed node-lock exploit provider. The existing
+  solver iteration and average-delay values configure both the base-policy and
+  node-lock solves. A mapping that does not apply to the fixed river tree, or a
+  baseline-scaled lock with no reachable target, uses the retained rule-based
+  fallback. Every candidate changes policy only when it strictly improves the
+  existing exact action EV; otherwise the base policy remains in use. This is
+  not a production opponent model.
 - `--explanations` is an artifact-output opt-in; it does not affect policy or
   action selection.
 

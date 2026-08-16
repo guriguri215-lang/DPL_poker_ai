@@ -381,7 +381,7 @@ def test_leaky_fixture_cli_smoke_writes_detected_leaks_and_mix(tmp_path, capsys)
         "--seed",
         "20260704",
         "--hands",
-        "12",
+        "31",
         "--solver-iterations",
         "1",
         "--safety-alpha",
@@ -395,7 +395,7 @@ def test_leaky_fixture_cli_smoke_writes_detected_leaks_and_mix(tmp_path, capsys)
 
     assert rc == 0
     out = capsys.readouterr().out
-    assert "detected_leaks=12" in out
+    assert "detected_leaks=31" in out
     assert "mixed_decisions=" in out
     jsonl_path = tmp_path / "S20260704.dpl.jsonl"
     manifest_path = tmp_path / "S20260704.manifest.json"
@@ -405,7 +405,7 @@ def test_leaky_fixture_cli_smoke_writes_detected_leaks_and_mix(tmp_path, capsys)
     ]
     manifest = RunManifest.model_validate(json.loads(manifest_path.read_text(encoding="utf-8")))
 
-    assert len(logs) == 12
+    assert len(logs) == 31
     assert all(log.detected_leaks for log in logs)
     assert all(
         log.baseline_table_version == leaky_fixture_action_baseline_table().table_version
@@ -420,10 +420,17 @@ def test_leaky_fixture_cli_smoke_writes_detected_leaks_and_mix(tmp_path, capsys)
         and log.base_policy.get("FOLD", 0.0) > 0.0
         and log.ev_estimate.base_ev < 0.0
     ]
+    solver_improved = [log for log in improved if log.exploit_source == "nodelock_solver"]
+    fallback_improved = [log for log in improved if log.exploit_source == "rule_based"]
     assert improved
+    assert solver_improved
+    assert fallback_improved
     assert non_improving
+    for log in solver_improved:
+        assert log.solver_result_id
+    for log in fallback_improved:
+        assert log.solver_result_id is None
     for log in improved:
-        assert log.exploit_source == "rule_based"
         assert log.trigger_reasons == ["TRG_R001", "TRG_R002"]
         assert log.mix_reasons == ["MIX_R001"]
         assert all(
@@ -437,6 +444,8 @@ def test_leaky_fixture_cli_smoke_writes_detected_leaks_and_mix(tmp_path, capsys)
     for log in unchanged:
         assert log.exploit_policy == log.base_policy
         assert log.final_policy == log.base_policy
+        assert log.exploit_source == "rule_based"
+        assert log.solver_result_id is None
         assert log.trigger_reasons == []
         assert log.mix_reasons == []
     estimator = json.loads(

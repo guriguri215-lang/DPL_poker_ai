@@ -20,7 +20,7 @@ from poker_ai.explanation_artifacts import (
     load_next_session_settings,
     write_verified_explanation_bundle,
 )
-from poker_ai.exploit import RuleExploitProvider
+from poker_ai.exploit import NodelockExploitConfig, NodelockExploitProvider, RuleExploitProvider
 from poker_ai.leak import (
     LeakDetector,
     LeakDetectorConfig,
@@ -155,7 +155,15 @@ def main(argv: list[str] | None = None, *, entrypoint: str = CONSOLE_ENTRYPOINT)
             leaky_fixture_action_baseline_table(),
             detector_config,
         )
-        exploit_provider = RuleExploitProvider(confidence_config=leak_detector.config)
+        exploit_provider = NodelockExploitProvider(
+            NodelockExploitConfig(
+                min_confidence=leak_detector.config.nodelock_exploit_min_confidence,
+                iterations=args.solver_iterations,
+                average_delay=args.solver_average_delay,
+            ),
+            fallback_provider=RuleExploitProvider(confidence_config=leak_detector.config),
+            confidence_config=leak_detector.config,
+        )
     elif previous_settings is not None:
         leak_detector = LeakDetector(config=previous_settings.leak_detector_config)
 
