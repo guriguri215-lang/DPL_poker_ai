@@ -56,9 +56,13 @@ an LLM surface layer are outside the implemented normal-session path.
   external validation, or independent third-party reproducibility.
 - `post_session_evaluation.py` - the deterministic Phase 8 answer-key evaluator.
   It runs only after all Hero decisions, reuses terminal posterior candidates,
-  exact DPL EV and existing verifier results, and emits conservative settings
-  using only existing detector thresholds, safety alpha and epsilon. It does not
-  make a later session consume those settings.
+  exact DPL EV and existing verifier results, and proposes conservative
+  next-session settings using only the existing detector thresholds, safety
+  alpha and epsilon. A later normal Hero session uses those verified settings as
+  defaults only when you explicitly pass the completed source RunManifest with
+  `--previous-session-manifest`; it does not discover a manifest or start another
+  session automatically, or carry forward the source baseline, observation
+  history or answer key.
 - `explanation_bundle_cli.py` — the thin, offline, read-only manifest-first CLI
   for rechecking saved normal Hero explanation bundles. It reuses the writer's
   pairing, checker-result, and summary decisions and never runs a session.
