@@ -25,6 +25,7 @@ SMOKE_CHECKS = [
     "explicit-previous-session-manifest",
     "manifest-round-trip",
     "saved-explanation-bundle-verification",
+    "solver-backed-explanation-provenance",
     "entry-point-metadata",
     "documentation-relative-links",
 ]

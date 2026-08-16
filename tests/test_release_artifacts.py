@@ -16,7 +16,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
-CURRENT_VERSION = "0.1.0a10"
+CURRENT_VERSION = "0.1.0a11"
 sys.path.insert(0, str(SCRIPTS))
 
 
@@ -104,6 +104,13 @@ def test_release_workflow_keeps_exact_python_and_offline_cross_platform_gates() 
     assert "loaded['poker-xai-run-session'](first_argv)" in verifier
     assert "loaded['poker-xai-run-session'](second_argv)" in verifier
     assert "'--previous-session-manifest'" in verifier
+    assert "positive_argv = [" in verifier
+    assert "'--leaky-fixture'" in verifier
+    assert "if dpl.exploit_source == 'nodelock_solver'" in verifier
+    assert "dpl.ev_estimate.exploit_ev > dpl.ev_estimate.base_ev" in verifier
+    assert "dpl.solver_result_id in explanation.rendered_text" in verifier
+    assert "verify_explanation(explanation, dpl)" in verifier
+    assert "positive_bundle_output" in verifier
     assert "source-checkout" in verifier
     assert "verify_documentation_links(documentation_root)" in verifier
     assert workflow.count("verify_release_bundle.py") == 3
@@ -259,6 +266,7 @@ def _release_bundle(tmp_path: Path, layout: str) -> tuple[Path, Path, Path, Path
                     "explicit-previous-session-manifest",
                     "manifest-round-trip",
                     "saved-explanation-bundle-verification",
+                    "solver-backed-explanation-provenance",
                     "entry-point-metadata",
                     "documentation-relative-links",
                 ],
