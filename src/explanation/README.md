@@ -28,6 +28,9 @@ the minimal orchestration in `poker_ai.explanation_artifacts`. That layer keeps
 the generator and verifier separate, preserves DPL order, verifies every pair
 before writing, and reuses the existing explanations JSONL and verifier-summary
 formats. It changes neither explanation schema nor generator/verifier logic.
+The P5-4 leaky-fixture command uses the same node-lock provider and rule fallback
+as normal Hero sessions, and carries applied solver provenance from the DPL into
+the verified explanation only when the solver candidate improves exact decision EV.
 The manifest-first saved-bundle consumer reuses the same pairing, checker-result,
 and verifier-summary decisions; see the public [verification guide](../../docs/explanation_bundle_verification.md).
 
