@@ -17,49 +17,28 @@ import subprocess
 import sys
 from pathlib import Path
 
-from poker_ai.decision import Observation
+from poker_ai.cfr_policy import DEFAULT_CFR_RIVER_POLICY_CONFIG
 from poker_ai.explanation_artifacts import (
     ExplanationBundleVerificationError,
     write_verified_explanation_bundle,
 )
-from poker_ai.exploit import RuleExploitResult
+from poker_ai.exploit import (
+    NodelockExploitConfig,
+    NodelockExploitProvider,
+    RuleExploitProvider,
+)
 from poker_ai.leak import (
     LeakDetector,
     LeakDetectorConfig,
     leaky_fixture_action_baseline_table,
 )
 from poker_ai.session import run_session
-from poker_core.dpl_schema import DetectedLeak
 
 ARTIFACT_ID = "p5_4_e2e_explanation_artifacts"
 ENTRYPOINT = "cli/p5_4_e2e_explanation_artifacts.py"
 DEFAULT_SEED = 20260709
 DEFAULT_HANDS = 5
 DEFAULT_OUTPUT_DIR = Path("experiments_output/p5_4_e2e_explanation_artifacts")
-
-
-class _LeakyFixtureExploitProvider:
-    """Force a CALL exploit when the public leaky fixture detects R008."""
-
-    def build(
-        self,
-        *,
-        base_policy: dict[str, float],
-        detected_leaks: tuple[DetectedLeak, ...] | list[DetectedLeak],
-        legal_actions: tuple[str, ...],
-        action_ev: dict[str, float],
-        observation: Observation | None = None,
-    ) -> RuleExploitResult:
-        del action_ev, observation
-        if "CALL" in legal_actions and any(
-            leak.reason_id == "LEAK_R008" for leak in detected_leaks
-        ):
-            return RuleExploitResult(
-                policy={"CALL": 1.0},
-                applied_leak_reason_ids=("LEAK_R008",),
-                trigger_reasons=("TRG_R001", "TRG_R002"),
-            )
-        return RuleExploitResult(policy=dict(base_policy))
 
 
 def _positive_int(value: str) -> int:
@@ -152,6 +131,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(raw_argv)
 
     detector = _leaky_fixture_detector()
+    exploit_provider = NodelockExploitProvider(
+        NodelockExploitConfig(
+            min_confidence=detector.config.nodelock_exploit_min_confidence,
+            iterations=DEFAULT_CFR_RIVER_POLICY_CONFIG.iterations,
+            average_delay=DEFAULT_CFR_RIVER_POLICY_CONFIG.average_delay,
+        ),
+        fallback_provider=RuleExploitProvider(confidence_config=detector.config),
+        confidence_config=detector.config,
+    )
     git_commit = _current_git_commit(repo_root)
     git_dirty = _git_dirty(repo_root)
     session = run_session(
@@ -163,7 +151,8 @@ def main(argv: list[str] | None = None) -> int:
         argv=raw_argv,
         leak_detector=detector,
         safety_alpha=args.safety_alpha,
-        exploit_provider=_LeakyFixtureExploitProvider(),
+        exploit_provider=exploit_provider,
+        solver_config=DEFAULT_CFR_RIVER_POLICY_CONFIG,
     )
 
     try:
