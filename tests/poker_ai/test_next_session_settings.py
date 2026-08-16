@@ -20,6 +20,7 @@ from poker_ai.explanation_artifacts import (
     load_next_session_settings,
     verify_saved_explanation_bundle,
 )
+from poker_ai.exploit import NodelockExploitProvider, RuleExploitProvider
 from poker_ai.opponent import OpponentAnswerKey
 from poker_core.dpl_schema import DecisionProvenanceLog
 from poker_core.run_manifest import RunManifest
@@ -145,7 +146,7 @@ def test_maintained_settings_are_consumed_by_the_next_normal_session(
     assert sampler.path == "inline:epsilon-uniform-v1:epsilon=0.2"
 
 
-def test_real_rule_provider_is_used_across_two_consecutive_leaky_sessions(
+def test_real_nodelock_provider_is_used_across_two_consecutive_leaky_sessions(
     tmp_path,
     maintained_source_manifest,
 ):
@@ -177,8 +178,11 @@ def test_real_rule_provider_is_used_across_two_consecutive_leaky_sessions(
     assert all(log.baseline_table_version == "fixture-action-baseline" for log in logs)
     assert all(log.detected_leaks for log in logs)
     mixed = [log for log in logs if log.mix_reasons and "MIX_R001" in log.mix_reasons]
-    assert mixed
-    assert all(log.exploit_source == "rule_based" for log in mixed)
+    solver_mixed = [log for log in mixed if log.exploit_source == "nodelock_solver"]
+    fallback_mixed = [log for log in mixed if log.exploit_source == "rule_based"]
+    assert solver_mixed
+    assert all(log.solver_result_id for log in solver_mixed)
+    assert all(log.solver_result_id is None for log in fallback_mixed)
     assert _estimator(out_dir)["detector_min_confidence"] == (
         restored.leak_detector_config.min_confidence
     )
@@ -212,6 +216,19 @@ def test_conservative_settings_are_consumed_by_the_next_session(tmp_path, monkey
     assert restored.leak_detector_config.rule_exploit_min_confidence == 1.0
     assert restored.leak_detector_config.nodelock_exploit_min_confidence == 1.0
 
+    constructed_providers = []
+
+    def record_nodelock_provider(config, *, fallback_provider, confidence_config):
+        provider = NodelockExploitProvider(
+            config,
+            fallback_provider=fallback_provider,
+            confidence_config=confidence_config,
+        )
+        constructed_providers.append(provider)
+        return provider
+
+    monkeypatch.setattr(run_session_cli, "NodelockExploitProvider", record_nodelock_provider)
+
     successor = tmp_path / "conservative-successor"
     seed = 204
     assert (
@@ -222,7 +239,10 @@ def test_conservative_settings_are_consumed_by_the_next_session(tmp_path, monkey
                 "--hands",
                 "2",
                 "--solver-iterations",
+                "2",
+                "--solver-average-delay",
                 "1",
+                "--leaky-fixture",
                 "--previous-session-manifest",
                 str(source),
                 "--out-dir",
@@ -239,6 +259,13 @@ def test_conservative_settings_are_consumed_by_the_next_session(tmp_path, monkey
     assert estimator["rule_exploit_min_confidence"] == 1.0
     assert estimator["nodelock_exploit_min_confidence"] == 1.0
     assert _execution_sampler(manifest).path == "inline:epsilon-uniform-v1:epsilon=0"
+    assert len(constructed_providers) == 1
+    provider = constructed_providers[0]
+    assert provider.config.min_confidence == 1.0
+    assert provider.config.iterations == 2
+    assert provider.config.average_delay == 1
+    assert isinstance(provider.fallback_provider, RuleExploitProvider)
+    assert provider.fallback_provider.config.min_confidence == 1.0
 
 
 @pytest.mark.parametrize(
@@ -412,9 +439,10 @@ def test_same_previous_manifest_reproduces_dpl_settings_and_artifact_bytes(
                     "--seed",
                     str(seed),
                     "--hands",
-                    "3",
+                    "13",
                     "--solver-iterations",
                     "1",
+                    "--leaky-fixture",
                     "--explanations",
                     "--previous-session-manifest",
                     str(maintained_source_manifest),
@@ -437,6 +465,7 @@ def test_same_previous_manifest_reproduces_dpl_settings_and_artifact_bytes(
     assert (roots[0] / f"S{seed:08d}.post_session_evaluation.json").read_bytes() == (
         roots[1] / f"S{seed:08d}.post_session_evaluation.json"
     ).read_bytes()
+    assert any(log.exploit_source == "nodelock_solver" for log in _dpls(roots[0], seed))
     first_manifest = _manifest(roots[0] / f"S{seed:08d}.manifest.json")
     second_manifest = _manifest(roots[1] / f"S{seed:08d}.manifest.json")
     assert _execution_sampler(first_manifest) == _execution_sampler(second_manifest)
