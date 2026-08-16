@@ -628,6 +628,7 @@ first_argv = [
 with contextlib.redirect_stdout(io.StringIO()):
     assert loaded['poker-xai-run-session'](first_argv) == 0
 
+from explanation import ExplanationDocument, verify_explanation
 from poker_core.dpl_schema import DecisionProvenanceLog
 from poker_core.run_manifest import RunManifest
 
@@ -688,6 +689,63 @@ for session_root, raw_argv in (
         'artifact_integrity=passed references=5',
         'explanation_checker=passed total=1 summary=consistent',
     ]
+
+positive_output_root = output_root / 'solver-backed'
+positive_argv = [
+    '--seed',
+    '32',
+    '--hands',
+    '2',
+    '--leaky-fixture',
+    '--explanations',
+    '--out-dir',
+    str(positive_output_root),
+]
+with contextlib.redirect_stdout(io.StringIO()):
+    assert loaded['poker-xai-run-session'](positive_argv) == 0
+
+positive_manifest_paths = list(positive_output_root.glob('*.manifest.json'))
+positive_dpl_paths = list(positive_output_root.glob('*.dpl.jsonl'))
+positive_explanation_paths = list(positive_output_root.glob('*.explanations.jsonl'))
+assert (
+    len(positive_manifest_paths)
+    == len(positive_dpl_paths)
+    == len(positive_explanation_paths)
+    == 1
+)
+positive_dpls = [
+    DecisionProvenanceLog.model_validate_json(line)
+    for line in positive_dpl_paths[0].read_text(encoding='utf-8').splitlines()
+]
+positive_explanations = [
+    ExplanationDocument.model_validate_json(line)
+    for line in positive_explanation_paths[0].read_text(encoding='utf-8').splitlines()
+]
+positive_pairs = list(zip(positive_dpls, positive_explanations, strict=True))
+assert len(positive_pairs) == 2
+solver_backed_pairs = [
+    (dpl, explanation)
+    for dpl, explanation in positive_pairs
+    if dpl.exploit_source == 'nodelock_solver'
+]
+assert solver_backed_pairs
+for dpl, explanation in solver_backed_pairs:
+    assert dpl.ev_estimate.exploit_ev > dpl.ev_estimate.base_ev
+    assert dpl.solver_result_id
+    assert dpl.solver_result_id in explanation.rendered_text
+for dpl, explanation in positive_pairs:
+    result = verify_explanation(explanation, dpl)
+    assert result.passed, result.issues
+
+positive_bundle_output = io.StringIO()
+with contextlib.redirect_stdout(positive_bundle_output):
+    assert loaded['poker-xai-verify-explanation-bundle'](
+        ['--manifest', str(positive_manifest_paths[0])]
+    ) == 0
+assert positive_bundle_output.getvalue().splitlines() == [
+    'artifact_integrity=passed references=5',
+    'explanation_checker=passed total=2 summary=consistent',
+]
 """
     script = script.replace("EXPECTED_VERSION", repr(version)).replace(
         "EXPECTED_ENTRY_POINTS", repr(EXPECTED_ENTRY_POINTS)
@@ -760,6 +818,7 @@ def verify(
             "explicit-previous-session-manifest",
             "manifest-round-trip",
             "saved-explanation-bundle-verification",
+            "solver-backed-explanation-provenance",
             "entry-point-metadata",
             "documentation-relative-links",
         ],
