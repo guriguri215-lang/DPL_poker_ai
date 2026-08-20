@@ -202,6 +202,24 @@ def leaky_fixture_action_baseline_table(
     )
 
 
+def leaky_r007_fixture_action_baseline_table(
+    table_version: str = "fixture-r007-action-baseline",
+) -> ActionBaselineTable:
+    """Return the opt-in baseline for the check-back-too-often Hero fixture."""
+    return ActionBaselineTable(
+        table_version=table_version,
+        rules=(
+            ActionLeakRule(
+                reason_id="LEAK_R007",
+                leak_type="check_back_too_often",
+                action_group=CHECK_ACTIONS,
+                baseline_rate=0.0,
+                direction="increase_bet_frequency_when_checked_to",
+            ),
+        ),
+    )
+
+
 def action_baseline_table_payload(table: ActionBaselineTable) -> dict[str, object]:
     """Return a stable JSON-ready payload for provenance hashes."""
     return {

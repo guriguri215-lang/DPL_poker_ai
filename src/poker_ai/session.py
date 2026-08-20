@@ -1,8 +1,10 @@
 """Vertical-slice session runner: scenarios -> decisions -> validated DPL + manifest.
 
-Generates scenarios deterministically, has the stub opponent act, solves the public
-river spot with CFR+, and gives Hero a finite-iteration combo- and position-specific
-``vs_bet`` StrategyTable entry. Each decision is assembled into a current
+Generates scenarios deterministically and solves each public river spot with CFR+.
+The historical path observes the jam-all stub before Hero's finite-iteration
+``vs_bet`` decision. The explicit R007 fixture instead gives OOP Hero the existing
+tree's ``start`` ``CHECK``/``BET_33`` decision and records a check-back only after
+Hero checks. Each decision is assembled into a current
 :class:`~poker_core.dpl_schema.DecisionProvenanceLog`. Public action observations feed
 the leak detector independently; its action baseline still matches the stub opponent,
 so the normal CLI run remains leak-free. Optional rule or node-lock exploitation stays
@@ -23,8 +25,14 @@ import platform
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
-from poker_core.dpl_schema import DPL_SCHEMA_VERSION, DecisionProvenanceLog, EvEstimate
+from poker_core.dpl_schema import (
+    DPL_SCHEMA_VERSION,
+    DecisionProvenanceLog,
+    DetectedLeak,
+    EvEstimate,
+)
 from poker_core.range_model import Range
 from poker_core.reason_ontology import get_ontology
 from poker_core.run_manifest import (
@@ -41,6 +49,8 @@ from .base_policy import BasePolicyProvider
 from .baseline_strategy import FACING_ALL_IN, build_situation_key
 from .cfr_policy import (
     DEFAULT_CFR_RIVER_POLICY_CONFIG,
+    CfrRiverNoFacingPolicyConfig,
+    CfrRiverNoFacingPolicyProvider,
     CfrRiverPolicyConfig,
     CfrRiverPolicyProvider,
 )
@@ -50,7 +60,12 @@ from .hand_bucket import BUCKET_DEF_PATH, bucket_def_version, get_bucket_definit
 from .leak import LeakDetector
 from .mixer import EPSILON_SAMPLER_VERSION
 from .observation import ActionStats, ObservationTracker
-from .opponent import StubOpponent
+from .opponent import (
+    CHECK_BACK_OPPONENT_ID,
+    JAM_ALL_OPPONENT_ID,
+    STUB_OPPONENT_VERSION,
+    StubOpponent,
+)
 from .posterior_bundle import (
     PosteriorBundleParts,
     build_posterior_bundle_parts,
@@ -60,12 +75,16 @@ from .posterior_bundle import (
 from .runtime_provenance import resolve_package_version
 from .scenario import SCENARIO_SCHEMA_VERSION, Scenario, generate_scenarios
 
-#: EV source for every task-3 DPL: exact showdown enumeration (ADR-0008).
+#: EV source for every task-3 DPL: exact frozen-model action evaluation (ADR-0008).
 EV_SOURCE = "solver_exact"
 
-#: Fixed identity of the single stub opponent (ADR-0007).
-OPPONENT_ID = "stub_jam_all"
-OPPONENT_VERSION = "0.1.0"
+#: Historical default stub identity (ADR-0007).
+OPPONENT_ID = JAM_ALL_OPPONENT_ID
+OPPONENT_VERSION = STUB_OPPONENT_VERSION
+
+FACING_ALL_IN_SESSION_MODE = "facing_all_in"
+R007_NO_FACING_SESSION_MODE = "r007_no_facing"
+SessionMode = Literal["facing_all_in", "r007_no_facing"]
 
 
 @dataclass(frozen=True)
@@ -129,6 +148,95 @@ def _build_dpl(
         tracker.snapshot(),
         situation_key,
     )
+    return _assemble_dpl(
+        scenario,
+        hand_id,
+        session_id,
+        observation=observation,
+        detected_leaks=detected_leaks,
+        leak_detector=leak_detector,
+        safety_alpha=safety_alpha,
+        exploration_epsilon=exploration_epsilon,
+        exploit_provider=exploit_provider,
+        base_policy_provider=base_policy_provider,
+    )
+
+
+def _build_r007_dpl(
+    scenario: Scenario,
+    hand_id: str,
+    session_id: str,
+    *,
+    tracker: ObservationTracker,
+    leak_detector: LeakDetector,
+    safety_alpha: float,
+    exploration_epsilon: float,
+    exploit_provider: ExploitProvider | None,
+    base_policy_provider: BasePolicyProvider,
+) -> DecisionProvenanceLog:
+    """Run one causal OOP no-facing decision for the R007 fixture."""
+    scenario = _as_oop_scenario(scenario)
+    opponent = StubOpponent(
+        opponent_id=CHECK_BACK_OPPONENT_ID,
+        opponent_version=OPPONENT_VERSION,
+        assumed_range=scenario.opponent_range_obj(),
+        _policy="check_back_all",
+    )
+    observation = Observation(
+        hand_id=hand_id,
+        session_id=session_id,
+        board=scenario.board_cards(),
+        position="OOP",
+        pot=scenario.pot,
+        facing_bet=0.0,
+        effective_stack=scenario.effective_stack,
+        hero_combo=scenario.hero_combo_obj(),
+        hero_range=scenario.hero_range_obj(),
+        opponent_assumed_range=Range(scenario.opponent_range),
+    )
+    opponent_situation_key = f"{classify_board(observation.board)}:IP:river_vs_check"
+    tracker.register_situation(opponent_situation_key)
+    detected_leaks = leak_detector.detect_for_situation(
+        tracker.snapshot(),
+        opponent_situation_key,
+    )
+    log = _assemble_dpl(
+        scenario,
+        hand_id,
+        session_id,
+        observation=observation,
+        detected_leaks=detected_leaks,
+        leak_detector=leak_detector,
+        safety_alpha=safety_alpha,
+        exploration_epsilon=exploration_epsilon,
+        exploit_provider=exploit_provider,
+        base_policy_provider=base_policy_provider,
+    )
+    if log.selected_action == "CHECK":
+        opponent_action = opponent.respond_to_check(
+            effective_stack=scenario.effective_stack,
+        )
+        tracker.record_opponent_action(
+            situation_key=opponent_situation_key,
+            action=opponent_action.action,
+        )
+    return log
+
+
+def _assemble_dpl(
+    scenario: Scenario,
+    hand_id: str,
+    session_id: str,
+    *,
+    observation: Observation,
+    detected_leaks: list[DetectedLeak],
+    leak_detector: LeakDetector,
+    safety_alpha: float,
+    exploration_epsilon: float,
+    exploit_provider: ExploitProvider | None,
+    base_policy_provider: BasePolicyProvider,
+) -> DecisionProvenanceLog:
+    """Apply the shared Hero/mixer/DPL contract to one public observation."""
     agent = HeroAgent(
         base_policy_provider,
         get_bucket_definition(),
@@ -189,6 +297,39 @@ def _build_dpl(
     )
 
 
+def _as_oop_scenario(scenario: Scenario) -> Scenario:
+    if scenario.position == "OOP":
+        return scenario
+    payload = scenario.model_dump(mode="python")
+    payload["position"] = "OOP"
+    return Scenario.model_validate(payload)
+
+
+def _base_policy_provider_for(
+    solver_config: CfrRiverPolicyConfig,
+    session_mode: SessionMode,
+) -> BasePolicyProvider:
+    if session_mode == FACING_ALL_IN_SESSION_MODE:
+        return CfrRiverPolicyProvider(solver_config)
+    if session_mode == R007_NO_FACING_SESSION_MODE:
+        return CfrRiverNoFacingPolicyProvider(
+            CfrRiverNoFacingPolicyConfig(
+                iterations=solver_config.iterations,
+                average_delay=solver_config.average_delay,
+                checkpoints=solver_config.checkpoints,
+            )
+        )
+    raise ValueError(f"unknown session_mode {session_mode!r}")
+
+
+def _opponent_id_for(session_mode: SessionMode) -> str:
+    if session_mode == FACING_ALL_IN_SESSION_MODE:
+        return OPPONENT_ID
+    if session_mode == R007_NO_FACING_SESSION_MODE:
+        return CHECK_BACK_OPPONENT_ID
+    raise ValueError(f"unknown session_mode {session_mode!r}")
+
+
 def iter_session_logs(
     seed: int,
     num_hands: int,
@@ -198,6 +339,7 @@ def iter_session_logs(
     exploration_epsilon: float = 0.0,
     exploit_provider: ExploitProvider | None = None,
     solver_config: CfrRiverPolicyConfig = DEFAULT_CFR_RIVER_POLICY_CONFIG,
+    session_mode: SessionMode = FACING_ALL_IN_SESSION_MODE,
     _tracker: ObservationTracker | None = None,
     _base_policy_provider: BasePolicyProvider | None = None,
 ) -> Iterator[DecisionProvenanceLog]:
@@ -205,10 +347,14 @@ def iter_session_logs(
     session_id = _session_id_for(seed)
     tracker = _tracker or ObservationTracker()
     detector = leak_detector or LeakDetector()
-    base_policy_provider = _base_policy_provider or CfrRiverPolicyProvider(solver_config)
+    base_policy_provider = _base_policy_provider or _base_policy_provider_for(
+        solver_config,
+        session_mode,
+    )
     for index, scenario in enumerate(generate_scenarios(seed, num_hands)):
         hand_id = f"{session_id}-H{index:05d}"
-        yield _build_dpl(
+        builder = _build_r007_dpl if session_mode == R007_NO_FACING_SESSION_MODE else _build_dpl
+        yield builder(
             scenario,
             hand_id,
             session_id,
@@ -263,6 +409,7 @@ def build_manifest(
     action_stats: tuple[ActionStats, ...] | list[ActionStats] = (),
     posterior_bundle: PosteriorBundleParts | None = None,
     solver_config: CfrRiverPolicyConfig = DEFAULT_CFR_RIVER_POLICY_CONFIG,
+    session_mode: SessionMode = FACING_ALL_IN_SESSION_MODE,
     _base_policy_provider: BasePolicyProvider | None = None,
 ) -> RunManifest:
     """Build the RunManifest pinning versions, the seed and config hashes (M-7)."""
@@ -270,11 +417,14 @@ def build_manifest(
     bundle = posterior_bundle or build_posterior_bundle_parts(
         detector,
         action_stats,
-        opponent_id=OPPONENT_ID,
+        opponent_id=_opponent_id_for(session_mode),
         horizon=num_hands,
         seed=seed,
     )
-    base_policy_provider = _base_policy_provider or CfrRiverPolicyProvider(solver_config)
+    base_policy_provider = _base_policy_provider or _base_policy_provider_for(
+        solver_config,
+        session_mode,
+    )
     versions = ComponentVersions(
         reason_ontology_version=get_ontology().ontology_version,
         cluster_def_version=cluster_def_version(),
@@ -305,6 +455,11 @@ def build_manifest(
             f"base_strategy={base_policy_provider.strategy_version}, "
             f"base_strategy_source={base_policy_provider.source}, "
             f"safety_alpha={safety_alpha}, exploration_epsilon={exploration_epsilon}"
+            + (
+                f", session_mode={session_mode}"
+                if session_mode != FACING_ALL_IN_SESSION_MODE
+                else ""
+            )
         ),
         code=code,
         versions=versions,
@@ -312,7 +467,7 @@ def build_manifest(
         configs=configs,
         opponents=[
             OpponentRef(
-                opponent_id=OPPONENT_ID,
+                opponent_id=_opponent_id_for(session_mode),
                 opponent_version=OPPONENT_VERSION,
                 split="training",
             )
@@ -335,12 +490,16 @@ def run_session(
     exploration_epsilon: float = 0.0,
     exploit_provider: ExploitProvider | None = None,
     solver_config: CfrRiverPolicyConfig = DEFAULT_CFR_RIVER_POLICY_CONFIG,
+    session_mode: SessionMode = FACING_ALL_IN_SESSION_MODE,
     _base_policy_provider: BasePolicyProvider | None = None,
 ) -> SessionResult:
     """Run a full session in memory: validated DPLs plus the manifest."""
     detector = leak_detector or LeakDetector()
     tracker = ObservationTracker()
-    base_policy_provider = _base_policy_provider or CfrRiverPolicyProvider(solver_config)
+    base_policy_provider = _base_policy_provider or _base_policy_provider_for(
+        solver_config,
+        session_mode,
+    )
     logs = list(
         iter_session_logs(
             seed,
@@ -350,6 +509,7 @@ def run_session(
             exploration_epsilon=exploration_epsilon,
             exploit_provider=exploit_provider,
             solver_config=solver_config,
+            session_mode=session_mode,
             _tracker=tracker,
             _base_policy_provider=base_policy_provider,
         )
@@ -357,7 +517,7 @@ def run_session(
     bundle = build_posterior_bundle_parts(
         detector,
         tracker.snapshot(),
-        opponent_id=OPPONENT_ID,
+        opponent_id=_opponent_id_for(session_mode),
         horizon=num_hands,
         seed=seed,
     )
@@ -375,6 +535,7 @@ def run_session(
         action_stats=tracker.snapshot(),
         posterior_bundle=bundle,
         solver_config=solver_config,
+        session_mode=session_mode,
         _base_policy_provider=base_policy_provider,
     )
     return SessionResult(_session_id_for(seed), logs, manifest, bundle)

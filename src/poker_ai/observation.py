@@ -1,8 +1,8 @@
 """Public observation tracking for the Phase-2 river MVP.
 
 The tracker records only public, environment-observed opponent actions keyed by the
-same situation key used by the Hero lookup path. It never accepts an opponent object
-or any hidden policy, so leak detection can be driven from action logs without
+opponent's public decision situation. It never accepts an opponent object or any
+hidden policy, so leak detection can be driven from action logs without
 peeking at :attr:`poker_ai.opponent.StubOpponent.hidden_strategy`.
 """
 
@@ -44,6 +44,17 @@ class ObservationTracker:
         self._action_counts: dict[str, Counter[str]] = {}
         self._opportunities: Counter[str] = Counter()
 
+    def register_situation(self, situation_key: str) -> None:
+        """Register a public candidate situation without inventing an action.
+
+        This preserves a terminal zero-opportunity record when the session knows
+        the tracked decision scope but the causal parent action was never taken.
+        """
+        if not situation_key:
+            raise ValueError("situation_key must not be empty")
+        self._opportunities.setdefault(situation_key, 0)
+        self._action_counts.setdefault(situation_key, Counter())
+
     def record_opponent_action(self, *, situation_key: str, action: str) -> None:
         """Record one public opponent action opportunity.
 
@@ -59,9 +70,9 @@ class ObservationTracker:
 
     def stats_for(self, situation_key: str) -> ActionStats | None:
         """Return immutable stats for ``situation_key``, or ``None`` if unseen."""
-        opportunities = self._opportunities.get(situation_key, 0)
-        if opportunities == 0:
+        if situation_key not in self._opportunities:
             return None
+        opportunities = self._opportunities.get(situation_key, 0)
         counts = dict(self._action_counts.get(situation_key, Counter()))
         return ActionStats(
             situation_key=situation_key,
@@ -71,8 +82,10 @@ class ObservationTracker:
 
     def snapshot(self) -> tuple[ActionStats, ...]:
         """Return a deterministic immutable snapshot for leak detection."""
-        return tuple(
-            stats
-            for key in sorted(self._opportunities)
-            if (stats := self.stats_for(key)) is not None
-        )
+        result: list[ActionStats] = []
+        for key in sorted(self._opportunities):
+            stats = self.stats_for(key)
+            if stats is None:  # defensive: every iterated key is registered
+                raise RuntimeError("registered observation situation disappeared")
+            result.append(stats)
+        return tuple(result)

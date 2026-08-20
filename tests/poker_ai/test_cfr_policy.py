@@ -10,8 +10,11 @@ import poker_ai.cfr_policy as cfr_policy_module
 from poker_ai.cfr_policy import (
     CFR_RIVER_POLICY_SOURCE,
     DEFAULT_CFR_RIVER_POLICY_CONFIG,
+    CfrRiverNoFacingPolicyConfig,
+    CfrRiverNoFacingPolicyProvider,
     CfrRiverPolicyConfig,
     CfrRiverPolicyProvider,
+    exact_oop_start_action_evs,
 )
 from poker_ai.decision import Observation
 from poker_ai.scenario import Scenario
@@ -106,6 +109,64 @@ def test_provider_rejects_non_all_in_facing_bet():
 
     with pytest.raises(ValueError, match="only supports facing an all-in"):
         provider.policy_for(obs, state_cluster=classify_board(obs.board))
+
+
+def test_r007_no_facing_provider_returns_start_policy_and_exact_action_evs():
+    obs = _observation("OOP", facing_bet=0.0)
+    provider = CfrRiverNoFacingPolicyProvider(
+        CfrRiverNoFacingPolicyConfig(iterations=5, average_delay=0, checkpoints=())
+    )
+
+    selected = provider.policy_for(obs, state_cluster=classify_board(obs.board))
+    table = selected.strategy_table
+    hero_entry = next(entry for entry in table.entries if entry.combo == "AhAd")
+
+    assert table.situation_key == f"{classify_board(obs.board)}:OOP:river_start"
+    assert set(hero_entry.policy) == {"CHECK", "BET_33"}
+    assert selected.decision_action_ev is not None
+    assert set(selected.decision_action_ev) == {"CHECK", "BET_33"}
+    assert all(math.isfinite(value) for value in selected.decision_action_ev.values())
+    assert "phase=start" in provider.config_ref().path
+    assert "public_bet=BET_33" in provider.config_ref().path
+
+
+def test_r007_no_facing_provider_rejects_ip_hero():
+    obs = _observation("IP", facing_bet=0.0)
+    provider = CfrRiverNoFacingPolicyProvider(
+        CfrRiverNoFacingPolicyConfig(iterations=1, average_delay=0, checkpoints=())
+    )
+
+    with pytest.raises(ValueError, match="requires Hero to be OOP"):
+        provider.policy_for(obs, state_cluster=classify_board(obs.board))
+
+
+def test_r007_current_node_action_evs_use_incremental_dpl_normalization():
+    scenario = Scenario(
+        scenario_id="R007-known-ev",
+        board=("As", "Ks", "Qh", "2d", "7c"),
+        position="OOP",
+        pot=4.0,
+        effective_stack=10.0,
+        hero_combo="AhAd",
+        hero_range={"AhAd": 1.0},
+        opponent_range={"TcTd": 1.0},
+    )
+    profile = {
+        "OOP:AhAd:start": {"CHECK": 0.5, "BET": 0.5},
+        "IP:TdTc:vs_check": {"CHECK": 1.0, "BET": 0.0},
+        "OOP:AhAd:vs_bet": {"CALL": 1.0, "FOLD": 0.0},
+        "IP:TdTc:vs_bet": {"CALL": 1.0, "FOLD": 0.0},
+    }
+
+    call_action_evs = exact_oop_start_action_evs(scenario, profile)
+    fold_profile = {
+        **profile,
+        "IP:TdTc:vs_bet": {"CALL": 0.0, "FOLD": 1.0},
+    }
+    fold_action_evs = exact_oop_start_action_evs(scenario, fold_profile)
+
+    assert call_action_evs == pytest.approx({"CHECK": 4.0, "BET_33": 5.32})
+    assert fold_action_evs == pytest.approx({"CHECK": 4.0, "BET_33": 4.0})
 
 
 def test_default_solver_config_is_explicit_and_manifest_addressable():

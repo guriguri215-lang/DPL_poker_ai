@@ -32,6 +32,8 @@ def _run_explanation_bundle(
     seed: int,
     hands: int = 3,
     leaky: bool = False,
+    leaky_reason: str = "LEAK_R008",
+    solver_iterations: int = 1,
     safety_alpha: float | None = None,
     epsilon: float | None = None,
 ) -> Path:
@@ -41,13 +43,15 @@ def _run_explanation_bundle(
         "--hands",
         str(hands),
         "--solver-iterations",
-        "1",
+        str(solver_iterations),
         "--explanations",
         "--out-dir",
         str(root),
     ]
     if leaky:
         argv.insert(-2, "--leaky-fixture")
+        if leaky_reason != "LEAK_R008":
+            argv[-2:-2] = ["--leaky-fixture-reason", leaky_reason]
     if safety_alpha is not None:
         argv[0:0] = ["--safety-alpha", str(safety_alpha)]
     if epsilon is not None:
@@ -187,6 +191,94 @@ def test_real_nodelock_provider_is_used_across_two_consecutive_leaky_sessions(
         restored.leak_detector_config.min_confidence
     )
     assert _execution_sampler(manifest).path == "inline:epsilon-uniform-v1:epsilon=0.2"
+
+
+def test_r007_two_session_handoff_restores_settings_and_solver_provenance(tmp_path):
+    source_root = tmp_path / "r007-source"
+    source = _run_explanation_bundle(
+        source_root,
+        seed=20260704,
+        hands=5,
+        leaky=True,
+        leaky_reason="LEAK_R007",
+        solver_iterations=5,
+        epsilon=1.0,
+    )
+    restored = load_next_session_settings(source)
+    successor_root = tmp_path / "r007-successor"
+    raw_argv = [
+        "--seed",
+        "20260708",
+        "--hands",
+        "5",
+        "--solver-iterations",
+        "5",
+        "--leaky-fixture",
+        "--leaky-fixture-reason",
+        "LEAK_R007",
+        "--explanations",
+        "--previous-session-manifest",
+        str(source),
+        "--out-dir",
+        str(successor_root),
+    ]
+
+    assert run_session_cli.main(raw_argv) == 0
+
+    logs = _dpls(successor_root, 20260708)
+    manifest_path = successor_root / "S20260708.manifest.json"
+    manifest = _manifest(manifest_path)
+    solver_logs = [log for log in logs if log.exploit_source == "nodelock_solver"]
+    assert restored.safety_alpha == 1.0
+    assert restored.epsilon == 1.0
+    assert all(log.safety_alpha == restored.safety_alpha for log in logs)
+    assert _execution_sampler(manifest).path == "inline:epsilon-uniform-v1:epsilon=1"
+    assert manifest.opponents[0].opponent_id == "stub_check_back_all"
+    assert logs[0].detected_leaks == []
+    assert solver_logs
+    assert all(log.detected_leaks[0].reason_id == "LEAK_R007" for log in solver_logs)
+    assert all(log.solver_result_id for log in solver_logs)
+    assert verify_saved_explanation_bundle(manifest_path).checker_total == len(logs)
+
+
+def test_r007_cross_mode_handoff_restores_only_settings(
+    tmp_path,
+    maintained_source_manifest,
+):
+    restored = load_next_session_settings(maintained_source_manifest)
+    successor_root = tmp_path / "r007-cross-mode-successor"
+    raw_argv = [
+        "--seed",
+        "203",
+        "--hands",
+        "1",
+        "--solver-iterations",
+        "1",
+        "--leaky-fixture",
+        "--leaky-fixture-reason",
+        "LEAK_R007",
+        "--explanations",
+        "--previous-session-manifest",
+        str(maintained_source_manifest),
+        "--out-dir",
+        str(successor_root),
+    ]
+
+    assert run_session_cli.main(raw_argv) == 0
+
+    logs = _dpls(successor_root, 203)
+    manifest_path = successor_root / "S00000203.manifest.json"
+    manifest = _manifest(manifest_path)
+    assert logs[0].detected_leaks == []
+    assert all(log.safety_alpha == restored.safety_alpha == 0.25 for log in logs)
+    assert _execution_sampler(manifest).path == "inline:epsilon-uniform-v1:epsilon=0.2"
+    assert _estimator(successor_root)["detector_min_confidence"] == (
+        restored.leak_detector_config.min_confidence
+    )
+    assert manifest.versions.baseline_table_version == "fixture-r007-action-baseline"
+    assert manifest.opponents[0].opponent_id == "stub_check_back_all"
+    assert "session_mode=r007_no_facing" in manifest.description
+    assert verify_saved_explanation_bundle(manifest_path).checker_total == 1
 
 
 def test_conservative_settings_are_consumed_by_the_next_session(tmp_path, monkeypatch):

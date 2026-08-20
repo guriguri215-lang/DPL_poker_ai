@@ -26,6 +26,18 @@ def test_tracker_counts_public_actions_by_situation():
     assert keys == ["dry:IP:facing_all_in", "paired:OOP:facing_all_in"]
 
 
+def test_tracker_preserves_registered_zero_opportunity_situation():
+    tracker = ObservationTracker()
+
+    tracker.register_situation("dry:IP:river_vs_check")
+
+    stats = tracker.stats_for("dry:IP:river_vs_check")
+    assert stats is not None
+    assert stats.opportunities == 0
+    assert dict(stats.action_counts) == {}
+    assert tracker.snapshot() == (stats,)
+
+
 def test_tracker_rejects_empty_public_fields():
     tracker = ObservationTracker()
     with pytest.raises(ValueError, match="situation_key"):

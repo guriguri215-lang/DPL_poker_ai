@@ -16,7 +16,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
-CURRENT_VERSION = "0.1.0a11"
+CURRENT_VERSION = "0.1.0a12"
 sys.path.insert(0, str(SCRIPTS))
 
 
@@ -111,6 +111,13 @@ def test_release_workflow_keeps_exact_python_and_offline_cross_platform_gates() 
     assert "dpl.solver_result_id in explanation.rendered_text" in verifier
     assert "verify_explanation(explanation, dpl)" in verifier
     assert "positive_bundle_output" in verifier
+    assert "r007_argv = [" in verifier
+    assert "'--leaky-fixture-reason'" in verifier
+    assert "'LEAK_R007'" in verifier
+    assert "r007_pairs[0][0].detected_leaks == []" in verifier
+    assert "r007_manifest.code.entrypoint" in verifier
+    assert "r007_manifest.code.argv == r007_argv" in verifier
+    assert "r007_bundle_output" in verifier
     assert "source-checkout" in verifier
     assert "verify_documentation_links(documentation_root)" in verifier
     assert workflow.count("verify_release_bundle.py") == 3
@@ -267,6 +274,7 @@ def _release_bundle(tmp_path: Path, layout: str) -> tuple[Path, Path, Path, Path
                     "manifest-round-trip",
                     "saved-explanation-bundle-verification",
                     "solver-backed-explanation-provenance",
+                    "r007-solver-backed-no-facing-explanation-provenance",
                     "entry-point-metadata",
                     "documentation-relative-links",
                 ],

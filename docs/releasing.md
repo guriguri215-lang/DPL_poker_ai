@@ -3,14 +3,14 @@
 [Back to the documentation index](README.md).
 
 This maintainer checklist covers the complete GitHub-only publication path for
-`0.1.0a11`. It does not publish to PyPI or any other package index. Stop the
+`0.1.0a12`. It does not publish to PyPI or any other package index. Stop the
 publication process whenever an identity, CI, review, asset, checksum, manifest,
 or safety check does not match this checklist.
 
 ## 1. Update and review the version
 
 - Start a focused `agent/...` branch from the latest `main`.
-- Set the current project version in `pyproject.toml` to `0.1.0a11`.
+- Set the current project version in `pyproject.toml` to `0.1.0a12`.
 - Update only current-version workflow defaults, public examples, tests, and
   artifact names. Preserve historical descriptions of earlier alpha releases.
 - Run the release documentation contract test so the project version, workflow
@@ -25,9 +25,11 @@ or safety check does not match this checklist.
   with the existing rule fallback, and that P5-4 records the resulting
   solver-backed explanation evidence. The default non-leaky Hero baseline stays
   unchanged.
-- Dependencies, action vocabulary, CFR defaults, Scenario, opponent model, DPL,
-  RunManifest and Explanation schemas, Phase 6, Gate B, entry points, workflow
-  topology, and the exact four-asset release contract stay unchanged.
+- Dependencies, public action labels, CFR defaults, frozen Scenario, DPL,
+  RunManifest and Explanation schemas, solver public API, Phase 6, Gate B, entry
+  points, workflow topology, and the exact four-asset release contract stay
+  unchanged. One existing runtime CLI gains only the R007 fixture selector; the
+  selected fixture has its own opponent identity and baseline provenance.
 
 ## 2. Merge through a reviewed pull request
 
@@ -47,11 +49,11 @@ The repository uses a lightweight tag whose name is the version without a `v`
 prefix. From the verified `main` commit:
 
 ```text
-git tag 0.1.0a11
-git push origin 0.1.0a11
+git tag 0.1.0a12
+git push origin 0.1.0a12
 ```
 
-Confirm that `0.1.0a11`, the project version, and the tagged commit agree. Never
+Confirm that `0.1.0a12`, the project version, and the tagged commit agree. Never
 move, replace, or delete an existing branch, tag, or release.
 
 ## 4. Manually approve and run the release workflow
@@ -59,7 +61,7 @@ move, replace, or delete an existing branch, tag, or release.
 - In GitHub Actions, select the existing **Release artifacts** workflow and
   explicitly choose **Run workflow** from `main`.
 - Review the manual inputs before approving the dispatch: both `tag` and
-  `expected_version` must be exactly `0.1.0a11`.
+  `expected_version` must be exactly `0.1.0a12`.
 - Wait for the Ubuntu build and Windows verification jobs to succeed. The
   workflow must report that the tag points at the requested source, both clean
   builds are reproducible, archive smoke checks are offline, and the final
@@ -74,7 +76,7 @@ archive extraction, or archive-contained code execution:
 ```text
 python scripts/verify_release_bundle.py \
   --bundle <workflow-bundle-directory> \
-  --expected-version 0.1.0a11
+  --expected-version 0.1.0a12
 ```
 
 ## 5. Check the exact publication set
@@ -82,8 +84,8 @@ python scripts/verify_release_bundle.py \
 The prerelease may receive only these four files from that one unchanged
 workflow bundle:
 
-- `poker_xai-0.1.0a11-py3-none-any.whl` from `dist/`
-- `poker_xai-0.1.0a11.tar.gz` from `dist/`
+- `poker_xai-0.1.0a12-py3-none-any.whl` from `dist/`
+- `poker_xai-0.1.0a12.tar.gz` from `dist/`
 - `artifact-manifest.json` from `evidence/`
 - `SHA256SUMS` from `evidence/`
 
@@ -129,22 +131,37 @@ release:
   `exploit_source="nodelock_solver"` and a non-empty `solver_result_id`, the same
   ID appears in its explanation, and every explanation passes the existing
   verifier.
+- `--leaky-fixture-reason LEAK_R007` makes the existing Hero session entry point
+  reach a bounded OOP no-facing `CHECK`/`BET_33` decision. Bare
+  `--leaky-fixture` still selects R008. R007 reuses the existing river tree,
+  CFR+, HARD/fix-to-baseline node lock, DPL, RunManifest, and Explanation schemas.
+  A check-back is recorded only after Hero actually checks, cannot inform the
+  same decision, and a zero-opportunity terminal scope is preserved without a
+  fabricated action. The fixed seed-20260704, five-hand, five-iteration smoke
+  passes `--exploration-epsilon 1.0` explicitly and requires strict exact
+  decision-EV improvement, `exploit_source="nodelock_solver"`, a non-empty
+  `solver_result_id`, the same ID in its `ExplanationDocument`, verification of
+  every explanation, and successful saved explanation-bundle revalidation.
 
 The notes must also record that release smoke preserves two consecutive Hero
 sessions on source checkout, unpacked wheel, and unpacked sdist, with session two
 explicitly consuming session one's manifest via `--previous-session-manifest`.
 On every surface, a separate seed-32, two-hand leaky-fixture run verifies the
 solver-backed provenance above and the saved explanation bundle.
+On every surface, the separate fixed R007 command above verifies the no-facing
+solver-backed provenance and its saved explanation bundle while retaining the
+R008 smoke.
 
 Keep the simulation-only boundary and identify the published-release four-asset
 verification workflow, continued required manual verification, release
 documentation contract test, and exact four-asset contract. State that there is
-no new dependency, runtime CLI or entry point, schema, solver public API, or
-release mechanism.
-Preserve the facing-all-in limitation and state that 40 CFR+ iterations are a
-fixed alpha computation budget, not a convergence guarantee.
+no new dependency, entry point, schema, solver public API, workflow topology, or
+release mechanism; the existing runtime CLI gains only the selector above.
+Preserve the default facing-all-in limitation, bound R007 to OOP
+`CHECK`/`BET_33` with no `BET_75` or raise branch, and state that 40 CFR+
+iterations are a fixed alpha computation budget, not a convergence guarantee.
 
-Create a GitHub prerelease for tag `0.1.0a11` and attach only the four verified
+Create a GitHub prerelease for tag `0.1.0a12` and attach only the four verified
 files above.
 
 ## 6. Re-download and verify the published assets
@@ -158,7 +175,7 @@ tag source checkout:
 python scripts/verify_release_bundle.py \
   --bundle <fresh-release-download-directory> \
   --layout flat \
-  --expected-version 0.1.0a11
+  --expected-version 0.1.0a12
 ```
 
 The flat mode enforces the same filenames, exact checksum targets and digests,
@@ -181,7 +198,7 @@ this checklist.
 The **Verify published release assets** workflow runs for the GitHub Release
 `published` event. A maintainer may rerun it manually from `main` with the
 `workflow_dispatch` inputs `tag` and `expected_version`, both set to
-`0.1.0a11`.
+`0.1.0a12`.
 
 The workflow has only `contents: read` permission and does not edit the Release,
 tag, assets, Issues, or pull requests. It fails unless the target is a published

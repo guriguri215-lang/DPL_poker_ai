@@ -23,6 +23,7 @@ from poker_ai.cfr_policy import (
     CfrRiverPolicyConfig,
     CfrRiverPolicyProvider,
 )
+from poker_ai.explanation_artifacts import verify_saved_explanation_bundle
 from poker_ai.exploit import RuleExploitResult
 from poker_ai.leak import (
     BET_ACTIONS,
@@ -323,7 +324,7 @@ def test_different_seed_changes_output():
 def test_manifest_is_valid_and_pins_versions_and_configs():
     manifest = build_manifest(20260704, HANDS, git_commit="unknown")
     assert isinstance(manifest, RunManifest)
-    assert manifest.code.package_version == "0.1.0a11"
+    assert manifest.code.package_version == "0.1.0a12"
     assert manifest.code.git_dirty is None
     assert manifest.code.entrypoint == "poker_ai.session.run_session"
     assert manifest.code.argv == []
@@ -454,7 +455,7 @@ def test_leaky_fixture_cli_smoke_writes_detected_leaks_and_mix(tmp_path, capsys)
     assert estimator["detector_min_confidence"] == 0.5
     assert estimator["rule_exploit_min_confidence"] == 0.95
     assert manifest.versions.baseline_table_version == "fixture-action-baseline"
-    assert manifest.code.package_version == "0.1.0a11"
+    assert manifest.code.package_version == "0.1.0a12"
     assert manifest.code.entrypoint == "cli/run_session.py"
     assert manifest.code.argv == raw_argv
     assert {
@@ -466,6 +467,115 @@ def test_leaky_fixture_cli_smoke_writes_detected_leaks_and_mix(tmp_path, capsys)
         "provenance/action_stats_terminal_snapshots.json",
         "provenance/leak_confidence_estimator.json",
     }
+
+
+def test_r007_cli_reaches_real_solver_provenance_and_verified_explanations(
+    tmp_path,
+    capsys,
+):
+    cli = _load_cli_module()
+    raw_argv = [
+        "--seed",
+        "20260704",
+        "--hands",
+        "5",
+        "--solver-iterations",
+        "5",
+        "--leaky-fixture",
+        "--leaky-fixture-reason",
+        "LEAK_R007",
+        "--exploration-epsilon",
+        "1.0",
+        "--explanations",
+        "--out-dir",
+        str(tmp_path),
+    ]
+
+    assert cli.main(raw_argv) == 0
+    assert "explanations_verified=5" in capsys.readouterr().out
+
+    dpl_path = tmp_path / "S20260704.dpl.jsonl"
+    explanations_path = tmp_path / "S20260704.explanations.jsonl"
+    manifest_path = tmp_path / "S20260704.manifest.json"
+    logs = [
+        DecisionProvenanceLog.model_validate_json(line)
+        for line in dpl_path.read_text(encoding="utf-8").splitlines()
+    ]
+    explanations = [
+        ExplanationDocument.model_validate_json(line)
+        for line in explanations_path.read_text(encoding="utf-8").splitlines()
+    ]
+    solver_logs = [log for log in logs if log.exploit_source == "nodelock_solver"]
+
+    assert logs[0].detected_leaks == []  # current response is never used by its own decision
+    assert solver_logs
+    assert all(log.exploit_source != "nodelock_solver" for log in logs[:4])
+    assert solver_logs[0].hand_id.endswith("H00004")
+    assert all(log.detected_leaks[0].reason_id == "LEAK_R007" for log in solver_logs)
+    assert all(log.ev_estimate.exploit_ev > log.ev_estimate.base_ev for log in solver_logs)
+    assert all(log.solver_result_id for log in solver_logs)
+    for log, explanation in zip(logs, explanations, strict=True):
+        verified = verify_explanation(explanation, log)
+        assert verified.passed, verified.issues
+        if log.exploit_source == "nodelock_solver":
+            assert log.solver_result_id in explanation.rendered_text
+
+    manifest = RunManifest.model_validate_json(manifest_path.read_bytes())
+    snapshot = json.loads(
+        (tmp_path / "provenance/action_stats_terminal_snapshots.json").read_bytes()
+    )
+    prior_checks: dict[str, int] = {}
+    for log in logs:
+        for leak in log.detected_leaks:
+            assert leak.effective_sample_size == prior_checks.get(leak.situation_key, 0)
+        if log.selected_action == "CHECK":
+            key = f"{log.state_cluster}:IP:river_vs_check"
+            prior_checks[key] = prior_checks.get(key, 0) + 1
+    assert sum(record["n"] for record in snapshot["records"]) == sum(
+        log.selected_action == "CHECK" for log in logs
+    )
+    assert manifest.opponents[0].opponent_id == "stub_check_back_all"
+    assert "session_mode=r007_no_facing" in manifest.description
+    assert manifest.code.entrypoint == "cli/run_session.py"
+    assert manifest.code.argv == raw_argv
+    assert all(set(log.base_policy) == {"CHECK", "BET_33"} for log in logs)
+    saved = verify_saved_explanation_bundle(manifest_path)
+    assert saved.checker_total == len(logs) == len(explanations) == 5
+
+
+def test_r007_zero_reached_check_opportunities_still_writes_verified_bundle(tmp_path):
+    cli = _load_cli_module()
+    raw_argv = [
+        "--seed",
+        "20260704",
+        "--hands",
+        "1",
+        "--solver-iterations",
+        "1",
+        "--leaky-fixture",
+        "--leaky-fixture-reason",
+        "LEAK_R007",
+        "--exploration-epsilon",
+        "0.0",
+        "--explanations",
+        "--out-dir",
+        str(tmp_path),
+    ]
+
+    assert cli.main(raw_argv) == 0
+
+    manifest_path = tmp_path / "S20260704.manifest.json"
+    log = DecisionProvenanceLog.model_validate_json(
+        (tmp_path / "S20260704.dpl.jsonl").read_text(encoding="utf-8").splitlines()[0]
+    )
+    snapshot = json.loads(
+        (tmp_path / "provenance/action_stats_terminal_snapshots.json").read_bytes()
+    )
+    assert log.selected_action == "BET_33"
+    assert log.detected_leaks == []
+    assert snapshot["records"]
+    assert all(record["n"] == 0 and record["action_counts"] == {} for record in snapshot["records"])
+    assert verify_saved_explanation_bundle(manifest_path).checker_total == 1
 
 
 @pytest.mark.parametrize("leaky_fixture", [False, True])
@@ -761,14 +871,14 @@ def test_session_version_commands_exit_without_starting_or_writing(tmp_path, mon
     with pytest.raises(SystemExit) as console_stopped:
         run_session_cli.main(["--version"])
     assert console_stopped.value.code == 0
-    assert capsys.readouterr().out == "poker-xai-run-session 0.1.0a11\n"
+    assert capsys.readouterr().out == "poker-xai-run-session 0.1.0a12\n"
     assert tuple(tmp_path.iterdir()) == ()
 
     compatibility_cli = _load_cli_module()
     with pytest.raises(SystemExit) as wrapper_stopped:
         compatibility_cli.main(["--version"])
     assert wrapper_stopped.value.code == 0
-    assert capsys.readouterr().out == "cli/run_session.py 0.1.0a11\n"
+    assert capsys.readouterr().out == "cli/run_session.py 0.1.0a12\n"
     assert tuple(tmp_path.iterdir()) == ()
 
 

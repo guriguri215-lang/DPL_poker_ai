@@ -1,7 +1,8 @@
 """Stub opponent with a hidden strategy Hero must never read (AI Spec 6.3).
 
-Task 3 uses a single fixed-strategy stub opponent: on the river it jams all-in
-with its whole range (``jam_all``). Its *action policy* is a **hidden strategy** --
+The historical stub jams all-in with its whole river range. The opt-in R007
+fixture uses a separate check-back stub after Hero checks. Each *action policy*
+is a **hidden strategy** --
 Hero is forbidden from conditioning on it (that would be leak detection /
 exploitation, out of scope, and in general breaks the honesty of the setup, AI
 Spec 6.3). The opponent's *hand range*, by contrast, is public scenario
@@ -20,6 +21,10 @@ from dataclasses import dataclass, field
 
 from poker_core.range_model import Range
 
+JAM_ALL_OPPONENT_ID = "stub_jam_all"
+CHECK_BACK_OPPONENT_ID = "stub_check_back_all"
+STUB_OPPONENT_VERSION = "0.1.0"
+
 
 class HiddenStrategyAccessError(RuntimeError):
     """Raised when Hero-side code tries to read the opponent's hidden strategy."""
@@ -29,9 +34,9 @@ class HiddenStrategyAccessError(RuntimeError):
 class OpponentAction:
     """The opponent's realised river action (produced for the environment only)."""
 
-    #: One of the abstract river actions; the stub always shoves ``BET_ALL_IN``.
+    #: One of the abstract river actions produced by the selected stub fixture.
     action: str
-    #: All-in bet size in big blinds (the amount Hero must call).
+    #: Public amount in big blinds; zero for ``CHECK`` and stack-sized for the jam.
     bet_size: float
 
 
@@ -77,15 +82,18 @@ def reveal_stub_opponent_answer_key(*, opponent_model_id: str) -> OpponentAnswer
     Hero decision code is never given this value or this function.
     """
 
+    action_probabilities = (
+        (("CHECK", 1.0),) if opponent_model_id == CHECK_BACK_OPPONENT_ID else (("BET_ALL_IN", 1.0),)
+    )
     return OpponentAnswerKey(
         opponent_model_id=opponent_model_id,
-        action_probabilities=(("BET_ALL_IN", 1.0),),
+        action_probabilities=action_probabilities,
     )
 
 
 @dataclass
 class StubOpponent:
-    """A fixed ``jam_all`` river opponent (AI Spec 6.3; ADR-0007 one stub type).
+    """A fixed synthetic river opponent (AI Spec 6.3; ADR-0007 stub boundary).
 
     ``assumed_range`` is the public river range Hero is told to assume. ``_policy``
     is the hidden action strategy; reading it via :attr:`hidden_strategy` raises.
@@ -116,3 +124,11 @@ class StubOpponent:
         if not effective_stack > 0:
             raise ValueError(f"effective_stack must be positive, got {effective_stack}")
         return OpponentAction(action="BET_ALL_IN", bet_size=effective_stack)
+
+    def respond_to_check(self, *, effective_stack: float) -> OpponentAction:
+        """Environment-only response at IP ``vs_check`` for the R007 fixture."""
+        if self._policy != "check_back_all":
+            raise ValueError(f"unknown check-back stub opponent policy {self._policy!r}")
+        if not effective_stack > 0:
+            raise ValueError(f"effective_stack must be positive, got {effective_stack}")
+        return OpponentAction(action="CHECK", bet_size=0.0)

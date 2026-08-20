@@ -108,6 +108,34 @@ alpha to `0.0`, and epsilon to `0.0`. Otherwise every current value is retained.
 In particular, false negatives and under-adjustment do not lower a threshold or
 raise alpha/epsilon in this slice.
 
+## Run the solver-backed R007 no-facing fixture
+
+Use the existing session entry point and explicitly select R007:
+
+```text
+poker-xai-run-session --seed 20260704 --hands 5 --solver-iterations 5 --leaky-fixture --leaky-fixture-reason LEAK_R007 --exploration-epsilon 1.0 --explanations --out-dir experiments_output/r007
+```
+
+This fixture forces the simulated Hero to the existing river tree's OOP `start`
+node. The only legal actions are `CHECK` and the tree's fixed 0.33-pot bet,
+recorded with the existing public label `BET_33`. `BET_75`, raises, and other
+no-facing sizes remain unsupported. Bare `--leaky-fixture`, without the selector,
+keeps the historical R008 jam-all facing-an-all-in fixture.
+
+The check-back opponent can respond only after Hero actually selects `CHECK`.
+That public response is recorded after the current DPL decision and can inform
+only later hands. A terminal situation with no reached check opportunity is
+saved with zero observations rather than a fabricated action. The explicit
+epsilon value above uses the existing recorded execution sampler so this fixed
+five-hand smoke reaches the observation needed for an R007 HARD node-lock solve;
+the normal and R008 epsilon default remains `0.0`.
+
+When the solver candidate strictly improves exact current-decision EV, the DPL
+records `exploit_source="nodelock_solver"` and a non-empty `solver_result_id`.
+The corresponding `ExplanationDocument` contains the same ID, and the saved
+bundle command verifies all five explanations. This is still a bounded,
+finite-iteration simulation, not a convergence or GTO certificate.
+
 ## Hand settings to the next session explicitly
 
 Name the completed source RunManifest; the command never searches for one:
@@ -128,13 +156,14 @@ failure creates no output for the attempted successor.
 
 The restored values are defaults. Explicit `--safety-alpha` and
 `--exploration-epsilon` flags take precedence, including an explicit `0.0`.
-When `--leaky-fixture` is also present, the existing fixture baseline remains
-the only baseline while the restored detector config is passed to both the
-detector and real solver-backed node-lock provider. Its node-lock confidence
-gate and retained rule-based fallback use the restored thresholds. The source's
-posterior/action history, baseline, and answer key are not transferred. There
-is no implicit latest-file search, session registry, or automatic loop; repeat
-the explicit handoff for each intended successor.
+When `--leaky-fixture` is also present, the baseline selected by
+`--leaky-fixture-reason` remains the only baseline while the restored detector
+config is passed to both the detector and real solver-backed node-lock provider.
+Its node-lock confidence gate and retained rule-based fallback use the restored
+thresholds. The source's posterior/action history, baseline, opponent identity,
+session mode, and answer key are not transferred. Re-select R007 on every intended
+R007 successor. There is no implicit latest-file search, session registry, or
+automatic loop; repeat the explicit handoff for each intended successor.
 
 Omitting `--explanations` retains the five-file bundle above and does not change
 the session inputs, action, solver behavior, or invocation provenance.
@@ -154,17 +183,18 @@ verification](explanation_bundle_verification.md).
 - Explicit `--safety-alpha` and `--exploration-epsilon` values override restored
   defaults.
 - `--leaky-fixture` is a public positive-path smoke fixture that connects the
-  detected leak to the solver-backed node-lock exploit provider. The existing
-  solver iteration and average-delay values configure both the base-policy and
-  node-lock solves. A mapping that does not apply to the fixed river tree, or a
-  baseline-scaled lock with no reachable target, uses the retained rule-based
-  fallback. Every candidate changes policy only when it strictly improves the
-  existing exact action EV; otherwise the base policy remains in use. This is
-  not a production opponent model.
+  detected leak to the solver-backed node-lock exploit provider. It defaults to
+  the historical R008 fixture; `--leaky-fixture-reason LEAK_R007` selects the
+  OOP no-facing fixture. The existing solver iteration and average-delay values
+  configure both the base-policy and node-lock solves. A mapping that does not
+  apply to the fixed river tree, or a baseline-scaled lock with no reachable
+  target, uses the retained rule-based fallback. Every candidate changes policy
+  only when it strictly improves the existing exact action EV; otherwise the base
+  policy remains in use. This is not a production opponent model.
 - `--explanations` is an artifact-output opt-in; it does not affect policy or
   action selection.
 
-The adapter remains limited to facing an all-in and therefore chooses only
-between `FOLD` and `CALL`. The 40-iteration default is not a convergence
-guarantee. See [Responsible use](responsible_use.md) before using or sharing
-results.
+The default adapter remains limited to facing an all-in and therefore chooses
+only between `FOLD` and `CALL`; the explicit R007 fixture is limited to OOP
+`CHECK` and `BET_33`. The 40-iteration default is not a convergence guarantee.
+See [Responsible use](responsible_use.md) before using or sharing results.
