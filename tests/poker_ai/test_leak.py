@@ -19,6 +19,7 @@ from poker_ai.leak import (
     beta_binomial_upper_tail,
     classify_ground_truth_boundary,
     leaky_fixture_action_baseline_table,
+    leaky_r007_fixture_action_baseline_table,
 )
 from poker_ai.observation import ObservationTracker
 from poker_ai.opponent import HiddenStrategyAccessError, StubOpponent
@@ -75,6 +76,23 @@ def test_positive_action_leak_matches_dpl_detected_leak_contract():
     assert leak.baseline_rate == pytest.approx(0.25)
     assert leak.effective_sample_size == 4
     assert leak.confidence == pytest.approx(0.8125)
+
+
+def test_r007_fixture_baseline_detects_public_check_backs_only():
+    detector = LeakDetector(
+        leaky_r007_fixture_action_baseline_table(),
+        LeakDetectorConfig(
+            min_effective_sample_size=1,
+            min_deviation=0.25,
+            min_confidence=0.5,
+        ),
+    )
+    tracker = _tracker_with_actions(["CHECK", "CHECK"])
+
+    leaks = detector.detect(tracker.snapshot())
+
+    assert [leak.reason_id for leak in leaks] == ["LEAK_R007"]
+    assert leaks[0].observed_rate == 1.0
 
 
 def test_negative_case_below_sample_floor():

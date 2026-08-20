@@ -117,6 +117,21 @@ negatives and under-adjustment do not automatically increase aggression.
 Generation is LLM-free, network-free, and adds no dependency or DPL/RunManifest
 schema change.
 
+The same entry point has one opt-in R007 fixture that reaches the existing river
+tree's OOP no-facing node and records real HARD node-lock solver provenance:
+
+```bash
+poker-xai-run-session --seed 20260704 --hands 5 --solver-iterations 5 --leaky-fixture --leaky-fixture-reason LEAK_R007 --exploration-epsilon 1.0 --explanations --out-dir experiments_output/r007
+```
+
+This bounded path offers only `CHECK` and the existing `BET_33` label. An
+opponent `CHECK` is observed only after Hero actually checks, so it can affect a
+later hand but never the decision that caused it. The explicit epsilon setting
+makes the fixed five-hand smoke exercise those causal opportunities; the normal
+epsilon default remains `0.0`. Bare `--leaky-fixture` keeps the published R008
+facing-all-in behavior. No `BET_75`, raise, solver public API, schema, dependency,
+workflow topology, entry point, or automatic session loop is added.
+
 Pass that completed session's RunManifest explicitly to make the verified
 settings the defaults for one later normal Hero session:
 
@@ -167,9 +182,10 @@ directory and unrelated installations are never used as substitutes.
 
 The manifest records `poker-xai-run-session` or `cli/run_session.py` as the
 actual entrypoint and preserves the complete argument vector after the
-entrypoint, before argument parsing. The normal river adapter is limited to
-facing an all-in. CFR+ defaults to 40 iterations, which is not a convergence
-guarantee.
+entrypoint, before argument parsing. The default river path remains limited to
+facing an all-in; only the explicit R007 fixture adds the bounded OOP
+`CHECK`/`BET_33` branch above. CFR+ defaults to 40 iterations, which is not a
+convergence guarantee.
 
 ## Gate B v2 one-shot CLI
 
@@ -240,15 +256,15 @@ production data.
 Early alpha, simulation-only development. The frozen core contracts now use DPL
 v3 with read-only DPL v1/v2 loading compatibility, alongside the Reason Ontology
 and RunManifest. Normal Hero sessions use CFR+ to produce finite-iteration combo-
-and position-specific `vs_bet` policies for facing-all-in river decisions; the
-default is 40 iterations, average delay 0, and no checkpoints, with the observed
-all-in bet matched to the solver bet size. These policies have no convergence,
-exact-equilibrium, or GTO certificate. Leak detection, the SafetyMixer convex
-mixing contract, synthetic HARD node-lock opponent synthesis, deterministic
-template explanations, source-DPL checks, Phase 6 evaluation, and Gate B v2
-contracts are implemented. Convex mixing is not a strategy-safety proof. The
-river adapter remains limited to facing an all-in and has a higher computation
-cost than the retained stub. Forty iterations is not a convergence guarantee.
+and position-specific policies. The default facing-all-in path remains `vs_bet`;
+the R007 fixture explicitly selects the OOP no-facing `CHECK`/`BET_33` slice. The
+default is 40 iterations, average delay 0, and no checkpoints. These policies
+have no convergence, exact-equilibrium, or GTO certificate. Leak detection, the
+SafetyMixer convex mixing contract, synthetic HARD node-lock opponent synthesis,
+deterministic template explanations, source-DPL checks, Phase 6 evaluation, and
+Gate B v2 contracts are implemented. Convex mixing is not a strategy-safety
+proof. Other no-facing sizes, non-all-in facing bets, and raises remain outside
+the adapter. Forty iterations is not a convergence guarantee.
 
 ## Responsible use
 

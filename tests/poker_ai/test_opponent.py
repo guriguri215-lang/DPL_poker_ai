@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from poker_ai.opponent import HiddenStrategyAccessError, StubOpponent
+from poker_ai.opponent import (
+    CHECK_BACK_OPPONENT_ID,
+    HiddenStrategyAccessError,
+    StubOpponent,
+    reveal_stub_opponent_answer_key,
+)
 from poker_core.range_model import Range
 
 
@@ -38,3 +43,19 @@ def test_act_jams_all_in():
 def test_act_rejects_nonpositive_stack():
     with pytest.raises(ValueError, match="effective_stack"):
         _opponent().act(effective_stack=0.0)
+
+
+def test_r007_stub_checks_back_only_after_environment_check():
+    opponent = StubOpponent(
+        opponent_id=CHECK_BACK_OPPONENT_ID,
+        opponent_version="0.1.0",
+        assumed_range=Range({"AhAd": 1.0, "KhKd": 1.0}),
+        _policy="check_back_all",
+    )
+
+    action = opponent.respond_to_check(effective_stack=12.5)
+    answer_key = reveal_stub_opponent_answer_key(opponent_model_id=CHECK_BACK_OPPONENT_ID)
+
+    assert action.action == "CHECK"
+    assert action.bet_size == 0.0
+    assert answer_key.action_probabilities == (("CHECK", 1.0),)

@@ -48,17 +48,25 @@ explanation bundle and its single versioned post-session evaluation. It restores
 only `LeakDetectorConfig`, safety alpha, and epsilon as defaults; operator flags
 override alpha or epsilon. Any load or semantic-validation failure stops before
 this sequence begins and before a new run output directory is created. Without
-the option, the sequence uses its historical defaults unchanged.
+the option, the sequence uses its historical defaults unchanged. Bare
+`--leaky-fixture` also keeps the historical R008 facing-all-in fixture. The
+explicit `--leaky-fixture-reason LEAK_R007` selector chooses a bounded alternate
+branch within the same session entry point.
 
 1. A seed deterministically produces simulated river scenarios.
-2. The environment lets the stub opponent act, then gives Hero only the public
-   observation and assumed public range. Hero is not given the opponent's hidden
+2. On the default/R008 path, the environment lets the jam-all stub act, then
+   gives Hero only the public observation and assumed range. On the R007 path,
+   Hero is OOP with no bet facing. Hero is never given either opponent's hidden
    strategy.
-3. The CFR+ river adapter produces Hero's finite-iteration combo- and
-   position-specific `vs_bet` base policy for the observed all-in size.
-4. Public opponent actions update the action-only observation tracker. The leak
-   detector may produce recorded leak hypotheses, and an optional exploit
-   provider may propose a policy.
+3. The CFR+ river adapter produces Hero's finite-iteration combo-specific
+   `vs_bet` policy for the default path or the existing tree's OOP `start`
+   `CHECK`/`BET_33` policy for R007.
+4. Public opponent actions update the action-only observation tracker. For R007,
+   the environment records a check-back only after Hero actually checks and
+   after that hand's DPL decision, so the response can affect only later hands.
+   A known but unreached situation is retained with zero observations. The leak
+   detector may produce hypotheses, and an optional exploit provider may propose
+   a policy through the same HARD node-lock and fallback boundary.
 5. SafetyMixer forms `final_policy` as
    `(1-alpha)*base + alpha*exploit`; this convex mixing contract is not a
    strategy-safety proof. The optional epsilon sampler affects only execution
@@ -93,14 +101,17 @@ contracts. The [session tutorial](hero_session.md) shows the supported command.
 
 ## Current boundary
 
-The normal river adapter supports only a Hero decision while facing an all-in,
-so the legal actions are `FOLD` and `CALL`. It does not expand the other action
-branches. The default CFR+ budget is 40 iterations with average delay 0 and no
-checkpoints. Forty iterations is an alpha default, not a convergence guarantee;
-the resulting policy has no exact-equilibrium or GTO certificate.
+The default river adapter supports only a Hero decision while facing an all-in,
+so its legal actions are `FOLD` and `CALL`. The explicit R007 fixture adds only
+the existing OOP no-facing `CHECK` and fixed 0.33-pot `BET_33` branches. It does
+not add `BET_75`, a raise, another size, or a general no-facing session loop. The
+default CFR+ budget is 40 iterations with average delay 0 and no checkpoints.
+Forty iterations is an alpha default, not a convergence guarantee; the resulting
+policy has no exact-equilibrium or GTO certificate.
 
 One explicit, verified handoff from a named previous RunManifest into one later
 normal Hero session is implemented. The handoff carries settings only: it does
-not carry the prior baseline, posterior/action history, or answer key. Implicit
-manifest discovery, latest-file search, a session registry, and an automatic
-multi-session loop remain outside this slice.
+not carry the prior baseline, opponent/session mode, posterior/action history,
+or answer key. The caller must explicitly select R007 again for an R007
+successor. Implicit manifest discovery, latest-file search, a session registry,
+and an automatic multi-session loop remain outside this slice.

@@ -5,9 +5,9 @@ runs a single decision on (ADR-0007): the board, Hero's position, the dead-money
 the effective stack, the concrete combo Hero was dealt, Hero's assumed range (used
 for the ``hand_bucket`` percentile, ADR-0005) and the opponent's assumed range
 (public information Hero may use for showdown EV -- distinct from the opponent's
-*hidden* action strategy, AI Spec 6.3). The opponent's bet is **not** part of the
-scenario: it is produced by the stub opponent's action in the environment, so Hero
-only ever observes the resulting facing bet.
+*hidden* action strategy, AI Spec 6.3). Opponent action is **not** part of the
+scenario: the environment produces the public action at the session mode's
+causal point, so Hero never receives the hidden policy.
 
 This schema is **frozen at ``0.1.0``** (Q3, ADR-0014, human-approved 2026-07-04) and
 is versioned so it can be pinned in a RunManifest. It is not one of the Phase-0

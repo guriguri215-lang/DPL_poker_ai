@@ -569,6 +569,7 @@ except SystemExit as stopped:
 else:
     raise AssertionError('session --help did not stop through argparse')
 assert '--solver-iterations' in help_output.getvalue()
+assert '--leaky-fixture-reason' in help_output.getvalue()
 assert '--out-dir' in help_output.getvalue()
 assert '--version' in help_output.getvalue()
 assert not output_root.exists()
@@ -746,6 +747,72 @@ assert positive_bundle_output.getvalue().splitlines() == [
     'artifact_integrity=passed references=5',
     'explanation_checker=passed total=2 summary=consistent',
 ]
+
+r007_output_root = output_root / 'r007-solver-backed'
+r007_argv = [
+    '--seed',
+    '20260704',
+    '--hands',
+    '5',
+    '--solver-iterations',
+    '5',
+    '--leaky-fixture',
+    '--leaky-fixture-reason',
+    'LEAK_R007',
+    '--exploration-epsilon',
+    '1.0',
+    '--explanations',
+    '--out-dir',
+    str(r007_output_root),
+]
+with contextlib.redirect_stdout(io.StringIO()):
+    assert loaded['poker-xai-run-session'](r007_argv) == 0
+
+r007_manifest_paths = list(r007_output_root.glob('*.manifest.json'))
+r007_dpl_paths = list(r007_output_root.glob('*.dpl.jsonl'))
+r007_explanation_paths = list(r007_output_root.glob('*.explanations.jsonl'))
+assert len(r007_manifest_paths) == len(r007_dpl_paths) == len(r007_explanation_paths) == 1
+r007_manifest = RunManifest.model_validate_json(
+    r007_manifest_paths[0].read_text(encoding='utf-8')
+)
+assert r007_manifest.opponents[0].opponent_id == 'stub_check_back_all'
+assert r007_manifest.code.entrypoint == 'poker-xai-run-session'
+assert r007_manifest.code.argv == r007_argv
+r007_dpls = [
+    DecisionProvenanceLog.model_validate_json(line)
+    for line in r007_dpl_paths[0].read_text(encoding='utf-8').splitlines()
+]
+r007_explanations = [
+    ExplanationDocument.model_validate_json(line)
+    for line in r007_explanation_paths[0].read_text(encoding='utf-8').splitlines()
+]
+r007_pairs = list(zip(r007_dpls, r007_explanations, strict=True))
+assert len(r007_pairs) == 5
+assert r007_pairs[0][0].detected_leaks == []
+r007_solver_pairs = [
+    (dpl, explanation)
+    for dpl, explanation in r007_pairs
+    if dpl.exploit_source == 'nodelock_solver'
+]
+assert r007_solver_pairs
+for dpl, explanation in r007_solver_pairs:
+    assert [leak.reason_id for leak in dpl.detected_leaks] == ['LEAK_R007']
+    assert dpl.ev_estimate.exploit_ev > dpl.ev_estimate.base_ev
+    assert dpl.solver_result_id
+    assert dpl.solver_result_id in explanation.rendered_text
+for dpl, explanation in r007_pairs:
+    result = verify_explanation(explanation, dpl)
+    assert result.passed, result.issues
+
+r007_bundle_output = io.StringIO()
+with contextlib.redirect_stdout(r007_bundle_output):
+    assert loaded['poker-xai-verify-explanation-bundle'](
+        ['--manifest', str(r007_manifest_paths[0])]
+    ) == 0
+assert r007_bundle_output.getvalue().splitlines() == [
+    'artifact_integrity=passed references=5',
+    'explanation_checker=passed total=5 summary=consistent',
+]
 """
     script = script.replace("EXPECTED_VERSION", repr(version)).replace(
         "EXPECTED_ENTRY_POINTS", repr(EXPECTED_ENTRY_POINTS)
@@ -819,6 +886,7 @@ def verify(
             "manifest-round-trip",
             "saved-explanation-bundle-verification",
             "solver-backed-explanation-provenance",
+            "r007-solver-backed-no-facing-explanation-provenance",
             "entry-point-metadata",
             "documentation-relative-links",
         ],

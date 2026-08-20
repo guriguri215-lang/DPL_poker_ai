@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -48,12 +49,21 @@ class BasePolicySelection:
 
     strategy_table: StrategyTable
     config_sha256: str
+    decision_action_ev: dict[str, float] | None = None
 
     def __post_init__(self) -> None:
         if len(self.config_sha256) != 64 or any(
             char not in "0123456789abcdef" for char in self.config_sha256
         ):
             raise ValueError("config_sha256 must be a lowercase SHA-256 digest")
+        if self.decision_action_ev is not None:
+            if not self.decision_action_ev:
+                raise ValueError("decision_action_ev must not be empty")
+            if any(
+                not action or not math.isfinite(value)
+                for action, value in self.decision_action_ev.items()
+            ):
+                raise ValueError("decision_action_ev requires non-empty actions and finite EVs")
 
 
 class BasePolicyProvider(Protocol):

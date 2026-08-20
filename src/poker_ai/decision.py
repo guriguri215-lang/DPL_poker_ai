@@ -6,7 +6,7 @@ It never receives the opponent object, so it structurally cannot read the oppone
 hidden action strategy (AI Spec 6.3); the tripwire in :mod:`poker_ai.opponent`
 guards against a code path that tried.
 
-The EV is exact (``solver_exact``, ADR-0008). Task 3 restricts the model to a
+The EV is exact (``solver_exact``, ADR-0008). The historical path is a
 facing-all-in decision whose terminals are showdown-determined:
 
 * ``FOLD`` -> Hero invests nothing more; incremental EV from the node is ``0``.
@@ -18,6 +18,11 @@ incremental EV of calling is ``win*(P+B) + tie*(P/2) - lose*B`` (chips gained
 relative to the decision node; ``ev_definition = "incremental_ev_from_current_node"``,
 Solver spec 8.3). The policy EV is the probability-weighted mean of the per-action
 EVs, which is exact because each terminal EV is exact.
+
+The opt-in R007 path instead exposes the existing river tree's OOP
+``CHECK``/``BET_33`` node. Its base and HARD-locked profiles supply exact
+fixed-tree current-action EVs under the same incremental convention. No other
+no-facing size or raise is admitted.
 
 The configured policy mixture is not a strategy-safety proof.
 """
@@ -157,14 +162,24 @@ class HeroAgent:
         detected_leaks: tuple[DetectedLeak, ...] | list[DetectedLeak] = (),
     ) -> DecisionResult:
         """Produce the base/exploit/final policies, selected action and exact EVs."""
-        # Legal set for facing an all-in bet: {FOLD, CALL} (validates the branch).
-        legal = legal_actions(facing_bet=obs.facing_bet > 0.0, bet_is_all_in=True)
+        if obs.facing_bet < 0.0:
+            raise ValueError("facing_bet must be non-negative")
+        no_facing = math.isclose(obs.facing_bet, 0.0, rel_tol=0.0, abs_tol=1e-12)
+        legal = legal_actions(
+            facing_bet=not no_facing,
+            bet_is_all_in=not no_facing,
+            no_facing_bet_action="BET_33" if no_facing else None,
+        )
 
         state_cluster = classify_board(obs.board)
         hand_bucket = classify_combo(
             obs.hero_combo, obs.hero_range, obs.board, bucket_def=self.bucket_def
         )
-        situation_key = build_situation_key(state_cluster, obs.position, FACING_ALL_IN)
+        situation_key = (
+            f"{state_cluster}:{obs.position}:river_start"
+            if no_facing
+            else build_situation_key(state_cluster, obs.position, FACING_ALL_IN)
+        )
 
         selection = self.base_policy_provider.policy_for(obs, state_cluster=state_cluster)
         table = selection.strategy_table
@@ -193,12 +208,19 @@ class HeroAgent:
         if set(base_policy) - set(legal):
             raise ValueError(f"base policy cites actions outside the legal set {legal}")
 
-        equity = showdown_equity(
-            Range({obs.hero_combo.canonical(): 1.0}),
-            obs.opponent_assumed_range,
-            obs.board,
-        )
-        action_ev = call_fold_action_evs(equity, obs.pot, obs.facing_bet)
+        if selection.decision_action_ev is not None:
+            action_ev = dict(selection.decision_action_ev)
+        elif no_facing:
+            raise ValueError("no-facing base policy must provide exact decision action EVs")
+        else:
+            equity = showdown_equity(
+                Range({obs.hero_combo.canonical(): 1.0}),
+                obs.opponent_assumed_range,
+                obs.board,
+            )
+            action_ev = call_fold_action_evs(equity, obs.pot, obs.facing_bet)
+        if set(action_ev) != set(legal):
+            raise ValueError("decision action EVs must match the legal action set")
 
         exploit = self.exploit_provider.build(
             base_policy=base_policy,
@@ -207,6 +229,9 @@ class HeroAgent:
             action_ev=action_ev,
             observation=obs,
         )
+        evaluation_action_ev = exploit.decision_action_ev or action_ev
+        if set(evaluation_action_ev) != set(legal):
+            raise ValueError("exploit action EVs must match the legal action set")
         exploit_policy = exploit.policy
         final_policy = safety_mix(base_policy, exploit_policy, self.safety_alpha)
         policy_mix_reasons = (
@@ -249,9 +274,9 @@ class HeroAgent:
             selected_action=sample.selected_action,
             sampling_seed=sampling_seed,
             execution_sampling=execution_sampling,
-            base_ev=policy_ev(base_policy, action_ev),
-            exploit_ev=policy_ev(exploit_policy, action_ev),
-            final_ev=policy_ev(final_policy, action_ev),
+            base_ev=policy_ev(base_policy, evaluation_action_ev),
+            exploit_ev=policy_ev(exploit_policy, evaluation_action_ev),
+            final_ev=policy_ev(final_policy, evaluation_action_ev),
             ev_unit=DEFAULT_EV_UNIT,
             ev_definition=EV_DEFINITION,
             applied_leak_reason_ids=(

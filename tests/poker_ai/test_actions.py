@@ -9,6 +9,7 @@ from poker_ai.actions import (
     FACING_ACTIONS,
     FACING_ALL_IN_ACTIONS,
     NO_FACING_ACTIONS,
+    R007_NO_FACING_ACTIONS,
     legal_actions,
 )
 
@@ -26,6 +27,18 @@ def test_facing_all_in_is_fold_call():
 def test_no_facing_is_not_scored_yet():
     with pytest.raises(NotImplementedError, match="no-facing"):
         legal_actions(facing_bet=False, bet_is_all_in=False)
+
+
+def test_r007_bounded_no_facing_slice_is_check_bet_33_only():
+    assert (
+        legal_actions(
+            facing_bet=False,
+            bet_is_all_in=False,
+            no_facing_bet_action="BET_33",
+        )
+        == R007_NO_FACING_ACTIONS
+    )
+    assert R007_NO_FACING_ACTIONS == ("CHECK", "BET_33")
 
 
 def test_facing_non_all_in_is_not_scored_yet():

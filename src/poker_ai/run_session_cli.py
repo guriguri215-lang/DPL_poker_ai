@@ -1,8 +1,9 @@
 """Distributed CLI for a normal simulated Hero session.
 
 The command writes validated DPL v3 JSONL plus a RunManifest sidecar and can
-opt in to verified template-explanation artifacts.  The river adapter remains
-limited to facing an all-in.  Solver iterations and average delay are explicit
+opt in to verified template-explanation artifacts. The default river path is
+limited to facing an all-in; the explicit R007 fixture selects the bounded OOP
+``CHECK``/``BET_33`` slice. Solver iterations and average delay are explicit
 inputs; the 40-iteration default is not a convergence guarantee.
 """
 
@@ -25,10 +26,16 @@ from poker_ai.leak import (
     LeakDetector,
     LeakDetectorConfig,
     leaky_fixture_action_baseline_table,
+    leaky_r007_fixture_action_baseline_table,
 )
 from poker_ai.opponent import reveal_stub_opponent_answer_key
 from poker_ai.runtime_provenance import collect_runtime_provenance, resolve_package_version
-from poker_ai.session import run_session, write_session_bundle
+from poker_ai.session import (
+    FACING_ALL_IN_SESSION_MODE,
+    R007_NO_FACING_SESSION_MODE,
+    run_session,
+    write_session_bundle,
+)
 
 CONSOLE_ENTRYPOINT = "poker-xai-run-session"
 LEGACY_ENTRYPOINT = "cli/run_session.py"
@@ -96,6 +103,16 @@ def _parser(*, entrypoint: str) -> argparse.ArgumentParser:
         help="use a public fixture baseline that produces leak/exploit smoke output",
     )
     parser.add_argument(
+        "--leaky-fixture-reason",
+        choices=("LEAK_R007", "LEAK_R008"),
+        default="LEAK_R008",
+        help=(
+            "fixture reason to simulate with --leaky-fixture; LEAK_R008 preserves "
+            "the historical jam-all path (default), while LEAK_R007 opts in to "
+            "the OOP CHECK/BET_33 check-back slice"
+        ),
+    )
+    parser.add_argument(
         "--explanations",
         action="store_true",
         help=(
@@ -115,7 +132,10 @@ def _parser(*, entrypoint: str) -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None, *, entrypoint: str = CONSOLE_ENTRYPOINT) -> int:
     """Run a normal Hero session and record the exact invocation provenance."""
     raw_argv = list(sys.argv[1:] if argv is None else argv)
-    args = _parser(entrypoint=entrypoint).parse_args(raw_argv)
+    parser = _parser(entrypoint=entrypoint)
+    args = parser.parse_args(raw_argv)
+    if args.leaky_fixture_reason != "LEAK_R008" and not args.leaky_fixture:
+        parser.error("--leaky-fixture-reason LEAK_R007 requires --leaky-fixture")
 
     previous_settings = None
     if args.previous_session_manifest is not None:
@@ -151,10 +171,12 @@ def main(argv: list[str] | None = None, *, entrypoint: str = CONSOLE_ENTRYPOINT)
                 min_confidence=0.5,
             )
         )
-        leak_detector = LeakDetector(
-            leaky_fixture_action_baseline_table(),
-            detector_config,
+        fixture_baseline = (
+            leaky_r007_fixture_action_baseline_table()
+            if args.leaky_fixture_reason == "LEAK_R007"
+            else leaky_fixture_action_baseline_table()
         )
+        leak_detector = LeakDetector(fixture_baseline, detector_config)
         exploit_provider = NodelockExploitProvider(
             NodelockExploitConfig(
                 min_confidence=leak_detector.config.nodelock_exploit_min_confidence,
@@ -168,6 +190,11 @@ def main(argv: list[str] | None = None, *, entrypoint: str = CONSOLE_ENTRYPOINT)
         leak_detector = LeakDetector(config=previous_settings.leak_detector_config)
 
     provenance = collect_runtime_provenance()
+    session_mode = (
+        R007_NO_FACING_SESSION_MODE
+        if args.leaky_fixture and args.leaky_fixture_reason == "LEAK_R007"
+        else FACING_ALL_IN_SESSION_MODE
+    )
     result = run_session(
         args.seed,
         args.hands,
@@ -180,6 +207,7 @@ def main(argv: list[str] | None = None, *, entrypoint: str = CONSOLE_ENTRYPOINT)
         safety_alpha=safety_alpha,
         exploration_epsilon=exploration_epsilon,
         exploit_provider=exploit_provider,
+        session_mode=session_mode,
         solver_config=CfrRiverPolicyConfig(
             iterations=args.solver_iterations,
             average_delay=args.solver_average_delay,

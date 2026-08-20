@@ -1,14 +1,13 @@
 """poker_ai: observation, finite-iteration policy, exploitation and sessions.
 
-The river MVP generates scenarios deterministically, observes the stub opponent's
-all-in, obtains Hero's finite-iteration combo- and position-specific ``vs_bet``
-policy from CFR+, and keeps optional rule or node-lock exploitation behind the
-SafetyMixer. The mixer applies the configured convex combination; it is not a
-strategy-safety proof. Public action observations feed the LeakDetector without
-exposing hidden opponent strategy. The decision is recorded in a versioned
-Decision Provenance Log with exact frozen-model terminal/action ``solver_exact``
-EV (ADR-0008). The CFR+ policy has no convergence, exact-equilibrium, or GTO
-certificate.
+The river MVP generates scenarios deterministically. Its historical path observes
+the stub opponent's all-in and obtains Hero's finite-iteration ``vs_bet`` policy;
+the opt-in R007 fixture uses the same CFR+ river tree for an OOP ``start``
+``CHECK``/``BET_33`` decision. Optional rule or HARD node-lock exploitation stays
+behind the SafetyMixer. Public action observations feed the LeakDetector without
+exposing hidden opponent strategy. The versioned Decision Provenance Log records
+exact frozen-model terminal/action ``solver_exact`` EV (ADR-0008). Neither CFR+
+path has a convergence, exact-equilibrium, or GTO certificate.
 """
 
 from __future__ import annotations
