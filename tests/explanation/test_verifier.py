@@ -174,6 +174,17 @@ def test_verifier_accepts_template_explanation_with_solver_diagnostics(valid_dpl
     assert result.passed
 
 
+def test_verifier_ignores_ev_like_suffix_inside_solver_id(valid_dpl):
+    valid_dpl["exploit_source"] = "nodelock_solver"
+    valid_dpl["solver_result_id"] = "nodelock_solver:v1:digest=a123bb"
+    dpl = DecisionProvenanceLog.model_validate(valid_dpl)
+    explanation = generate_template_explanation(dpl)
+
+    result = verify_explanation(explanation, dpl)
+
+    assert result.passed, result.issues
+
+
 def test_verifier_accepts_template_explanation_with_rounded_surface_numbers(valid_dpl):
     valid_dpl["detected_leaks"][0]["observed_rate"] = 0.64123
     valid_dpl["detected_leaks"][0]["baseline_rate"] = 0.48765
