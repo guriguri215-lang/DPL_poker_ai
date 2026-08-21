@@ -33,7 +33,8 @@ _DETECTED_CLAIM_RE = re.compile(
 _DETECTED_CONFIDENCE_PATH_RE = re.compile(r"dpl\.detected_leaks\[(?P<index>\d+)\]\.confidence")
 _SURFACE_REASON_RE = re.compile(r"\b(?:LEAK|TRG|MIX)_[A-Z0-9_]+\b")
 _SURFACE_NUMERIC_RE = re.compile(
-    r"(?P<value>[+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*(?P<unit>%|bb)(?![A-Za-z0-9_])"
+    r"(?<![A-Za-z0-9_])(?P<value>[+-]?(?:\d+(?:\.\d*)?|\.\d+))"
+    r"\s*(?P<unit>%|bb)(?![A-Za-z0-9_])"
 )
 
 PathToken = tuple[str, str | int]
