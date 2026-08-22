@@ -7,7 +7,7 @@ import json
 import re
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Literal
+from typing import Literal, NamedTuple
 
 from ._canonical import parse_canonical_decimal
 
@@ -24,6 +24,30 @@ SUPPORTED_LEAK_REASONS: tuple[str, ...] = (
 )
 _IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+
+class LeakActionMapping(NamedTuple):
+    """Canonical action/phase semantics shared by synthesis and consumers."""
+
+    phase: str
+    action: str
+
+
+LEAK_ACTION_MAPPINGS: dict[str, LeakActionMapping] = {
+    "LEAK_R001": LeakActionMapping(phase="vs_bet", action="FOLD"),
+    "LEAK_R002": LeakActionMapping(phase="vs_bet", action="CALL"),
+    "LEAK_R007": LeakActionMapping(phase="vs_check", action="CHECK"),
+    "LEAK_R008": LeakActionMapping(phase="vs_check", action="BET"),
+}
+
+
+def leak_action_mapping(reason_id: str) -> LeakActionMapping:
+    """Return the single canonical river action mapping for a supported leak."""
+
+    try:
+        return LEAK_ACTION_MAPPINGS[reason_id]
+    except KeyError as exc:
+        raise ValueError(f"unsupported synthetic leak reason {reason_id!r}") from exc
 
 
 @dataclass(frozen=True, slots=True)

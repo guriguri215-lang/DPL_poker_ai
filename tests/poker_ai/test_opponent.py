@@ -6,8 +6,11 @@ import pytest
 
 from poker_ai.opponent import (
     CHECK_BACK_OPPONENT_ID,
+    R001_FIXTURE_OPPONENT_ID,
     HiddenStrategyAccessError,
     StubOpponent,
+    load_r001_fixture_synthesis,
+    r001_fixture_measurement,
     reveal_stub_opponent_answer_key,
 )
 from poker_core.range_model import Range
@@ -59,3 +62,19 @@ def test_r007_stub_checks_back_only_after_environment_check():
     assert action.action == "CHECK"
     assert action.bet_size == 0.0
     assert answer_key.action_probabilities == (("CHECK", 1.0),)
+
+
+def test_r001_answer_key_reuses_synthesized_fold_rate_and_mapping():
+    fixture = load_r001_fixture_synthesis()
+    measurement = r001_fixture_measurement(fixture)
+    answer_key = reveal_stub_opponent_answer_key(opponent_model_id=R001_FIXTURE_OPPONENT_ID)
+
+    assert fixture.config.opponent_id == R001_FIXTURE_OPPONENT_ID
+    assert fixture.config.leak_vector == (("LEAK_R001", "0.16"),)
+    assert fixture.bet_fraction == pytest.approx(0.75)
+    assert measurement.reason_id == "LEAK_R001"
+    assert measurement.phase == "vs_bet"
+    assert measurement.action == "FOLD"
+    assert answer_key.action_group_rate(("FOLD",)) == pytest.approx(
+        float(measurement.opponent_rate)
+    )

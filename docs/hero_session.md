@@ -108,7 +108,9 @@ alpha to `0.0`, and epsilon to `0.0`. Otherwise every current value is retained.
 In particular, false negatives and under-adjustment do not lower a threshold or
 raise alpha/epsilon in this slice.
 
-## Run the solver-backed R007 no-facing fixture
+## Run the solver-backed no-facing fixtures
+
+### R007 check-back fixture
 
 Use the existing session entry point and explicitly select R007:
 
@@ -118,9 +120,9 @@ poker-xai-run-session --seed 20260704 --hands 5 --solver-iterations 5 --leaky-fi
 
 This fixture forces the simulated Hero to the existing river tree's OOP `start`
 node. The only legal actions are `CHECK` and the tree's fixed 0.33-pot bet,
-recorded with the existing public label `BET_33`. `BET_75`, raises, and other
-no-facing sizes remain unsupported. Bare `--leaky-fixture`, without the selector,
-keeps the historical R008 jam-all facing-an-all-in fixture.
+recorded with the existing public label `BET_33`. Raises and other sizes are not
+available on this path. Bare `--leaky-fixture`, without the selector, keeps the
+historical R008 jam-all facing-an-all-in fixture.
 
 The check-back opponent can respond only after Hero actually selects `CHECK`.
 That public response is recorded after the current DPL decision and can inform
@@ -135,6 +137,45 @@ records `exploit_source="nodelock_solver"` and a non-empty `solver_result_id`.
 The corresponding `ExplanationDocument` contains the same ID, and the saved
 bundle command verifies all five explanations. This is still a bounded,
 finite-iteration simulation, not a convergence or GTO certificate.
+
+### R001 overfold fixture
+
+Select R001 explicitly; the normal, bare-fixture, R007, and R008 defaults do not
+select this path:
+
+```text
+poker-xai-run-session --seed 20260000 --hands 20 --solver-iterations 5 --leaky-fixture --leaky-fixture-reason LEAK_R001 --exploration-epsilon 1.0 --explanations --out-dir experiments_output/r001
+```
+
+Hero starts OOP with only `CHECK` and `BET_75`. `BET_75` is the existing frozen
+`river-large-bet-equilibrium-v1` size, exactly 0.75 pot; there is no size argument
+or multi-size tree. The fixture reuses pinned versioned training opponent
+`nl-train-r001-d016-s102`. Its detector baseline is the frozen equilibrium's
+IP `FOLD` rate at `vs_bet`, and its environment response is synthesized from the
+same existing R001 mapping.
+
+The environment samples and records `FOLD` or `CALL` only after Hero actually
+selects `BET_75`. A Hero `CHECK` records no response and preserves a known
+zero-opportunity situation. Detection for the current decision occurs before
+the response, so that response can inform only later hands. After the configured
+confidence gate is reached, an improving candidate may record the existing
+opponent/IP/`vs_bet`/`FOLD` HARD `fix_to_baseline` node-lock provenance. Base,
+exploit, and final policies keep the `CHECK`/`BET_75` keys, while DPL EV remains
+the exact current-node `solver_exact` value.
+
+With `--explanations`, the output directory contains:
+
+- `S20260000.dpl.jsonl` and `S20260000.manifest.json`;
+- `S20260000.explanations.jsonl` and `S20260000.verifier_summary.json`;
+- `S20260000.post_session_evaluation.json`;
+- the existing action-baseline, confidence-estimator, and terminal-snapshot
+  files below `provenance/`.
+
+The saved explanation bundle can be checked later with the existing
+`poker-xai-verify-explanation-bundle` command. This fixture does not add a raise,
+arbitrary size, automatic session loop, or any live-play integration, and its
+outputs are not a convergence, GTO, strategy-safety, profitability, or real-play
+performance claim.
 
 ## Hand settings to the next session explicitly
 
@@ -157,13 +198,15 @@ failure creates no output for the attempted successor.
 The restored values are defaults. Explicit `--safety-alpha` and
 `--exploration-epsilon` flags take precedence, including an explicit `0.0`.
 When `--leaky-fixture` is also present, the baseline selected by
-`--leaky-fixture-reason` remains the only baseline while the restored detector
-config is passed to both the detector and real solver-backed node-lock provider.
-Its node-lock confidence gate and retained rule-based fallback use the restored
+`--leaky-fixture-reason` remains the only baseline. The restored detector config
+is passed to both the detector and real solver-backed node-lock provider, except
+that the explicit R001 fixture always uses its fixed `min_deviation=0.08`.
+Its confidence gates and retained rule-based fallback otherwise use the restored
 thresholds. The source's posterior/action history, baseline, opponent identity,
-session mode, and answer key are not transferred. Re-select R007 on every intended
-R007 successor. There is no implicit latest-file search, session registry, or
-automatic loop; repeat the explicit handoff for each intended successor.
+session mode, and answer key are not transferred. Re-select R007 or R001 on every
+intended matching successor. There is no implicit latest-file search, session
+registry, or automatic loop; repeat the explicit handoff for each intended
+successor.
 
 Omitting `--explanations` retains the five-file bundle above and does not change
 the session inputs, action, solver behavior, or invocation provenance.
@@ -185,8 +228,10 @@ verification](explanation_bundle_verification.md).
 - `--leaky-fixture` is a public positive-path smoke fixture that connects the
   detected leak to the solver-backed node-lock exploit provider. It defaults to
   the historical R008 fixture; `--leaky-fixture-reason LEAK_R007` selects the
-  OOP no-facing fixture. The existing solver iteration and average-delay values
-  configure both the base-policy and node-lock solves. A mapping that does not
+  OOP `CHECK`/`BET_33` fixture and `LEAK_R001` selects the OOP
+  `CHECK`/`BET_75` fixture, with fixed detector deviation threshold `0.08`. The
+  existing solver iteration and average-delay values configure both the
+  base-policy and node-lock solves. A mapping that does not
   apply to the fixed river tree, or a baseline-scaled lock with no reachable
   target, uses the retained rule-based fallback. Every candidate changes policy
   only when it strictly improves the existing exact action EV; otherwise the base
@@ -195,6 +240,7 @@ verification](explanation_bundle_verification.md).
   action selection.
 
 The default adapter remains limited to facing an all-in and therefore chooses
-only between `FOLD` and `CALL`; the explicit R007 fixture is limited to OOP
-`CHECK` and `BET_33`. The 40-iteration default is not a convergence guarantee.
+only between `FOLD` and `CALL`; R007 is limited to OOP `CHECK`/`BET_33`, and R001
+to OOP `CHECK`/fixed 0.75-pot `BET_75`. Other sizes and raises remain unsupported.
+The 40-iteration default is not a convergence guarantee.
 See [Responsible use](responsible_use.md) before using or sharing results.

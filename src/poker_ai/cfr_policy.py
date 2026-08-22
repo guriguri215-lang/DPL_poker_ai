@@ -23,6 +23,7 @@ CFR_RIVER_POLICY_SOURCE = "poker_solver.solve_frozen_river_scenario"
 R007_NO_FACING_POLICY_CONFIG_VERSION = "cfr-river-r007-no-facing-config-v1"
 R007_NO_FACING_BET_ACTION = "BET_33"
 R007_NO_FACING_BET_FRACTION = 0.33
+R001_NO_FACING_BET_ACTION = "BET_75"
 
 
 class CfrRiverPolicyConfig(BaseModel):
@@ -231,56 +232,171 @@ class CfrRiverNoFacingPolicyProvider:
         *,
         state_cluster: str,
     ) -> BasePolicySelection:
-        if observation.position != "OOP":
-            raise ValueError("R007 no-facing policy requires Hero to be OOP")
-        if not math.isclose(observation.facing_bet, 0.0, rel_tol=0.0, abs_tol=1e-12):
-            raise ValueError("R007 no-facing policy requires no bet facing Hero")
-        if observation.pot <= 0.0:
-            raise ValueError("R007 no-facing policy requires a positive pot")
-        bet_size = observation.pot * self.config.bet_fraction
-        if bet_size > observation.effective_stack and not math.isclose(
-            bet_size,
-            observation.effective_stack,
-            rel_tol=0.0,
-            abs_tol=1e-9,
-        ):
-            raise ValueError("R007 BET_33 size exceeds the effective stack")
-
-        scenario = Scenario(
-            scenario_id=observation.hand_id,
-            board=tuple(str(card) for card in observation.board),
-            position=observation.position,
-            pot=observation.pot,
-            effective_stack=observation.effective_stack,
-            hero_combo=observation.hero_combo.canonical(),
-            hero_range=observation.hero_range.weights,
-            opponent_range=observation.opponent_assumed_range.weights,
-        )
-        result = _solve_frozen_river_scenario(
-            scenario,
+        return _no_facing_policy_selection(
+            observation,
+            state_cluster=state_cluster,
+            label="R007",
+            public_bet_action=self.config.public_bet_action,
             bet_fraction=self.config.bet_fraction,
             iterations=self.config.iterations,
-            checkpoints=self.config.checkpoints,
             average_delay=self.config.average_delay,
-        )
-        if result.state_cluster != state_cluster:
-            raise ValueError("solver result state cluster does not match Hero observation")
-        tree_table = _build_baseline_strategy_table(
-            result,
-            phase=self.config.phase,
-            table_version=self.strategy_version,
+            checkpoints=self.config.checkpoints,
+            strategy_version=self.strategy_version,
             source=self.source,
+            config_sha256=self.config.sha256,
         )
-        table = _map_start_table_to_bet_33(tree_table)
-        expected_situation = f"{state_cluster}:OOP:river_start"
-        if table.situation_key != expected_situation:
-            raise ValueError("solver StrategyTable is not Hero's OOP start decision")
-        action_ev = exact_oop_start_action_evs(
-            scenario,
-            result.strategy,
-            bet_fraction=self.config.bet_fraction,
+
+
+class CfrRiverR001NoFacingPolicyProvider:
+    """Expose Hero OOP's fixed BET_75 start policy for the R001 fixture."""
+
+    source = CFR_RIVER_POLICY_SOURCE
+
+    def __init__(
+        self,
+        config: CfrRiverPolicyConfig,
+        *,
+        bet_fraction: float,
+        equilibrium_version: str,
+        equilibrium_artifact_sha256: str,
+    ) -> None:
+        expected_fraction = int(R001_NO_FACING_BET_ACTION.rsplit("_", maxsplit=1)[1]) / 100.0
+        if not math.isclose(bet_fraction, expected_fraction, rel_tol=0.0, abs_tol=1e-12):
+            raise ValueError("R001 BET_75 must match the frozen equilibrium bet fraction")
+        if not equilibrium_version:
+            raise ValueError("R001 equilibrium_version must not be empty")
+        if len(equilibrium_artifact_sha256) != 64 or any(
+            char not in "0123456789abcdef" for char in equilibrium_artifact_sha256
+        ):
+            raise ValueError("R001 equilibrium artifact identity must be a SHA-256 digest")
+        self.config = config
+        self.bet_fraction = bet_fraction
+        self.equilibrium_version = equilibrium_version
+        self.equilibrium_artifact_sha256 = equilibrium_artifact_sha256
+
+    @property
+    def config_sha256(self) -> str:
+        payload = {
+            "solver_config": self.config.model_dump(mode="json"),
+            "phase": "start",
+            "public_bet_action": R001_NO_FACING_BET_ACTION,
+            "bet_fraction": self.bet_fraction,
+            "equilibrium_version": self.equilibrium_version,
+            "equilibrium_artifact_sha256": self.equilibrium_artifact_sha256,
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        return hashlib.sha256(encoded).hexdigest()
+
+    @property
+    def strategy_version(self) -> str:
+        return (
+            f"cfr-river-r001-no-facing-v1-i{self.config.iterations}-"
+            f"d{self.config.average_delay}-cfg{self.config_sha256[:12]}"
         )
-        return BasePolicySelection(table, self.config.sha256, action_ev)
+
+    def config_ref(self) -> ConfigRef:
+        checkpoints = ",".join(str(value) for value in self.config.checkpoints) or "none"
+        return ConfigRef(
+            name="cfr_river_policy",
+            role="solver",
+            path=(
+                f"inline:{self.config.config_version}:solver={self.config.solver}:phase=start:"
+                f"iterations={self.config.iterations}:average_delay={self.config.average_delay}:"
+                f"checkpoints={checkpoints}:public_bet={R001_NO_FACING_BET_ACTION}:"
+                f"bet_fraction={self.bet_fraction:g}:equilibrium={self.equilibrium_version}:"
+                f"artifact={self.equilibrium_artifact_sha256}"
+            ),
+            sha256=self.config_sha256,
+        )
+
+    def policy_for(
+        self,
+        observation: BasePolicyObservation,
+        *,
+        state_cluster: str,
+    ) -> BasePolicySelection:
+        return _no_facing_policy_selection(
+            observation,
+            state_cluster=state_cluster,
+            label="R001",
+            public_bet_action=R001_NO_FACING_BET_ACTION,
+            bet_fraction=self.bet_fraction,
+            iterations=self.config.iterations,
+            average_delay=self.config.average_delay,
+            checkpoints=self.config.checkpoints,
+            strategy_version=self.strategy_version,
+            source=self.source,
+            config_sha256=self.config_sha256,
+        )
+
+
+def _no_facing_policy_selection(
+    observation: BasePolicyObservation,
+    *,
+    state_cluster: str,
+    label: str,
+    public_bet_action: str,
+    bet_fraction: float,
+    iterations: int,
+    average_delay: int,
+    checkpoints: tuple[int, ...],
+    strategy_version: str,
+    source: str,
+    config_sha256: str,
+) -> BasePolicySelection:
+    """Shared single-size OOP start adapter used immediately by R007 and R001."""
+
+    if observation.position != "OOP":
+        raise ValueError(f"{label} no-facing policy requires Hero to be OOP")
+    if not math.isclose(observation.facing_bet, 0.0, rel_tol=0.0, abs_tol=1e-12):
+        raise ValueError(f"{label} no-facing policy requires no bet facing Hero")
+    if observation.pot <= 0.0:
+        raise ValueError(f"{label} no-facing policy requires a positive pot")
+    bet_size = observation.pot * bet_fraction
+    if bet_size > observation.effective_stack and not math.isclose(
+        bet_size,
+        observation.effective_stack,
+        rel_tol=0.0,
+        abs_tol=1e-9,
+    ):
+        raise ValueError(f"{label} {public_bet_action} size exceeds the effective stack")
+
+    scenario = Scenario(
+        scenario_id=observation.hand_id,
+        board=tuple(str(card) for card in observation.board),
+        position=observation.position,
+        pot=observation.pot,
+        effective_stack=observation.effective_stack,
+        hero_combo=observation.hero_combo.canonical(),
+        hero_range=observation.hero_range.weights,
+        opponent_range=observation.opponent_assumed_range.weights,
+    )
+    result = _solve_frozen_river_scenario(
+        scenario,
+        bet_fraction=bet_fraction,
+        iterations=iterations,
+        checkpoints=checkpoints,
+        average_delay=average_delay,
+    )
+    if result.state_cluster != state_cluster:
+        raise ValueError("solver result state cluster does not match Hero observation")
+    tree_table = _build_baseline_strategy_table(
+        result,
+        phase="start",
+        table_version=strategy_version,
+        source=source,
+    )
+    table = _map_start_table_to_public_bet(tree_table, public_bet_action)
+    expected_situation = f"{state_cluster}:OOP:river_start"
+    if table.situation_key != expected_situation:
+        raise ValueError("solver StrategyTable is not Hero's OOP start decision")
+    action_ev = exact_oop_start_action_evs(
+        scenario,
+        result.strategy,
+        bet_fraction=bet_fraction,
+        public_bet_action=public_bet_action,
+    )
+    return BasePolicySelection(table, config_sha256, action_ev)
 
 
 def exact_oop_start_action_evs(
@@ -288,8 +404,9 @@ def exact_oop_start_action_evs(
     profile: StrategyProfile,
     *,
     bet_fraction: float = R007_NO_FACING_BET_FRACTION,
+    public_bet_action: str = R007_NO_FACING_BET_ACTION,
 ) -> dict[str, float]:
-    """Exact current-node EVs for OOP ``CHECK`` and public ``BET_33``.
+    """Exact current-node EVs for OOP ``CHECK`` and one fixed public bet label.
 
     The existing river game reports player-0 net utility including the player's
     sunk half of the dead pot.  Adding ``pot / 2`` converts it to the DPL's
@@ -334,7 +451,7 @@ def exact_oop_start_action_evs(
     if total_probability <= 0.0:
         raise ValueError("Hero combo has zero chance reach in the river game")
 
-    action_map = (("CHECK", "CHECK"), ("BET", R007_NO_FACING_BET_ACTION))
+    action_map = (("CHECK", "CHECK"), ("BET", public_bet_action))
     action_ev: dict[str, float] = {}
     for tree_action, public_action in action_map:
         branches = tuple(
@@ -352,7 +469,10 @@ def exact_oop_start_action_evs(
     return action_ev
 
 
-def _map_start_table_to_bet_33(table: StrategyTable) -> StrategyTable:
+def _map_start_table_to_public_bet(
+    table: StrategyTable,
+    public_bet_action: str,
+) -> StrategyTable:
     entries: list[StrategyEntry] = []
     for entry in table.entries:
         if set(entry.policy) != {"CHECK", "BET"}:
@@ -362,7 +482,7 @@ def _map_start_table_to_bet_33(table: StrategyTable) -> StrategyTable:
                 combo=entry.combo,
                 policy={
                     "CHECK": entry.policy["CHECK"],
-                    R007_NO_FACING_BET_ACTION: entry.policy["BET"],
+                    public_bet_action: entry.policy["BET"],
                 },
                 reach_prob=entry.reach_prob,
             )

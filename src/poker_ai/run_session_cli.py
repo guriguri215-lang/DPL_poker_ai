@@ -2,8 +2,8 @@
 
 The command writes validated DPL v3 JSONL plus a RunManifest sidecar and can
 opt in to verified template-explanation artifacts. The default river path is
-limited to facing an all-in; the explicit R007 fixture selects the bounded OOP
-``CHECK``/``BET_33`` slice. Solver iterations and average delay are explicit
+limited to facing an all-in; explicit R007 and R001 fixtures select bounded OOP
+``CHECK``/fixed-bet slices. Solver iterations and average delay are explicit
 inputs; the 40-iteration default is not a convergence guarantee.
 """
 
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from poker_ai.cfr_policy import DEFAULT_CFR_RIVER_POLICY_CONFIG, CfrRiverPolicyConfig
@@ -23,15 +24,18 @@ from poker_ai.explanation_artifacts import (
 )
 from poker_ai.exploit import NodelockExploitConfig, NodelockExploitProvider, RuleExploitProvider
 from poker_ai.leak import (
+    R001_FIXTURE_MIN_DEVIATION,
     LeakDetector,
     LeakDetectorConfig,
     leaky_fixture_action_baseline_table,
+    leaky_r001_fixture_action_baseline_table,
     leaky_r007_fixture_action_baseline_table,
 )
 from poker_ai.opponent import reveal_stub_opponent_answer_key
 from poker_ai.runtime_provenance import collect_runtime_provenance, resolve_package_version
 from poker_ai.session import (
     FACING_ALL_IN_SESSION_MODE,
+    R001_NO_FACING_SESSION_MODE,
     R007_NO_FACING_SESSION_MODE,
     run_session,
     write_session_bundle,
@@ -104,12 +108,13 @@ def _parser(*, entrypoint: str) -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--leaky-fixture-reason",
-        choices=("LEAK_R007", "LEAK_R008"),
+        choices=("LEAK_R001", "LEAK_R007", "LEAK_R008"),
         default="LEAK_R008",
         help=(
             "fixture reason to simulate with --leaky-fixture; LEAK_R008 preserves "
-            "the historical jam-all path (default), while LEAK_R007 opts in to "
-            "the OOP CHECK/BET_33 check-back slice"
+            "the historical jam-all path (default), LEAK_R007 opts in to the OOP "
+            "CHECK/BET_33 check-back slice, and LEAK_R001 opts in to the OOP "
+            "CHECK/BET_75 overfold slice"
         ),
     )
     parser.add_argument(
@@ -135,7 +140,7 @@ def main(argv: list[str] | None = None, *, entrypoint: str = CONSOLE_ENTRYPOINT)
     parser = _parser(entrypoint=entrypoint)
     args = parser.parse_args(raw_argv)
     if args.leaky_fixture_reason != "LEAK_R008" and not args.leaky_fixture:
-        parser.error("--leaky-fixture-reason LEAK_R007 requires --leaky-fixture")
+        parser.error(f"--leaky-fixture-reason {args.leaky_fixture_reason} requires --leaky-fixture")
 
     previous_settings = None
     if args.previous_session_manifest is not None:
@@ -171,11 +176,16 @@ def main(argv: list[str] | None = None, *, entrypoint: str = CONSOLE_ENTRYPOINT)
                 min_confidence=0.5,
             )
         )
-        fixture_baseline = (
-            leaky_r007_fixture_action_baseline_table()
-            if args.leaky_fixture_reason == "LEAK_R007"
-            else leaky_fixture_action_baseline_table()
-        )
+        if args.leaky_fixture_reason == "LEAK_R001":
+            detector_config = replace(
+                detector_config,
+                min_deviation=R001_FIXTURE_MIN_DEVIATION,
+            )
+            fixture_baseline = leaky_r001_fixture_action_baseline_table()
+        elif args.leaky_fixture_reason == "LEAK_R007":
+            fixture_baseline = leaky_r007_fixture_action_baseline_table()
+        else:
+            fixture_baseline = leaky_fixture_action_baseline_table()
         leak_detector = LeakDetector(fixture_baseline, detector_config)
         exploit_provider = NodelockExploitProvider(
             NodelockExploitConfig(
@@ -190,11 +200,12 @@ def main(argv: list[str] | None = None, *, entrypoint: str = CONSOLE_ENTRYPOINT)
         leak_detector = LeakDetector(config=previous_settings.leak_detector_config)
 
     provenance = collect_runtime_provenance()
-    session_mode = (
-        R007_NO_FACING_SESSION_MODE
-        if args.leaky_fixture and args.leaky_fixture_reason == "LEAK_R007"
-        else FACING_ALL_IN_SESSION_MODE
-    )
+    if args.leaky_fixture and args.leaky_fixture_reason == "LEAK_R001":
+        session_mode = R001_NO_FACING_SESSION_MODE
+    elif args.leaky_fixture and args.leaky_fixture_reason == "LEAK_R007":
+        session_mode = R007_NO_FACING_SESSION_MODE
+    else:
+        session_mode = FACING_ALL_IN_SESSION_MODE
     result = run_session(
         args.seed,
         args.hands,

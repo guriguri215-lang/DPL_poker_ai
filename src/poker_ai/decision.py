@@ -165,11 +165,6 @@ class HeroAgent:
         if obs.facing_bet < 0.0:
             raise ValueError("facing_bet must be non-negative")
         no_facing = math.isclose(obs.facing_bet, 0.0, rel_tol=0.0, abs_tol=1e-12)
-        legal = legal_actions(
-            facing_bet=not no_facing,
-            bet_is_all_in=not no_facing,
-            no_facing_bet_action="BET_33" if no_facing else None,
-        )
 
         state_cluster = classify_board(obs.board)
         hand_bucket = classify_combo(
@@ -205,6 +200,17 @@ class HeroAgent:
         if entries[0].reach_prob <= 0.0:
             raise ValueError("Hero combo must have positive reach in the base StrategyTable")
         base_policy = dict(entries[0].policy)
+        no_facing_bet_action = None
+        if no_facing:
+            bet_actions = tuple(action for action in base_policy if action != "CHECK")
+            if len(bet_actions) != 1:
+                raise ValueError("no-facing base policy must contain CHECK and one fixed bet")
+            no_facing_bet_action = bet_actions[0]
+        legal = legal_actions(
+            facing_bet=not no_facing,
+            bet_is_all_in=not no_facing,
+            no_facing_bet_action=no_facing_bet_action,
+        )
         if set(base_policy) - set(legal):
             raise ValueError(f"base policy cites actions outside the legal set {legal}")
 

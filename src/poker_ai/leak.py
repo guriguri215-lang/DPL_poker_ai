@@ -24,10 +24,12 @@ from .observation import ActionStats
 
 # Public action groups used by the action-only MVP detector and solver artifacts.
 CHECK_ACTIONS: tuple[str, ...] = ("CHECK",)
+FOLD_ACTIONS: tuple[str, ...] = ("FOLD",)
 BET_ACTIONS: tuple[str, ...] = ("BET", "BET_ALL_IN", "BET_33", "BET_75", "RAISE_ALL_IN")
 _POLICY_BET_ACTIONS: tuple[str, ...] = BET_ACTIONS
 _CHECK_BET_POLICY_ACTIONS = frozenset((*CHECK_ACTIONS, *_POLICY_BET_ACTIONS))
 BOUNDARY_ABS_TOLERANCE = "1e-12"
+R001_FIXTURE_MIN_DEVIATION = 0.08
 GroundTruthBoundary = Literal["positive", "negative", "indifference"]
 
 
@@ -215,6 +217,27 @@ def leaky_r007_fixture_action_baseline_table(
                 action_group=CHECK_ACTIONS,
                 baseline_rate=0.0,
                 direction="increase_bet_frequency_when_checked_to",
+            ),
+        ),
+    )
+
+
+def leaky_r001_fixture_action_baseline_table() -> ActionBaselineTable:
+    """Build R001's detector baseline from the pinned equilibrium artifact."""
+
+    from .opponent import load_r001_fixture_synthesis, r001_fixture_measurement
+
+    fixture = load_r001_fixture_synthesis()
+    measurement = r001_fixture_measurement(fixture)
+    return ActionBaselineTable(
+        table_version=f"{fixture.equilibrium_version}-r001-action-baseline",
+        rules=(
+            ActionLeakRule(
+                reason_id="LEAK_R001",
+                leak_type="river_large_bet_overfold",
+                action_group=FOLD_ACTIONS,
+                baseline_rate=float(measurement.baseline_rate),
+                direction="increase_large_bet_frequency",
             ),
         ),
     )

@@ -18,7 +18,11 @@ from poker_solver.nodelock import (
 from poker_solver.strategy import StrategyProfile
 
 from .equilibrium import DEFAULT_EQUILIBRIUM_ROOT, load_frozen_equilibrium
-from .model import OpponentModelConfig
+from .model import LEAK_ACTION_MAPPINGS, OpponentModelConfig, leak_action_mapping
+
+# Phase 6's existing cross-component extractor introspects this private name.
+# Keep it as the same canonical object, not a separately authored semantics table.
+_LEAK_MAPPINGS = LEAK_ACTION_MAPPINGS
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,26 +45,13 @@ class SynthesizedOpponent:
     config_sha256: str
     equilibrium_version: str
     equilibrium_artifact_sha256: str
+    bet_fraction: float
     game: Game
     equilibrium_strategy: StrategyProfile
     node_lock_config: NodeLockConfig
     strategy: StrategyProfile
     leak_targets: tuple[LeakTarget, ...]
     application: NodeLockApplication
-
-
-@dataclass(frozen=True, slots=True)
-class _LeakMapping:
-    phase: str
-    action: str
-
-
-_LEAK_MAPPINGS: dict[str, _LeakMapping] = {
-    "LEAK_R001": _LeakMapping(phase="vs_bet", action="FOLD"),
-    "LEAK_R002": _LeakMapping(phase="vs_bet", action="CALL"),
-    "LEAK_R007": _LeakMapping(phase="vs_check", action="CHECK"),
-    "LEAK_R008": _LeakMapping(phase="vs_check", action="BET"),
-}
 
 
 def synthesize_opponent(
@@ -86,7 +77,7 @@ def synthesize_opponent(
     rules: list[NodeLockRule] = []
     targets: list[LeakTarget] = []
     for reason_id, requested_delta in config.leak_vector:
-        mapping = _LEAK_MAPPINGS[reason_id]
+        mapping = leak_action_mapping(reason_id)
         infosets = _target_infosets(
             game,
             actor=config.opponent_position,
@@ -141,6 +132,7 @@ def synthesize_opponent(
         config_sha256=config.config_sha256,
         equilibrium_version=equilibrium.equilibrium_version,
         equilibrium_artifact_sha256=equilibrium.artifact_sha256,
+        bet_fraction=equilibrium.bet_fraction,
         game=game,
         equilibrium_strategy={
             infoset: dict(distribution) for infoset, distribution in equilibrium_profile.items()

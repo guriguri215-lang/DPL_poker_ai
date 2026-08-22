@@ -2,9 +2,9 @@
 
 Generates scenarios deterministically and solves each public river spot with CFR+.
 The historical path observes the jam-all stub before Hero's finite-iteration
-``vs_bet`` decision. The explicit R007 fixture instead gives OOP Hero the existing
-tree's ``start`` ``CHECK``/``BET_33`` decision and records a check-back only after
-Hero checks. Each decision is assembled into a current
+``vs_bet`` decision. Explicit R007 and R001 fixtures instead give OOP Hero the
+existing tree's bounded ``start`` decision and record an opponent response only
+after Hero reaches the corresponding opportunity. Each decision is assembled into a current
 :class:`~poker_core.dpl_schema.DecisionProvenanceLog`. Public action observations feed
 the leak detector independently; its action baseline still matches the stub opponent,
 so the normal CLI run remains leak-free. Optional rule or node-lock exploitation stays
@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import platform
+import random
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,6 +54,7 @@ from .cfr_policy import (
     CfrRiverNoFacingPolicyProvider,
     CfrRiverPolicyConfig,
     CfrRiverPolicyProvider,
+    CfrRiverR001NoFacingPolicyProvider,
 )
 from .decision import HeroAgent, Observation
 from .exploit import ExploitProvider
@@ -63,8 +65,12 @@ from .observation import ActionStats, ObservationTracker
 from .opponent import (
     CHECK_BACK_OPPONENT_ID,
     JAM_ALL_OPPONENT_ID,
+    R001_FIXTURE_OPPONENT_ID,
     STUB_OPPONENT_VERSION,
     StubOpponent,
+    load_r001_fixture_synthesis,
+    r001_fixture_measurement,
+    sample_r001_fixture_response,
 )
 from .posterior_bundle import (
     PosteriorBundleParts,
@@ -84,7 +90,8 @@ OPPONENT_VERSION = STUB_OPPONENT_VERSION
 
 FACING_ALL_IN_SESSION_MODE = "facing_all_in"
 R007_NO_FACING_SESSION_MODE = "r007_no_facing"
-SessionMode = Literal["facing_all_in", "r007_no_facing"]
+R001_NO_FACING_SESSION_MODE = "r001_no_facing"
+SessionMode = Literal["facing_all_in", "r007_no_facing", "r001_no_facing"]
 
 
 @dataclass(frozen=True)
@@ -182,6 +189,86 @@ def _build_r007_dpl(
         assumed_range=scenario.opponent_range_obj(),
         _policy="check_back_all",
     )
+    log, opponent_situation_key = _build_no_facing_decision(
+        scenario,
+        hand_id,
+        session_id,
+        opponent_phase="river_vs_check",
+        tracker=tracker,
+        leak_detector=leak_detector,
+        safety_alpha=safety_alpha,
+        exploration_epsilon=exploration_epsilon,
+        exploit_provider=exploit_provider,
+        base_policy_provider=base_policy_provider,
+    )
+    if log.selected_action == "CHECK":
+        opponent_action = opponent.respond_to_check(
+            effective_stack=scenario.effective_stack,
+        )
+        tracker.record_opponent_action(
+            situation_key=opponent_situation_key,
+            action=opponent_action.action,
+        )
+    return log
+
+
+def _build_r001_dpl(
+    scenario: Scenario,
+    hand_id: str,
+    session_id: str,
+    *,
+    tracker: ObservationTracker,
+    leak_detector: LeakDetector,
+    safety_alpha: float,
+    exploration_epsilon: float,
+    exploit_provider: ExploitProvider | None,
+    base_policy_provider: BasePolicyProvider,
+    bet_fraction: float,
+    fold_probability: float,
+    response_rng: random.Random,
+) -> DecisionProvenanceLog:
+    """Run one causal OOP CHECK/BET_75 decision for the R001 fixture."""
+
+    scenario = _as_r001_scenario(scenario, bet_fraction=bet_fraction)
+    log, opponent_situation_key = _build_no_facing_decision(
+        scenario,
+        hand_id,
+        session_id,
+        opponent_phase="river_vs_bet",
+        tracker=tracker,
+        leak_detector=leak_detector,
+        safety_alpha=safety_alpha,
+        exploration_epsilon=exploration_epsilon,
+        exploit_provider=exploit_provider,
+        base_policy_provider=base_policy_provider,
+    )
+    if log.selected_action == "BET_75":
+        opponent_action = sample_r001_fixture_response(
+            fold_probability=fold_probability,
+            rng=response_rng,
+        )
+        tracker.record_opponent_action(
+            situation_key=opponent_situation_key,
+            action=opponent_action.action,
+        )
+    return log
+
+
+def _build_no_facing_decision(
+    scenario: Scenario,
+    hand_id: str,
+    session_id: str,
+    *,
+    opponent_phase: str,
+    tracker: ObservationTracker,
+    leak_detector: LeakDetector,
+    safety_alpha: float,
+    exploration_epsilon: float,
+    exploit_provider: ExploitProvider | None,
+    base_policy_provider: BasePolicyProvider,
+) -> tuple[DecisionProvenanceLog, str]:
+    """Assemble a no-facing Hero decision before any causal opponent response."""
+
     observation = Observation(
         hand_id=hand_id,
         session_id=session_id,
@@ -194,7 +281,7 @@ def _build_r007_dpl(
         hero_range=scenario.hero_range_obj(),
         opponent_assumed_range=Range(scenario.opponent_range),
     )
-    opponent_situation_key = f"{classify_board(observation.board)}:IP:river_vs_check"
+    opponent_situation_key = f"{classify_board(observation.board)}:IP:{opponent_phase}"
     tracker.register_situation(opponent_situation_key)
     detected_leaks = leak_detector.detect_for_situation(
         tracker.snapshot(),
@@ -212,15 +299,7 @@ def _build_r007_dpl(
         exploit_provider=exploit_provider,
         base_policy_provider=base_policy_provider,
     )
-    if log.selected_action == "CHECK":
-        opponent_action = opponent.respond_to_check(
-            effective_stack=scenario.effective_stack,
-        )
-        tracker.record_opponent_action(
-            situation_key=opponent_situation_key,
-            action=opponent_action.action,
-        )
-    return log
+    return log, opponent_situation_key
 
 
 def _assemble_dpl(
@@ -305,6 +384,16 @@ def _as_oop_scenario(scenario: Scenario) -> Scenario:
     return Scenario.model_validate(payload)
 
 
+def _as_r001_scenario(scenario: Scenario, *, bet_fraction: float) -> Scenario:
+    oop = _as_oop_scenario(scenario)
+    minimum_stack = oop.pot * bet_fraction
+    if oop.effective_stack >= minimum_stack:
+        return oop
+    payload = oop.model_dump(mode="python")
+    payload["effective_stack"] = minimum_stack
+    return Scenario.model_validate(payload)
+
+
 def _base_policy_provider_for(
     solver_config: CfrRiverPolicyConfig,
     session_mode: SessionMode,
@@ -319,6 +408,14 @@ def _base_policy_provider_for(
                 checkpoints=solver_config.checkpoints,
             )
         )
+    if session_mode == R001_NO_FACING_SESSION_MODE:
+        fixture = load_r001_fixture_synthesis()
+        return CfrRiverR001NoFacingPolicyProvider(
+            solver_config,
+            bet_fraction=fixture.bet_fraction,
+            equilibrium_version=fixture.equilibrium_version,
+            equilibrium_artifact_sha256=fixture.equilibrium_artifact_sha256,
+        )
     raise ValueError(f"unknown session_mode {session_mode!r}")
 
 
@@ -327,6 +424,8 @@ def _opponent_id_for(session_mode: SessionMode) -> str:
         return OPPONENT_ID
     if session_mode == R007_NO_FACING_SESSION_MODE:
         return CHECK_BACK_OPPONENT_ID
+    if session_mode == R001_NO_FACING_SESSION_MODE:
+        return R001_FIXTURE_OPPONENT_ID
     raise ValueError(f"unknown session_mode {session_mode!r}")
 
 
@@ -351,25 +450,69 @@ def iter_session_logs(
         solver_config,
         session_mode,
     )
+    r001_fixture = (
+        load_r001_fixture_synthesis() if session_mode == R001_NO_FACING_SESSION_MODE else None
+    )
+    r001_measurement = r001_fixture_measurement(r001_fixture) if r001_fixture is not None else None
+    response_rng = (
+        random.Random(f"{session_id}:{r001_fixture.config.seed}:r001-opponent-response-v1")
+        if r001_fixture is not None
+        else None
+    )
     for index, scenario in enumerate(generate_scenarios(seed, num_hands)):
         hand_id = f"{session_id}-H{index:05d}"
-        builder = _build_r007_dpl if session_mode == R007_NO_FACING_SESSION_MODE else _build_dpl
-        yield builder(
-            scenario,
-            hand_id,
-            session_id,
-            tracker=tracker,
-            leak_detector=detector,
-            safety_alpha=safety_alpha,
-            exploration_epsilon=exploration_epsilon,
-            exploit_provider=exploit_provider,
-            base_policy_provider=base_policy_provider,
-        )
+        common = {
+            "tracker": tracker,
+            "leak_detector": detector,
+            "safety_alpha": safety_alpha,
+            "exploration_epsilon": exploration_epsilon,
+            "exploit_provider": exploit_provider,
+            "base_policy_provider": base_policy_provider,
+        }
+        if session_mode == R007_NO_FACING_SESSION_MODE:
+            yield _build_r007_dpl(scenario, hand_id, session_id, **common)
+        elif session_mode == R001_NO_FACING_SESSION_MODE:
+            if r001_fixture is None or r001_measurement is None or response_rng is None:
+                raise RuntimeError("R001 fixture environment was not initialized")
+            yield _build_r001_dpl(
+                scenario,
+                hand_id,
+                session_id,
+                bet_fraction=r001_fixture.bet_fraction,
+                fold_probability=float(r001_measurement.opponent_rate),
+                response_rng=response_rng,
+                **common,
+            )
+        else:
+            yield _build_dpl(scenario, hand_id, session_id, **common)
 
 
 def _config_ref(path: Path, *, name: str, role: str) -> ConfigRef:
     sha = hashlib.sha256(path.read_bytes()).hexdigest()
     return ConfigRef(name=name, role=role, path=path.name, sha256=sha)
+
+
+def _opponent_ref_for(session_mode: SessionMode) -> OpponentRef:
+    if session_mode == R001_NO_FACING_SESSION_MODE:
+        from opponents.catalog import DEFAULT_CATALOG_ROOT
+
+        fixture = load_r001_fixture_synthesis()
+        config_path = (
+            DEFAULT_CATALOG_ROOT
+            / fixture.config.split
+            / f"{fixture.config.opponent_id}.opponent.json"
+        )
+        return OpponentRef(
+            opponent_id=fixture.config.opponent_id,
+            opponent_version=fixture.config.opponent_version,
+            split=fixture.config.split,
+            config=_config_ref(config_path, name="r001_fixture_opponent", role="other"),
+        )
+    return OpponentRef(
+        opponent_id=_opponent_id_for(session_mode),
+        opponent_version=OPPONENT_VERSION,
+        split="training",
+    )
 
 
 def _execution_sampler_config_ref(exploration_epsilon: float) -> ConfigRef:
@@ -465,13 +608,7 @@ def build_manifest(
         versions=versions,
         seeds={"master": seed},
         configs=configs,
-        opponents=[
-            OpponentRef(
-                opponent_id=_opponent_id_for(session_mode),
-                opponent_version=OPPONENT_VERSION,
-                split="training",
-            )
-        ],
+        opponents=[_opponent_ref_for(session_mode)],
         outputs=[bundle.snapshot_ref, *(_artifact_ref(path) for path in output_paths or [])],
     )
 
