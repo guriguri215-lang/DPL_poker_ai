@@ -112,25 +112,31 @@ def test_manual_and_automated_post_publication_checks_are_documented() -> None:
         assert "cannot undo a publication" in document
 
 
-def test_release_notes_contract_covers_verifier_fix_and_alpha_limitations() -> None:
+def test_release_notes_contract_covers_r001_slice_and_alpha_limitations() -> None:
     runbook = _normalized("docs/releasing.md")
     for required in (
-        "saved explanation-bundle verifier",
-        "`poker-xai-verify-explanation-bundle`",
-        "left identifier boundary",
-        "`%` / `bb` surface numeric tokens",
-        "opaque solver provenance identifier",
-        "standalone numeric claim",
-        "Standalone fabricated numeric-claim rejection",
-        "numeric tolerances do not change",
-        "CLI arguments, success output, and failure output",
-        "usage and output specification",
-        "README body",
+        "`--leaky-fixture-reason LEAK_R001`",
+        "explicit `--leaky-fixture` opt-in",
+        "ordinary session, bare `--leaky-fixture`, R007, and R008 defaults",
+        "OOP `CHECK` and fixed `BET_75`",
+        "0.75-pot equilibrium-artifact provenance",
+        "records FOLD/CALL only after Hero actually chose `BET_75`",
+        "zero opportunity after `CHECK`",
+        "available only to later hands rather than the same decision",
+        "pinned baseline provenance",
+        "HARD/fix-to-baseline opponent/IP/vs_bet/FOLD",
+        "exact current-node action EV",
+        "DPL v3",
+        "saved-bundle verification",
+        "Invalid CLI combinations fail before an output directory is created",
         "existing release smoke remains unchanged",
         "saved explanation-bundle checks",
         "R007/R008 smoke",
+        "R001 end-to-end fixture checks run in the repository CI",
         "no new dependency, entry point, schema, default, solver public API",
-        "no solver, policy, or EV behavior change",
+        "arbitrary bet-size parameter",
+        "automatic session loop",
+        "registry",
         "workflow topology",
         "release mechanism",
         "published-release four-asset verification workflow",
@@ -145,5 +151,6 @@ def test_release_notes_contract_covers_verifier_fix_and_alpha_limitations() -> N
         "facing-all-in",
         "40 CFR+ iterations",
         "not a convergence guarantee",
+        "make no convergence, GTO, strategy-safety, profitability, or real-world performance claim",
     ):
         assert required in runbook, required
