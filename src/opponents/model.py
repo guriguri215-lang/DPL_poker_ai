@@ -5,9 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Literal, NamedTuple
+from typing import Literal
 
 from ._canonical import parse_canonical_decimal
 
@@ -26,11 +27,18 @@ _IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
-class LeakActionMapping(NamedTuple):
+@dataclass(frozen=True, slots=True)
+class LeakActionMapping:
     """Canonical action/phase semantics shared by synthesis and consumers."""
 
     phase: str
     action: str
+
+    def __iter__(self) -> Iterator[str]:
+        """Preserve the existing private tuple-unpack compatibility view."""
+
+        yield self.phase
+        yield self.action
 
 
 LEAK_ACTION_MAPPINGS: dict[str, LeakActionMapping] = {
