@@ -578,6 +578,140 @@ def test_r007_zero_reached_check_opportunities_still_writes_verified_bundle(tmp_
     assert verify_saved_explanation_bundle(manifest_path).checker_total == 1
 
 
+def test_r001_cli_is_causal_and_connects_bet_75_nodelock_and_saved_bundle(
+    tmp_path,
+    capsys,
+):
+    cli = _load_cli_module()
+    raw_argv = [
+        "--seed",
+        "20260000",
+        "--hands",
+        "20",
+        "--solver-iterations",
+        "5",
+        "--leaky-fixture",
+        "--leaky-fixture-reason",
+        "LEAK_R001",
+        "--exploration-epsilon",
+        "1.0",
+        "--explanations",
+        "--out-dir",
+        str(tmp_path),
+    ]
+
+    assert cli.main(raw_argv) == 0
+    stdout = capsys.readouterr().out
+    assert "20 decisions validated against DPL v3" in stdout
+    assert "explanations_verified=20" in stdout
+
+    dpl_path = tmp_path / "S20260000.dpl.jsonl"
+    explanations_path = tmp_path / "S20260000.explanations.jsonl"
+    manifest_path = tmp_path / "S20260000.manifest.json"
+    logs = [
+        DecisionProvenanceLog.model_validate_json(line)
+        for line in dpl_path.read_text(encoding="utf-8").splitlines()
+    ]
+    explanations = [
+        ExplanationDocument.model_validate_json(line)
+        for line in explanations_path.read_text(encoding="utf-8").splitlines()
+    ]
+
+    assert len(logs) == len(explanations) == 20
+    assert logs[0].detected_leaks == []
+    assert all(log.schema_version == "3.0.0" for log in logs)
+    assert all(set(log.base_policy) == {"CHECK", "BET_75"} for log in logs)
+    assert all(set(log.exploit_policy) == {"CHECK", "BET_75"} for log in logs)
+    assert all(set(log.final_policy) == {"CHECK", "BET_75"} for log in logs)
+    assert all(
+        log.ev_estimate.ev_source == "solver_exact"
+        and log.ev_estimate.ev_definition == "incremental_ev_from_current_node"
+        for log in logs
+    )
+
+    prior_bets: dict[str, int] = {}
+    for log in logs:
+        for leak in log.detected_leaks:
+            assert leak.reason_id == "LEAK_R001"
+            assert leak.leak_type == "river_large_bet_overfold"
+            assert leak.effective_sample_size == prior_bets.get(leak.situation_key, 0)
+        if log.selected_action == "BET_75":
+            situation_key = f"{log.state_cluster}:IP:river_vs_bet"
+            prior_bets[situation_key] = prior_bets.get(situation_key, 0) + 1
+
+    snapshot = json.loads(
+        (tmp_path / "provenance/action_stats_terminal_snapshots.json").read_bytes()
+    )
+    bet_count = sum(log.selected_action == "BET_75" for log in logs)
+    check_count = sum(log.selected_action == "CHECK" for log in logs)
+    assert bet_count > 0
+    assert check_count > 0
+    assert sum(record["n"] for record in snapshot["records"]) == bet_count
+    assert all(record["rule_id"] == "LEAK_R001" for record in snapshot["records"])
+    assert all(record["action_group"] == ["FOLD"] for record in snapshot["records"])
+    assert all(set(record["action_counts"]) <= {"FOLD", "CALL"} for record in snapshot["records"])
+    assert any(record["n"] == 0 and record["action_counts"] == {} for record in snapshot["records"])
+
+    solver_logs = [log for log in logs if log.exploit_source == "nodelock_solver"]
+    assert solver_logs
+    for log in solver_logs:
+        assert [leak.reason_id for leak in log.detected_leaks] == ["LEAK_R001"]
+        assert log.solver_result_id is not None
+        assert "lock_mode=HARD" in log.solver_result_id
+        assert "unlocked_policy_mode=fix_to_baseline" in log.solver_result_id
+        assert log.ev_estimate.exploit_ev > log.ev_estimate.base_ev
+        assert set(log.base_policy) == set(log.exploit_policy) == set(log.final_policy)
+
+    manifest = RunManifest.model_validate_json(manifest_path.read_bytes())
+    solver_ref = next(config for config in manifest.configs if config.role == "solver")
+    baseline = json.loads((tmp_path / "provenance/action_baseline_table.json").read_bytes())
+    estimator = json.loads((tmp_path / "provenance/leak_confidence_estimator.json").read_bytes())
+    assert manifest.versions.dpl_schema_version == "3.0.0"
+    assert manifest.opponents[0].opponent_id == "nl-train-r001-d016-s102"
+    assert manifest.opponents[0].split == "training"
+    assert "session_mode=r001_no_facing" in manifest.description
+    assert "public_bet=BET_75" in solver_ref.path
+    assert "bet_fraction=0.75" in solver_ref.path
+    assert "equilibrium=river-large-bet-equilibrium-v1" in solver_ref.path
+    assert all(
+        log.base_strategy_provenance.solver_config_sha256 == solver_ref.sha256 for log in logs
+    )
+    assert baseline["table_version"] == manifest.versions.baseline_table_version
+    assert baseline["rules"][0]["reason_id"] == "LEAK_R001"
+    assert baseline["rules"][0]["action_group"] == ["FOLD"]
+    assert estimator["tau"] == pytest.approx(0.08)
+
+    for log, explanation in zip(logs, explanations, strict=True):
+        assert explanation.generator == "template"
+        verified = verify_explanation(explanation, log)
+        assert verified.passed, verified.issues
+    saved = verify_saved_explanation_bundle(manifest_path)
+    assert saved.checker_total == saved.checker_passed == 20
+
+    evaluation = json.loads((tmp_path / "S20260000.post_session_evaluation.json").read_bytes())
+    assert evaluation["evaluation"]["opponent_model_id"] == "nl-train-r001-d016-s102"
+    assert evaluation["evaluation"]["explanation_validity_score"] == 1.0
+    assert evaluation["next_session_settings"]["leak_detector_config"]["min_deviation"] == 0.08
+
+
+def test_r001_reason_requires_explicit_fixture_and_writes_nothing(tmp_path):
+    cli = _load_cli_module()
+    out_dir = tmp_path / "must-not-exist"
+
+    with pytest.raises(SystemExit) as stopped:
+        cli.main(
+            [
+                "--leaky-fixture-reason",
+                "LEAK_R001",
+                "--out-dir",
+                str(out_dir),
+            ]
+        )
+
+    assert stopped.value.code == 2
+    assert not out_dir.exists()
+
+
 @pytest.mark.parametrize("leaky_fixture", [False, True])
 def test_explanations_flag_writes_verified_one_to_one_bundle(
     tmp_path,

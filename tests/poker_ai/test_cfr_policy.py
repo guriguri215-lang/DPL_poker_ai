@@ -14,9 +14,11 @@ from poker_ai.cfr_policy import (
     CfrRiverNoFacingPolicyProvider,
     CfrRiverPolicyConfig,
     CfrRiverPolicyProvider,
+    CfrRiverR001NoFacingPolicyProvider,
     exact_oop_start_action_evs,
 )
 from poker_ai.decision import Observation
+from poker_ai.opponent import load_r001_fixture_synthesis
 from poker_ai.scenario import Scenario
 from poker_core.state_cluster import classify_board
 
@@ -128,6 +130,31 @@ def test_r007_no_facing_provider_returns_start_policy_and_exact_action_evs():
     assert all(math.isfinite(value) for value in selected.decision_action_ev.values())
     assert "phase=start" in provider.config_ref().path
     assert "public_bet=BET_33" in provider.config_ref().path
+
+
+def test_r001_no_facing_provider_reuses_frozen_bet_fraction_and_exact_action_evs():
+    obs = _observation("OOP", facing_bet=0.0)
+    fixture = load_r001_fixture_synthesis()
+    provider = CfrRiverR001NoFacingPolicyProvider(
+        CfrRiverPolicyConfig(iterations=5, average_delay=0, checkpoints=()),
+        bet_fraction=fixture.bet_fraction,
+        equilibrium_version=fixture.equilibrium_version,
+        equilibrium_artifact_sha256=fixture.equilibrium_artifact_sha256,
+    )
+
+    selected = provider.policy_for(obs, state_cluster=classify_board(obs.board))
+    hero_entry = next(entry for entry in selected.strategy_table.entries if entry.combo == "AhAd")
+    solver_ref = provider.config_ref()
+
+    assert fixture.bet_fraction == pytest.approx(0.75)
+    assert set(hero_entry.policy) == {"CHECK", "BET_75"}
+    assert selected.decision_action_ev is not None
+    assert set(selected.decision_action_ev) == {"CHECK", "BET_75"}
+    assert all(math.isfinite(value) for value in selected.decision_action_ev.values())
+    assert "public_bet=BET_75" in solver_ref.path
+    assert "bet_fraction=0.75" in solver_ref.path
+    assert f"equilibrium={fixture.equilibrium_version}" in solver_ref.path
+    assert f"artifact={fixture.equilibrium_artifact_sha256}" in solver_ref.path
 
 
 def test_r007_no_facing_provider_rejects_ip_hero():

@@ -17,12 +17,19 @@ the separate, clearly-named :meth:`act` method, which Hero is never handed.
 from __future__ import annotations
 
 import math
+import random
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from poker_core.range_model import Range
 
+if TYPE_CHECKING:
+    from opponents.ground_truth import TrueLeakMeasurement
+    from opponents.synthesis import SynthesizedOpponent
+
 JAM_ALL_OPPONENT_ID = "stub_jam_all"
 CHECK_BACK_OPPONENT_ID = "stub_check_back_all"
+R001_FIXTURE_OPPONENT_ID = "nl-train-r001-d016-s102"
 STUB_OPPONENT_VERSION = "0.1.0"
 
 
@@ -76,19 +83,85 @@ class OpponentAnswerKey:
 
 
 def reveal_stub_opponent_answer_key(*, opponent_model_id: str) -> OpponentAnswerKey:
-    """Reveal the fixed stub policy for environment-side post-session evaluation.
+    """Reveal the fixture policy for environment-side post-session evaluation.
 
     Session orchestration calls this only after every Hero decision has completed.
     Hero decision code is never given this value or this function.
     """
 
-    action_probabilities = (
-        (("CHECK", 1.0),) if opponent_model_id == CHECK_BACK_OPPONENT_ID else (("BET_ALL_IN", 1.0),)
-    )
+    if opponent_model_id == CHECK_BACK_OPPONENT_ID:
+        action_probabilities = (("CHECK", 1.0),)
+    elif opponent_model_id == R001_FIXTURE_OPPONENT_ID:
+        measurement = r001_fixture_measurement()
+        fold_probability = float(measurement.opponent_rate)
+        action_probabilities = (
+            ("CALL", 1.0 - fold_probability),
+            ("FOLD", fold_probability),
+        )
+    else:
+        action_probabilities = (("BET_ALL_IN", 1.0),)
     return OpponentAnswerKey(
         opponent_model_id=opponent_model_id,
         action_probabilities=action_probabilities,
     )
+
+
+def load_r001_fixture_synthesis() -> SynthesizedOpponent:
+    """Load the pinned Training R001 fixture through the existing catalog."""
+
+    from opponents.catalog import load_training_catalog
+    from opponents.synthesis import synthesize_opponent
+
+    matches = tuple(
+        config
+        for config in load_training_catalog()
+        if config.opponent_id == R001_FIXTURE_OPPONENT_ID
+    )
+    if len(matches) != 1:
+        raise ValueError("pinned R001 fixture opponent must resolve exactly once")
+    synthesized = synthesize_opponent(config=matches[0])
+    if synthesized.config.leak_vector != (("LEAK_R001", "0.16"),):
+        raise ValueError("pinned R001 fixture leak vector changed")
+    return synthesized
+
+
+def r001_fixture_measurement(
+    synthesized: SynthesizedOpponent | None = None,
+) -> TrueLeakMeasurement:
+    """Derive R001 baseline and response rates through existing ground truth."""
+
+    from opponents.ground_truth import extract_true_leaks
+
+    fixture = synthesized or load_r001_fixture_synthesis()
+    measurements = extract_true_leaks(
+        fixture.game,
+        fixture.equilibrium_strategy,
+        fixture.strategy,
+        fixture.config,
+    )
+    if len(measurements) != 1:
+        raise ValueError("pinned R001 fixture must expose exactly one leak measurement")
+    measurement = measurements[0]
+    if (
+        measurement.reason_id != "LEAK_R001"
+        or measurement.phase != "vs_bet"
+        or measurement.action != "FOLD"
+    ):
+        raise ValueError("pinned R001 fixture mapping changed")
+    return measurement
+
+
+def sample_r001_fixture_response(
+    *,
+    fold_probability: float,
+    rng: random.Random,
+) -> OpponentAction:
+    """Environment-only FOLD/CALL sample after a realised Hero BET_75."""
+
+    if not math.isfinite(fold_probability) or not 0.0 <= fold_probability <= 1.0:
+        raise ValueError("R001 fold_probability must be finite and in [0, 1]")
+    action = "FOLD" if rng.random() < fold_probability else "CALL"
+    return OpponentAction(action=action, bet_size=0.0)
 
 
 @dataclass

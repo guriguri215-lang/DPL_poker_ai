@@ -19,7 +19,7 @@ from typing import Any
 
 import opponents.ground_truth as ground_truth_module
 import opponents.synthesis as synthesis_module
-from poker_ai.exploit import LEAK_NODELOCK_MAPPINGS
+from poker_ai.exploit import nodelock_mapping_for_reason
 from poker_ai.leak import LeakDetectorConfig, default_action_baseline_table
 from poker_core.reason_ontology import get_ontology
 
@@ -380,7 +380,7 @@ def build_r008_component_source_payloads() -> dict[str, dict[str, Any]]:
     baseline = baseline_matches[0]
     ground_phase, ground_action = ground_truth_module._GROUND_TRUTH_TARGETS["LEAK_R008"]
     synthesis = synthesis_module._LEAK_MAPPINGS["LEAK_R008"]
-    provider = LEAK_NODELOCK_MAPPINGS["LEAK_R008"]
+    provider = nodelock_mapping_for_reason("LEAK_R008")
 
     raw_by_role: dict[str, dict[str, Any]] = {
         "reason_ontology": {

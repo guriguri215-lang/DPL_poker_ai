@@ -55,6 +55,7 @@ class FrozenEquilibrium:
 
     equilibrium_version: str
     artifact_sha256: str
+    bet_fraction: float
     game: Game
     strategy: StrategyProfile
     solver_provenance: dict[str, object]
@@ -105,7 +106,7 @@ def load_frozen_equilibrium(
     if actual_sha256 != expected_sha256:
         raise ValueError("equilibrium artifact content does not match opponent config SHA-256")
 
-    game = _build_game(payload["game"])
+    game, bet_fraction = _build_game(payload["game"])
     strategy = _parse_strategy(payload["strategy"])
     validate_profile(game, strategy)
     solver = payload["solver"]
@@ -121,13 +122,14 @@ def load_frozen_equilibrium(
     return FrozenEquilibrium(
         equilibrium_version=equilibrium_version,
         artifact_sha256=actual_sha256,
+        bet_fraction=bet_fraction,
         game=game,
         strategy=strategy,
         solver_provenance=dict(solver),
     )
 
 
-def _build_game(payload: object) -> Game:
+def _build_game(payload: object) -> tuple[Game, float]:
     _require_fields(payload, _GAME_FIELDS, "equilibrium game")
     if payload["builder"] != "poker_solver.river_tree.build_river_game":
         raise ValueError("unsupported equilibrium game builder")
@@ -141,11 +143,15 @@ def _build_game(payload: object) -> Game:
     )
     if pot <= 0 or bet_fraction <= 0:
         raise ValueError("equilibrium game pot and bet_fraction must be positive")
-    return build_river_game(
-        RiverBettingConfig(pot=float(pot), bet_fraction=float(bet_fraction)),
-        _parse_range(payload["oop_range"], field="equilibrium game oop_range"),
-        _parse_range(payload["ip_range"], field="equilibrium game ip_range"),
-        payload["board"],
+    parsed_bet_fraction = float(bet_fraction)
+    return (
+        build_river_game(
+            RiverBettingConfig(pot=float(pot), bet_fraction=parsed_bet_fraction),
+            _parse_range(payload["oop_range"], field="equilibrium game oop_range"),
+            _parse_range(payload["ip_range"], field="equilibrium game ip_range"),
+            payload["board"],
+        ),
+        parsed_bet_fraction,
     )
 
 

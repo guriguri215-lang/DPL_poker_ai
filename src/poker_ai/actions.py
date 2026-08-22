@@ -26,6 +26,9 @@ NO_FACING_ACTIONS: tuple[str, ...] = ("CHECK", "BET_33", "BET_75")
 #: the always-stack-feasible 0.33-pot branch and does not add a raise branch.
 R007_NO_FACING_ACTIONS: tuple[str, ...] = ("CHECK", "BET_33")
 
+#: The bounded no-facing action set used by the explicit R001 Hero fixture.
+R001_NO_FACING_ACTIONS: tuple[str, ...] = ("CHECK", "BET_75")
+
 #: Actions available when Hero faces a (non all-in) bet. Phase 3 scores RAISE.
 FACING_ACTIONS: tuple[str, ...] = ("FOLD", "CALL", "RAISE_ALL_IN")
 
@@ -51,9 +54,11 @@ def legal_actions(
     """
     if not facing_bet and no_facing_bet_action == "BET_33":
         return R007_NO_FACING_ACTIONS
+    if not facing_bet and no_facing_bet_action == "BET_75":
+        return R001_NO_FACING_ACTIONS
     if not facing_bet:
         raise NotImplementedError(
-            "no-facing decisions require the bounded BET_33 river adapter; "
+            "no-facing decisions require a bounded BET_33 or BET_75 river adapter; "
             "the generic no-facing vocabulary is not scored"
         )
     if not bet_is_all_in:

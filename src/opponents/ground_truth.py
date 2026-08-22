@@ -8,7 +8,11 @@ from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 from poker_solver.game import Chance, Game, Node, Terminal
 from poker_solver.strategy import StrategyProfile, validate_profile
 
-from .model import OpponentModelConfig
+from .model import LEAK_ACTION_MAPPINGS, OpponentModelConfig, leak_action_mapping
+
+# Phase 6's existing cross-component extractor introspects this private name.
+# Keep it as the same canonical object, not a separately authored semantics table.
+_GROUND_TRUTH_TARGETS = LEAK_ACTION_MAPPINGS
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,14 +38,6 @@ class IndependentActionRate:
     opportunity_reach: Decimal
 
 
-_GROUND_TRUTH_TARGETS: dict[str, tuple[str, str]] = {
-    "LEAK_R001": ("vs_bet", "FOLD"),
-    "LEAK_R002": ("vs_bet", "CALL"),
-    "LEAK_R007": ("vs_check", "CHECK"),
-    "LEAK_R008": ("vs_check", "BET"),
-}
-
-
 def extract_true_leaks(
     game: Game,
     baseline_profile: StrategyProfile,
@@ -61,7 +57,8 @@ def extract_true_leaks(
 
     measurements: list[TrueLeakMeasurement] = []
     for reason_id, _requested_delta in config.leak_vector:
-        phase, action = _GROUND_TRUTH_TARGETS[reason_id]
+        mapping = leak_action_mapping(reason_id)
+        phase, action = mapping.phase, mapping.action
         baseline_rate = _aggregate_rate(
             game,
             baseline_profile,
@@ -106,13 +103,14 @@ def extract_independent_action_rates(
     validate_profile(game, profile)
     if not reason_ids or len(set(reason_ids)) != len(reason_ids):
         raise ValueError("reason_ids must be non-empty and unique")
-    unknown = set(reason_ids) - set(_GROUND_TRUTH_TARGETS)
+    unknown = set(reason_ids) - set(LEAK_ACTION_MAPPINGS)
     if unknown:
         raise ValueError(f"unsupported ground-truth reasons {sorted(unknown)}")
     reaches = _decimal_infoset_reach(game.root, profile)
     measurements: list[IndependentActionRate] = []
     for reason_id in reason_ids:
-        phase, action = _GROUND_TRUTH_TARGETS[reason_id]
+        mapping = leak_action_mapping(reason_id)
+        phase, action = mapping.phase, mapping.action
         action_rate, opportunity_reach = _aggregate_rate_and_reach(
             game,
             profile,
