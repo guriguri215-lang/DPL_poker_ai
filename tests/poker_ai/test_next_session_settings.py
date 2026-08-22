@@ -241,6 +241,300 @@ def test_r007_two_session_handoff_restores_settings_and_solver_provenance(tmp_pa
     assert verify_saved_explanation_bundle(manifest_path).checker_total == len(logs)
 
 
+def test_r001_two_session_handoff_is_verified_causal_and_pinned(tmp_path, monkeypatch):
+    action_keys = frozenset({"CHECK", "BET_75"})
+    opponent_id = "nl-train-r001-d016-s102"
+    baseline_version = "river-large-bet-equilibrium-v1-r001-action-baseline"
+    observed_action_contracts: list[dict[str, object]] = []
+    revealed_opponent_ids: list[str] = []
+
+    class RecordingNodelockExploitProvider(NodelockExploitProvider):
+        def build(
+            self,
+            *,
+            base_policy,
+            detected_leaks,
+            legal_actions,
+            action_ev,
+            observation=None,
+        ):
+            result = super().build(
+                base_policy=base_policy,
+                detected_leaks=detected_leaks,
+                legal_actions=legal_actions,
+                action_ev=action_ev,
+                observation=observation,
+            )
+            assert observation is not None
+            observed_action_contracts.append(
+                {
+                    "session_id": observation.session_id,
+                    "legal_actions": frozenset(legal_actions),
+                    "base_policy": frozenset(base_policy),
+                    "action_ev": frozenset(action_ev),
+                    "exploit_policy": frozenset(result.policy),
+                    "nodelock_action_ev": (
+                        None
+                        if result.decision_action_ev is None
+                        else frozenset(result.decision_action_ev)
+                    ),
+                }
+            )
+            return result
+
+    real_reveal_answer_key = run_session_cli.reveal_stub_opponent_answer_key
+
+    def record_revealed_answer_key(*, opponent_model_id: str):
+        revealed_opponent_ids.append(opponent_model_id)
+        return real_reveal_answer_key(opponent_model_id=opponent_model_id)
+
+    monkeypatch.setattr(
+        run_session_cli,
+        "NodelockExploitProvider",
+        RecordingNodelockExploitProvider,
+    )
+    monkeypatch.setattr(
+        run_session_cli,
+        "reveal_stub_opponent_answer_key",
+        record_revealed_answer_key,
+    )
+
+    source_seed = 20260000
+    source_root = tmp_path / "r001-source"
+    source_manifest_path = _run_explanation_bundle(
+        source_root,
+        seed=source_seed,
+        hands=20,
+        leaky=True,
+        leaky_reason="LEAK_R001",
+        solver_iterations=5,
+        epsilon=1.0,
+    )
+    source_logs = _dpls(source_root, source_seed)
+    source_manifest = _manifest(source_manifest_path)
+    source_estimator = _estimator(source_root)
+    source_baseline = json.loads(
+        (source_root / "provenance/action_baseline_table.json").read_bytes()
+    )
+    source_snapshot = json.loads(
+        (source_root / "provenance/action_stats_terminal_snapshots.json").read_bytes()
+    )
+    source_evaluation = json.loads(
+        (source_root / f"S{source_seed:08d}.post_session_evaluation.json").read_bytes()
+    )
+    source_bundle_before_handoff = snapshot_bundle(source_root)
+    source_saved = verify_saved_explanation_bundle(source_manifest_path)
+    restored = load_next_session_settings(source_manifest_path)
+    restored_payload = restored.to_payload()
+
+    assert source_saved.dpl_count == source_saved.explanation_count == len(source_logs)
+    assert source_saved.checker_total == source_saved.checker_passed == len(source_logs)
+    assert set(restored_payload) == {"leak_detector_config", "safety_alpha", "epsilon"}
+    assert source_evaluation["next_session_settings"] == restored_payload
+    assert restored.leak_detector_config.min_deviation == pytest.approx(0.08)
+    assert restored.leak_detector_config.min_confidence == pytest.approx(0.5)
+    assert restored.leak_detector_config.rule_exploit_min_confidence == pytest.approx(0.95)
+    assert restored.leak_detector_config.nodelock_exploit_min_confidence == pytest.approx(0.95)
+    assert restored.safety_alpha == restored.epsilon == 1.0
+
+    successor_seed = 20260012
+    successor_root = tmp_path / "r001-successor"
+    raw_argv = [
+        "--seed",
+        str(successor_seed),
+        "--hands",
+        "20",
+        "--solver-iterations",
+        "5",
+        "--leaky-fixture",
+        "--leaky-fixture-reason",
+        "LEAK_R001",
+        "--explanations",
+        "--previous-session-manifest",
+        str(source_manifest_path),
+        "--out-dir",
+        str(successor_root),
+    ]
+
+    assert run_session_cli.main(raw_argv) == 0
+    assert snapshot_bundle(source_root) == source_bundle_before_handoff
+
+    successor_logs = _dpls(successor_root, successor_seed)
+    successor_manifest_path = successor_root / f"S{successor_seed:08d}.manifest.json"
+    successor_manifest = _manifest(successor_manifest_path)
+    successor_estimator = _estimator(successor_root)
+    successor_baseline = json.loads(
+        (successor_root / "provenance/action_baseline_table.json").read_bytes()
+    )
+    successor_snapshot = json.loads(
+        (successor_root / "provenance/action_stats_terminal_snapshots.json").read_bytes()
+    )
+    successor_evaluation = json.loads(
+        (successor_root / f"S{successor_seed:08d}.post_session_evaluation.json").read_bytes()
+    )
+
+    assert source_manifest.run_id == f"S{source_seed:08d}"
+    assert successor_manifest.run_id == f"S{successor_seed:08d}"
+    assert successor_manifest.run_id != source_manifest.run_id
+    assert successor_manifest.code.argv == raw_argv
+    assert "session_mode=r001_no_facing" in source_manifest.description
+    assert "session_mode=r001_no_facing" in successor_manifest.description
+    assert successor_logs[0].detected_leaks == []
+    assert source_estimator["run_identity"]["seeds"] == [source_seed]
+    assert successor_estimator["run_identity"]["seeds"] == [successor_seed]
+    assert successor_estimator["run_identity"]["horizon"] == len(successor_logs)
+    assert successor_estimator["run_identity"]["opponent_ids"] == [opponent_id]
+
+    prior_bets: dict[str, int] = {}
+    for log in successor_logs:
+        for leak in log.detected_leaks:
+            assert leak.reason_id == "LEAK_R001"
+            assert leak.situation_key.endswith(":IP:river_vs_bet")
+            assert leak.effective_sample_size == prior_bets.get(leak.situation_key, 0)
+        if log.selected_action == "BET_75":
+            situation_key = f"{log.state_cluster}:IP:river_vs_bet"
+            prior_bets[situation_key] = prior_bets.get(situation_key, 0) + 1
+
+    source_observations = sum(record["n"] for record in source_snapshot["records"])
+    successor_observations = sum(record["n"] for record in successor_snapshot["records"])
+    successor_bets = sum(log.selected_action == "BET_75" for log in successor_logs)
+    successor_checks = sum(log.selected_action == "CHECK" for log in successor_logs)
+    assert source_observations > 0
+    assert successor_observations == successor_bets == sum(prior_bets.values())
+    assert successor_observations < source_observations + successor_bets
+    assert successor_bets > 0
+    assert successor_checks > 0
+    assert all(record["seed"] == successor_seed for record in successor_snapshot["records"])
+    assert all(record["opponent_id"] == opponent_id for record in successor_snapshot["records"])
+    assert all(record["rule_id"] == "LEAK_R001" for record in successor_snapshot["records"])
+    assert all(record["action_group"] == ["FOLD"] for record in successor_snapshot["records"])
+    assert all(
+        set(record["action_counts"]) <= {"FOLD", "CALL"}
+        and sum(record["action_counts"].values()) == record["n"]
+        for record in successor_snapshot["records"]
+    )
+
+    assert source_baseline == successor_baseline
+    assert successor_baseline["table_version"] == baseline_version
+    assert successor_baseline["rules"][0]["reason_id"] == "LEAK_R001"
+    assert successor_baseline["rules"][0]["action_group"] == ["FOLD"]
+    assert source_manifest.versions.baseline_table_version == baseline_version
+    assert successor_manifest.versions.baseline_table_version == baseline_version
+    assert successor_estimator["tau"] == restored.leak_detector_config.min_deviation == 0.08
+    assert successor_estimator["method_version"] == restored.leak_detector_config.method_version
+    assert successor_estimator["alpha0"] == restored.leak_detector_config.alpha0
+    assert successor_estimator["beta0"] == restored.leak_detector_config.beta0
+    assert successor_estimator["tail"] == restored.leak_detector_config.tail
+    assert successor_estimator["min_effective_sample_size"] == (
+        restored.leak_detector_config.min_effective_sample_size
+    )
+    assert successor_estimator["detector_min_confidence"] == (
+        restored.leak_detector_config.min_confidence
+    )
+    assert successor_estimator["rule_exploit_min_confidence"] == (
+        restored.leak_detector_config.rule_exploit_min_confidence
+    )
+    assert successor_estimator["nodelock_exploit_min_confidence"] == (
+        restored.leak_detector_config.nodelock_exploit_min_confidence
+    )
+    assert all(log.safety_alpha == restored.safety_alpha for log in successor_logs)
+    assert _execution_sampler(successor_manifest).path == "inline:epsilon-uniform-v1:epsilon=1"
+
+    assert source_manifest.opponents == successor_manifest.opponents
+    opponent = successor_manifest.opponents[0]
+    assert opponent.opponent_id == opponent_id
+    assert opponent.split == "training"
+    assert opponent.config is not None
+    assert opponent.config.path == "nl-train-r001-d016-s102.opponent.json"
+
+    all_logs = [*source_logs, *successor_logs]
+    assert len(observed_action_contracts) == len(all_logs)
+    for log in all_logs:
+        assert set(log.base_policy) == action_keys
+        assert set(log.exploit_policy) == action_keys
+        assert set(log.final_policy) == action_keys
+        assert log.execution_sampling is not None
+        assert set(log.execution_sampling.epsilon_distribution) == action_keys
+        assert set(log.execution_sampling.execution_policy) == action_keys
+        assert log.selected_action in action_keys
+        assert log.ev_estimate.ev_source == "solver_exact"
+        assert log.ev_estimate.ev_definition == "incremental_ev_from_current_node"
+    for contract in observed_action_contracts:
+        assert contract["legal_actions"] == action_keys
+        assert contract["base_policy"] == action_keys
+        assert contract["action_ev"] == action_keys
+        assert contract["exploit_policy"] == action_keys
+        if contract["nodelock_action_ev"] is not None:
+            assert contract["nodelock_action_ev"] == action_keys
+
+    exact_nodelock_sessions = {
+        contract["session_id"]
+        for contract in observed_action_contracts
+        if contract["nodelock_action_ev"] is not None
+    }
+    assert exact_nodelock_sessions == {source_manifest.run_id, successor_manifest.run_id}
+    source_solver_ref = next(
+        config for config in source_manifest.configs if config.role == "solver"
+    )
+    successor_solver_ref = next(
+        config for config in successor_manifest.configs if config.role == "solver"
+    )
+    assert source_solver_ref == successor_solver_ref
+    assert "public_bet=BET_75" in successor_solver_ref.path
+    assert "bet_fraction=0.75" in successor_solver_ref.path
+    assert "equilibrium=river-large-bet-equilibrium-v1" in successor_solver_ref.path
+    assert (
+        "artifact=e463a8651412b9569334f27c5fe23d95be7e68f6c6d32d377857bfbf3105aa74"
+        in successor_solver_ref.path
+    )
+    assert all(
+        log.base_strategy_provenance.solver_config_sha256 == successor_solver_ref.sha256
+        for log in successor_logs
+    )
+
+    solver_logs = [
+        (index, log)
+        for index, log in enumerate(successor_logs)
+        if log.exploit_source == "nodelock_solver"
+    ]
+    assert solver_logs
+    for index, log in solver_logs:
+        assert index > 0
+        leak = log.detected_leaks[0]
+        assert leak.reason_id == "LEAK_R001"
+        assert leak.effective_sample_size > 0
+        assert leak.confidence >= restored.leak_detector_config.nodelock_exploit_min_confidence
+        assert leak.observed_rate - leak.baseline_rate >= 0.08
+        assert log.solver_result_id is not None
+        assert "allocation=baseline_scaled" in log.solver_result_id
+        assert "lock_mode=HARD" in log.solver_result_id
+        assert "unlocked_policy_mode=fix_to_baseline" in log.solver_result_id
+        assert log.ev_estimate.exploit_ev > log.ev_estimate.base_ev
+
+    for manifest_path, evaluation, logs in (
+        (source_manifest_path, source_evaluation, source_logs),
+        (successor_manifest_path, successor_evaluation, successor_logs),
+    ):
+        manifest = _manifest(manifest_path)
+        assert evaluation["evaluation"]["session_id"] == manifest.run_id
+        assert evaluation["evaluation"]["opponent_model_id"] == opponent_id
+        assert evaluation["evaluation"]["explanation_validity_score"] == 1.0
+        assert set(evaluation["next_session_settings"]) == {
+            "leak_detector_config",
+            "safety_alpha",
+            "epsilon",
+        }
+        saved = verify_saved_explanation_bundle(manifest_path)
+        assert saved.dpl_count == saved.explanation_count == len(logs)
+        assert saved.checker_total == saved.checker_passed == len(logs)
+
+    assert (
+        load_next_session_settings(successor_manifest_path).to_payload()
+        == (successor_evaluation["next_session_settings"])
+    )
+    assert revealed_opponent_ids == [opponent_id, opponent_id]
+
+
 def test_r007_cross_mode_handoff_restores_only_settings(
     tmp_path,
     maintained_source_manifest,
