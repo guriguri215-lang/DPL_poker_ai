@@ -112,10 +112,11 @@ def test_manual_and_automated_post_publication_checks_are_documented() -> None:
         assert "cannot undo a publication" in document
 
 
-def test_release_notes_contract_covers_r001_slice_and_alpha_limitations() -> None:
+def test_release_notes_contract_covers_r001_r002_parity_and_alpha_limitations() -> None:
     runbook = _normalized("docs/releasing.md")
     for required in (
         "`--leaky-fixture-reason LEAK_R001`",
+        "`--leaky-fixture-reason LEAK_R002`",
         "explicit `--leaky-fixture` opt-in",
         "ordinary session, bare `--leaky-fixture`, R007, and R008 defaults",
         "OOP `CHECK` and fixed `BET_75`",
@@ -123,16 +124,23 @@ def test_release_notes_contract_covers_r001_slice_and_alpha_limitations() -> Non
         "records FOLD/CALL only after Hero actually chose `BET_75`",
         "zero opportunity after `CHECK`",
         "available only to later hands rather than the same decision",
-        "pinned baseline provenance",
-        "HARD/fix-to-baseline opponent/IP/vs_bet/FOLD",
-        "exact current-node action EV",
+        "complementary CALL baseline",
+        "content-hashed noncatalog",
+        "HARD/fix-to-baseline opponent/IP/vs_bet/CALL",
+        "exact current-node CHECK/BET_75 action EV",
+        "strictly improves by more than the existing `1e-12 bb` tolerance",
         "DPL v3",
         "saved-bundle verification",
         "Invalid CLI combinations fail before an output directory is created",
-        "existing release smoke remains unchanged",
+        "release smoke adds R001/R002 release-surface parity",
+        "verified R002 two-session handoff",
+        "source checkout, unpacked wheel, and unpacked sdist",
+        "leaves the source bundle unchanged",
+        "restores only the existing settings",
+        "reselects R002",
         "saved explanation-bundle checks",
         "R007/R008 smoke",
-        "R001 end-to-end fixture checks run in the repository CI",
+        "no copied JSON",
         "no new dependency, entry point, schema, default, solver public API",
         "arbitrary bet-size parameter",
         "automatic session loop",

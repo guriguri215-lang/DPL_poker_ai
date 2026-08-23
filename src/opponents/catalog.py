@@ -3,11 +3,37 @@
 from __future__ import annotations
 
 import json
+from importlib import metadata
 from pathlib import Path
 
 from .model import OpponentModelConfig, OpponentSplit
 
-DEFAULT_CATALOG_ROOT = Path(__file__).resolve().parents[2] / "configs" / "opponents"
+_DISTRIBUTION_NAME = "poker-xai"
+_CATALOG_ANCHOR = "configs/opponents/training/nl-train-r001-d016-s102.opponent.json"
+
+
+def _default_catalog_root() -> Path:
+    """Resolve the tracked catalog in a source tree, sdist, wheel, or installation."""
+
+    repository_root = Path(__file__).resolve().parents[2] / "configs" / "opponents"
+    if repository_root.is_dir():
+        return repository_root
+
+    try:
+        distribution = metadata.distribution(_DISTRIBUTION_NAME)
+    except metadata.PackageNotFoundError:
+        return repository_root
+    anchors = [
+        Path(distribution.locate_file(entry)).resolve()
+        for entry in distribution.files or ()
+        if entry.as_posix().endswith(_CATALOG_ANCHOR)
+    ]
+    if len(anchors) == 1 and anchors[0].is_file():
+        return anchors[0].parents[1]
+    return repository_root
+
+
+DEFAULT_CATALOG_ROOT = _default_catalog_root()
 
 
 class TestPoolAccessError(RuntimeError):

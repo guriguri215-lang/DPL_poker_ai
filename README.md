@@ -222,9 +222,9 @@ directory and unrelated installations are never used as substitutes.
 The manifest records `poker-xai-run-session` or `cli/run_session.py` as the
 actual entrypoint and preserves the complete argument vector after the
 entrypoint, before argument parsing. The default river path remains limited to
-facing an all-in. The explicit R007 and R001 fixtures add only their bounded OOP
-`CHECK`/fixed-bet branches above. CFR+ defaults to 40 iterations, which is not a
-convergence guarantee.
+facing an all-in. The explicit R007, R001, and R002 fixtures add only their
+bounded OOP `CHECK`/fixed-bet branches above. CFR+ defaults to 40 iterations,
+which is not a convergence guarantee.
 
 ## Gate B v2 one-shot CLI
 

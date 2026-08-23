@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "poker-xai"
-version = "0.1.0a14"
+version = "0.1.0a15"
 description = "Early-alpha simulation framework for auditable poker decision provenance, bounded CFR experiments, synthetic leaks, and explanation checks"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -45,6 +45,11 @@ where = ["src"]
 [tool.setuptools.package-data]
 poker_core = ["*.yaml"]
 poker_ai = ["*.yaml"]
+
+[tool.setuptools.data-files]
+"configs/opponents/equilibria" = ["configs/opponents/equilibria/*.equilibrium.json"]
+"configs/opponents/training" = ["configs/opponents/training/*.opponent.json"]
+"configs/opponents/validation" = ["configs/opponents/validation/*.opponent.json"]
 
 [tool.ruff]
 line-length = 100

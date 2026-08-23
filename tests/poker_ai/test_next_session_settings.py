@@ -535,6 +535,129 @@ def test_r001_two_session_handoff_is_verified_causal_and_pinned(tmp_path, monkey
     assert revealed_opponent_ids == [opponent_id, opponent_id]
 
 
+def _assert_large_bet_solver_session(
+    root: Path,
+    *,
+    seed: int,
+    reason_id: str,
+    opponent_id: str,
+    improvement_tolerance: float,
+) -> tuple[RunManifest, list[DecisionProvenanceLog], dict[str, object]]:
+    manifest_path = root / f"S{seed:08d}.manifest.json"
+    manifest = _manifest(manifest_path)
+    logs = _dpls(root, seed)
+    baseline = json.loads((root / "provenance/action_baseline_table.json").read_bytes())
+    evaluation = json.loads((root / f"S{seed:08d}.post_session_evaluation.json").read_bytes())
+    assert manifest.opponents[0].opponent_id == opponent_id
+    assert f"session_mode={reason_id.removeprefix('LEAK_').lower()}_no_facing" in (
+        manifest.description
+    )
+    assert baseline["rules"][0]["reason_id"] == reason_id
+    assert logs[0].detected_leaks == []
+    assert all(set(log.base_policy) == {"CHECK", "BET_75"} for log in logs)
+    assert all(set(log.exploit_policy) == {"CHECK", "BET_75"} for log in logs)
+    assert all(set(log.final_policy) == {"CHECK", "BET_75"} for log in logs)
+    assert all(
+        log.ev_estimate.ev_source == "solver_exact"
+        and log.ev_estimate.ev_definition == "incremental_ev_from_current_node"
+        for log in logs
+    )
+    solver_logs = [log for log in logs if log.exploit_source == "nodelock_solver"]
+    assert solver_logs
+    for log in solver_logs:
+        assert [leak.reason_id for leak in log.detected_leaks] == [reason_id]
+        assert log.solver_result_id is not None
+        assert "allocation=baseline_scaled" in log.solver_result_id
+        assert "lock_mode=HARD" in log.solver_result_id
+        assert "unlocked_policy_mode=fix_to_baseline" in log.solver_result_id
+        assert log.ev_estimate.exploit_ev > log.ev_estimate.base_ev + improvement_tolerance
+    saved = verify_saved_explanation_bundle(manifest_path)
+    assert saved.dpl_count == saved.explanation_count == len(logs)
+    assert saved.checker_total == saved.checker_passed == len(logs)
+    assert evaluation["evaluation"]["session_id"] == manifest.run_id
+    assert evaluation["evaluation"]["opponent_model_id"] == opponent_id
+    assert evaluation["evaluation"]["explanation_validity_score"] == 1.0
+    return manifest, logs, evaluation
+
+
+@pytest.mark.parametrize(
+    (
+        "reason_id",
+        "source_hands",
+        "successor_hands",
+        "opponent_id",
+        "improvement_tolerance",
+    ),
+    [
+        ("LEAK_R001", 20, 20, "nl-train-r001-d016-s102", 0.0),
+        ("LEAK_R002", 40, 80, "fixture-r002-d016-s102", 1e-12),
+    ],
+)
+def test_large_bet_two_session_handoff_restores_verified_solver_route(
+    tmp_path,
+    reason_id,
+    source_hands,
+    successor_hands,
+    opponent_id,
+    improvement_tolerance,
+):
+    source_seed = 20260000
+    source_root = tmp_path / "source"
+    source_manifest_path = _run_explanation_bundle(
+        source_root,
+        seed=source_seed,
+        hands=source_hands,
+        leaky=True,
+        leaky_reason=reason_id,
+        solver_iterations=5,
+        epsilon=1.0,
+    )
+    restored = load_next_session_settings(source_manifest_path)
+    source_before_handoff = snapshot_bundle(source_root)
+    source_manifest, _source_logs, source_evaluation = _assert_large_bet_solver_session(
+        source_root,
+        seed=source_seed,
+        reason_id=reason_id,
+        opponent_id=opponent_id,
+        improvement_tolerance=improvement_tolerance,
+    )
+
+    successor_seed = 20260012
+    successor_root = tmp_path / "successor"
+    successor_argv = [
+        "--seed",
+        str(successor_seed),
+        "--hands",
+        str(successor_hands),
+        "--solver-iterations",
+        "5",
+        "--leaky-fixture",
+        "--leaky-fixture-reason",
+        reason_id,
+        "--explanations",
+        "--previous-session-manifest",
+        str(source_manifest_path),
+        "--out-dir",
+        str(successor_root),
+    ]
+    assert run_session_cli.main(successor_argv) == 0
+    assert snapshot_bundle(source_root) == source_before_handoff
+    successor_manifest, successor_logs, successor_evaluation = _assert_large_bet_solver_session(
+        successor_root,
+        seed=successor_seed,
+        reason_id=reason_id,
+        opponent_id=opponent_id,
+        improvement_tolerance=improvement_tolerance,
+    )
+    assert successor_manifest.code.argv == successor_argv
+    assert source_manifest.opponents == successor_manifest.opponents
+    assert source_manifest.versions == successor_manifest.versions
+    assert all(log.safety_alpha == restored.safety_alpha for log in successor_logs)
+    assert _execution_sampler(successor_manifest).path == "inline:epsilon-uniform-v1:epsilon=1"
+    assert source_evaluation["next_session_settings"] == restored.to_payload()
+    assert successor_evaluation["next_session_settings"] == restored.to_payload()
+
+
 def test_r007_cross_mode_handoff_restores_only_settings(
     tmp_path,
     maintained_source_manifest,
