@@ -37,7 +37,7 @@ safety, GTO status, solver convergence, or EV superiority.
   HARD node locks, deterministic template explanations, source-DPL checks, and
   post-session answer-key evaluation with a conservative next-setting artifact.
 - **Experimental and bounded**: heads-up river facing-all-in sessions, plus
-  explicit offline R007 `CHECK`/`BET_33` and R001 `CHECK`/`BET_75` fixtures,
+  explicit offline R007 `CHECK`/`BET_33` and R001/R002 `CHECK`/`BET_75` fixtures,
   with finite-iteration combo- and position-specific policies. They have no
   convergence, exact-equilibrium, or GTO certificate.
 - **Unavailable**: live input, screen scraping, poker-site APIs, and real-money
@@ -118,8 +118,8 @@ negatives and under-adjustment do not automatically increase aggression.
 Generation is LLM-free, network-free, and adds no dependency or DPL/RunManifest
 schema change.
 
-The same entry point has explicit R007 and R001 fixtures that reach the existing
-river tree's OOP no-facing node. R007 uses the fixed 0.33-pot branch:
+The same entry point has explicit R007, R001, and R002 fixtures that reach the
+existing river tree's OOP no-facing node. R007 uses the fixed 0.33-pot branch:
 
 ```bash
 poker-xai-run-session --seed 20260704 --hands 5 --solver-iterations 5 --leaky-fixture --leaky-fixture-reason LEAK_R007 --exploration-epsilon 1.0 --explanations --out-dir experiments_output/r007
@@ -137,18 +137,39 @@ versioned training fixture `nl-train-r001-d016-s102`:
 poker-xai-run-session --seed 20260000 --hands 20 --solver-iterations 5 --leaky-fixture --leaky-fixture-reason LEAK_R001 --exploration-epsilon 1.0 --explanations --out-dir experiments_output/r001
 ```
 
-Hero can select only `CHECK` or fixed 0.75-pot `BET_75`. The environment records
-the synthesized opponent's `FOLD`/`CALL` response only after a realised
-`BET_75`; `CHECK` leaves a zero-opportunity record. A response can affect later
-hands but not the decision that produced it. The detector baseline comes from
-the same versioned equilibrium, and an eligible exploit reuses the existing
-opponent/IP/`vs_bet`/`FOLD` HARD `fix_to_baseline` node lock. With
+Hero can select only `CHECK` or fixed 0.75-pot `BET_75`. Choose R001 when you
+want an opponent whose IP `FOLD` rate is 0.16 above the equilibrium baseline.
+The environment records the synthesized opponent's `FOLD`/`CALL` response only
+after a realised `BET_75`; a response can affect later hands but not the
+decision that produced it. An eligible exploit reuses the existing
+opponent/IP/`vs_bet`/`FOLD` HARD `fix_to_baseline` node lock.
+
+Choose R002 for the complementary overcall experiment at the same node. It uses
+an in-memory, content-hashed noncatalog fixture whose IP `CALL` rate is 0.16
+above the same equilibrium's CALL baseline:
+
+```bash
+poker-xai-run-session --seed 20260000 --hands 40 --solver-iterations 5 --leaky-fixture --leaky-fixture-reason LEAK_R002 --exploration-epsilon 1.0 --explanations --out-dir experiments_output/r002
+```
+
+R002 changes neither the Phase 6 catalog nor the available Hero actions. Its
+response is sampled only after Hero actually chooses `BET_75`, and its eligible
+solver candidate locks opponent/IP/`vs_bet`/`CALL` with `baseline_scaled`,
+`HARD`, and `fix_to_baseline`. The provider accepts that candidate only when its
+locked exact action EV improves on the base by more than the existing `1e-12 bb`
+exact-EV numerical tolerance. `min_decision_ev_delta` remains a configurable
+policy threshold, not a separate provider numerical-tolerance contract.
+
+Here, exact EV means exact terminal traversal of the fixed finite river model
+for the current combo and current `CHECK`/`BET_75` node; later actions follow the
+supplied finite-iteration strategy profile. It does not mean that the profile is
+an exact equilibrium, that CFR+ converged, or that the result is GTO. With
 `--explanations`, the directory contains DPL v3 JSONL, its RunManifest, template
 explanations, verifier summary, post-session evaluation, and the existing
 `provenance/` artifacts. Bare `--leaky-fixture` still selects R008, and all normal,
-R007, R008, alpha, epsilon, and solver defaults are unchanged. These fixtures add
-no arbitrary bet-size option, multi-size tree, raise, schema, dependency, entry
-point, registry, or automatic session loop.
+R007, R008, alpha, epsilon, and solver defaults are unchanged. These fixtures
+add no arbitrary bet-size option, multi-size tree, raise, schema, dependency,
+entry point, registry, or automatic session loop.
 
 Pass that completed session's RunManifest explicitly to make the verified
 settings the defaults for one later normal Hero session:
@@ -275,8 +296,9 @@ Early alpha, simulation-only development. The frozen core contracts now use DPL
 v3 with read-only DPL v1/v2 loading compatibility, alongside the Reason Ontology
 and RunManifest. Normal Hero sessions use CFR+ to produce finite-iteration combo-
 and position-specific policies. The default facing-all-in path remains `vs_bet`;
-R007 explicitly selects OOP `CHECK`/`BET_33`, while R001 explicitly selects OOP
-`CHECK`/the frozen 0.75-pot `BET_75` branch. The default is 40 iterations,
+R007 explicitly selects OOP `CHECK`/`BET_33`, while R001 overfold and R002
+overcall explicitly share OOP `CHECK`/the frozen 0.75-pot `BET_75` branch. The
+default is 40 iterations,
 average delay 0, and no checkpoints. These policies
 have no convergence, exact-equilibrium, or GTO certificate. Leak detection, the
 SafetyMixer convex mixing contract, synthetic HARD node-lock opponent synthesis,

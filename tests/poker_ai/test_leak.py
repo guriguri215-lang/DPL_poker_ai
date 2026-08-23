@@ -20,6 +20,7 @@ from poker_ai.leak import (
     classify_ground_truth_boundary,
     leaky_fixture_action_baseline_table,
     leaky_r001_fixture_action_baseline_table,
+    leaky_r002_fixture_action_baseline_table,
     leaky_r007_fixture_action_baseline_table,
 )
 from poker_ai.observation import ObservationTracker
@@ -27,7 +28,9 @@ from poker_ai.opponent import (
     HiddenStrategyAccessError,
     StubOpponent,
     load_r001_fixture_synthesis,
+    load_r002_fixture_synthesis,
     r001_fixture_measurement,
+    r002_fixture_measurement,
 )
 from poker_core.range_model import Range
 from poker_core.strategy_table import StrategyEntry, StrategyTable
@@ -115,6 +118,24 @@ def test_r001_fixture_baseline_is_derived_from_the_frozen_equilibrium():
     assert rule.baseline_rate == pytest.approx(float(measurement.baseline_rate))
     assert measurement.phase == "vs_bet"
     assert measurement.action == "FOLD"
+
+
+def test_r002_fixture_baseline_is_the_ground_truth_call_rate():
+    fixture = load_r002_fixture_synthesis()
+    measurement = r002_fixture_measurement(fixture)
+    table = leaky_r002_fixture_action_baseline_table()
+
+    assert table.table_version == f"{fixture.equilibrium_version}-r002-action-baseline"
+    assert len(table.rules) == 1
+    rule = table.rules[0]
+    assert rule.reason_id == "LEAK_R002"
+    assert rule.leak_type == "river_large_bet_overcall"
+    assert rule.action_group == ("CALL",)
+    assert rule.baseline_rate == pytest.approx(float(measurement.baseline_rate), abs=1e-12)
+    assert float(measurement.opponent_rate) == pytest.approx(
+        rule.baseline_rate + 0.16,
+        abs=1e-12,
+    )
 
 
 def test_negative_case_below_sample_floor():

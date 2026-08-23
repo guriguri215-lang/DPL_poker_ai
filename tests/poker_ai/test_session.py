@@ -694,7 +694,133 @@ def test_r001_cli_is_causal_and_connects_bet_75_nodelock_and_saved_bundle(
     assert evaluation["next_session_settings"]["leak_detector_config"]["min_deviation"] == 0.08
 
 
-def test_r001_reason_requires_explicit_fixture_and_writes_nothing(tmp_path):
+def test_r002_cli_is_causal_and_connects_call_lock_exact_ev_and_post_session(
+    tmp_path,
+    capsys,
+):
+    from poker_ai.opponent import load_r002_fixture_synthesis, r002_fixture_measurement
+
+    cli = _load_cli_module()
+    raw_argv = [
+        "--seed",
+        "20260000",
+        "--hands",
+        "40",
+        "--solver-iterations",
+        "5",
+        "--leaky-fixture",
+        "--leaky-fixture-reason",
+        "LEAK_R002",
+        "--exploration-epsilon",
+        "1.0",
+        "--explanations",
+        "--out-dir",
+        str(tmp_path),
+    ]
+
+    assert cli.main(raw_argv) == 0
+    stdout = capsys.readouterr().out
+    assert "40 decisions validated against DPL v3" in stdout
+    assert "explanations_verified=40" in stdout
+
+    dpl_path = tmp_path / "S20260000.dpl.jsonl"
+    explanations_path = tmp_path / "S20260000.explanations.jsonl"
+    manifest_path = tmp_path / "S20260000.manifest.json"
+    logs = [
+        DecisionProvenanceLog.model_validate_json(line)
+        for line in dpl_path.read_text(encoding="utf-8").splitlines()
+    ]
+    explanations = [
+        ExplanationDocument.model_validate_json(line)
+        for line in explanations_path.read_text(encoding="utf-8").splitlines()
+    ]
+    fixture = load_r002_fixture_synthesis()
+    measurement = r002_fixture_measurement(fixture)
+
+    assert len(logs) == len(explanations) == 40
+    assert logs[0].detected_leaks == []
+    assert all(set(log.base_policy) == {"CHECK", "BET_75"} for log in logs)
+    assert all(set(log.exploit_policy) == {"CHECK", "BET_75"} for log in logs)
+    assert all(set(log.final_policy) == {"CHECK", "BET_75"} for log in logs)
+    assert all(
+        log.ev_estimate.ev_source == "solver_exact"
+        and log.ev_estimate.ev_definition == "incremental_ev_from_current_node"
+        for log in logs
+    )
+
+    prior_bets: dict[str, int] = {}
+    for log in logs:
+        for leak in log.detected_leaks:
+            assert leak.reason_id == "LEAK_R002"
+            assert leak.leak_type == "river_large_bet_overcall"
+            assert leak.baseline_rate == pytest.approx(float(measurement.baseline_rate), abs=1e-12)
+            assert leak.effective_sample_size == prior_bets.get(leak.situation_key, 0)
+        if log.selected_action == "BET_75":
+            situation_key = f"{log.state_cluster}:IP:river_vs_bet"
+            prior_bets[situation_key] = prior_bets.get(situation_key, 0) + 1
+
+    snapshot = json.loads(
+        (tmp_path / "provenance/action_stats_terminal_snapshots.json").read_bytes()
+    )
+    bet_count = sum(log.selected_action == "BET_75" for log in logs)
+    check_count = sum(log.selected_action == "CHECK" for log in logs)
+    assert bet_count > 0
+    assert check_count > 0
+    assert sum(record["n"] for record in snapshot["records"]) == bet_count
+    assert all(record["rule_id"] == "LEAK_R002" for record in snapshot["records"])
+    assert all(record["action_group"] == ["CALL"] for record in snapshot["records"])
+    assert all(set(record["action_counts"]) <= {"FOLD", "CALL"} for record in snapshot["records"])
+
+    solver_logs = [log for log in logs if log.exploit_source == "nodelock_solver"]
+    assert solver_logs
+    for log in solver_logs:
+        assert [leak.reason_id for leak in log.detected_leaks] == ["LEAK_R002"]
+        assert log.solver_result_id is not None
+        assert "allocation=baseline_scaled" in log.solver_result_id
+        assert "lock_mode=HARD" in log.solver_result_id
+        assert "unlocked_policy_mode=fix_to_baseline" in log.solver_result_id
+        assert log.ev_estimate.exploit_ev > log.ev_estimate.base_ev + 1e-12
+
+    manifest = RunManifest.model_validate_json(manifest_path.read_bytes())
+    solver_ref = next(config for config in manifest.configs if config.role == "solver")
+    opponent_ref = manifest.opponents[0]
+    baseline = json.loads((tmp_path / "provenance/action_baseline_table.json").read_bytes())
+    assert opponent_ref.opponent_id == "fixture-r002-d016-s102"
+    assert opponent_ref.config is not None
+    assert opponent_ref.config.sha256 == fixture.config.config_sha256
+    assert opponent_ref.config.path.startswith("inline:noncatalog:")
+    assert "reason=LEAK_R002" in opponent_ref.config.path
+    assert "delta=0.16" in opponent_ref.config.path
+    assert "allocation=baseline_scaled" in opponent_ref.config.path
+    assert "lock_mode=HARD" in opponent_ref.config.path
+    assert "unlocked_policy_mode=fix_to_baseline" in opponent_ref.config.path
+    assert "session_mode=r002_no_facing" in manifest.description
+    assert "public_bet=BET_75" in solver_ref.path
+    assert "bet_fraction=0.75" in solver_ref.path
+    assert "equilibrium=river-large-bet-equilibrium-v1" in solver_ref.path
+    assert baseline["table_version"] == manifest.versions.baseline_table_version
+    assert baseline["rules"][0]["reason_id"] == "LEAK_R002"
+    assert baseline["rules"][0]["action_group"] == ["CALL"]
+    assert baseline["rules"][0]["baseline_rate"] == pytest.approx(
+        float(measurement.baseline_rate),
+        abs=1e-12,
+    )
+
+    for log, explanation in zip(logs, explanations, strict=True):
+        assert explanation.generator == "template"
+        verified = verify_explanation(explanation, log)
+        assert verified.passed, verified.issues
+    saved = verify_saved_explanation_bundle(manifest_path)
+    assert saved.checker_total == saved.checker_passed == 40
+
+    evaluation = json.loads((tmp_path / "S20260000.post_session_evaluation.json").read_bytes())
+    assert evaluation["evaluation"]["opponent_model_id"] == "fixture-r002-d016-s102"
+    assert evaluation["evaluation"]["explanation_validity_score"] == 1.0
+    assert evaluation["next_session_settings"]["leak_detector_config"]["min_deviation"] == 0.08
+
+
+@pytest.mark.parametrize("reason_id", ["LEAK_R001", "LEAK_R002"])
+def test_large_bet_reason_requires_explicit_fixture_and_writes_nothing(tmp_path, reason_id):
     cli = _load_cli_module()
     out_dir = tmp_path / "must-not-exist"
 
@@ -702,7 +828,7 @@ def test_r001_reason_requires_explicit_fixture_and_writes_nothing(tmp_path):
         cli.main(
             [
                 "--leaky-fixture-reason",
-                "LEAK_R001",
+                reason_id,
                 "--out-dir",
                 str(out_dir),
             ]
