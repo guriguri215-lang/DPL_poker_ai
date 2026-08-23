@@ -2,7 +2,7 @@
 
 The command writes validated DPL v3 JSONL plus a RunManifest sidecar and can
 opt in to verified template-explanation artifacts. The default river path is
-limited to facing an all-in; explicit R007 and R001 fixtures select bounded OOP
+limited to facing an all-in; explicit R007, R001, and R002 fixtures select bounded OOP
 ``CHECK``/fixed-bet slices. Solver iterations and average delay are explicit
 inputs; the 40-iteration default is not a convergence guarantee.
 """
@@ -25,10 +25,12 @@ from poker_ai.explanation_artifacts import (
 from poker_ai.exploit import NodelockExploitConfig, NodelockExploitProvider, RuleExploitProvider
 from poker_ai.leak import (
     R001_FIXTURE_MIN_DEVIATION,
+    R002_FIXTURE_MIN_DEVIATION,
     LeakDetector,
     LeakDetectorConfig,
     leaky_fixture_action_baseline_table,
     leaky_r001_fixture_action_baseline_table,
+    leaky_r002_fixture_action_baseline_table,
     leaky_r007_fixture_action_baseline_table,
 )
 from poker_ai.opponent import reveal_stub_opponent_answer_key
@@ -36,6 +38,7 @@ from poker_ai.runtime_provenance import collect_runtime_provenance, resolve_pack
 from poker_ai.session import (
     FACING_ALL_IN_SESSION_MODE,
     R001_NO_FACING_SESSION_MODE,
+    R002_NO_FACING_SESSION_MODE,
     R007_NO_FACING_SESSION_MODE,
     run_session,
     write_session_bundle,
@@ -108,13 +111,14 @@ def _parser(*, entrypoint: str) -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--leaky-fixture-reason",
-        choices=("LEAK_R001", "LEAK_R007", "LEAK_R008"),
+        choices=("LEAK_R001", "LEAK_R002", "LEAK_R007", "LEAK_R008"),
         default="LEAK_R008",
         help=(
             "fixture reason to simulate with --leaky-fixture; LEAK_R008 preserves "
             "the historical jam-all path (default), LEAK_R007 opts in to the OOP "
-            "CHECK/BET_33 check-back slice, and LEAK_R001 opts in to the OOP "
-            "CHECK/BET_75 overfold slice"
+            "CHECK/BET_33 check-back slice, LEAK_R001 opts in to the OOP "
+            "CHECK/BET_75 overfold slice, and LEAK_R002 uses that same node "
+            "for an overcall slice"
         ),
     )
     parser.add_argument(
@@ -182,6 +186,12 @@ def main(argv: list[str] | None = None, *, entrypoint: str = CONSOLE_ENTRYPOINT)
                 min_deviation=R001_FIXTURE_MIN_DEVIATION,
             )
             fixture_baseline = leaky_r001_fixture_action_baseline_table()
+        elif args.leaky_fixture_reason == "LEAK_R002":
+            detector_config = replace(
+                detector_config,
+                min_deviation=R002_FIXTURE_MIN_DEVIATION,
+            )
+            fixture_baseline = leaky_r002_fixture_action_baseline_table()
         elif args.leaky_fixture_reason == "LEAK_R007":
             fixture_baseline = leaky_r007_fixture_action_baseline_table()
         else:
@@ -202,6 +212,8 @@ def main(argv: list[str] | None = None, *, entrypoint: str = CONSOLE_ENTRYPOINT)
     provenance = collect_runtime_provenance()
     if args.leaky_fixture and args.leaky_fixture_reason == "LEAK_R001":
         session_mode = R001_NO_FACING_SESSION_MODE
+    elif args.leaky_fixture and args.leaky_fixture_reason == "LEAK_R002":
+        session_mode = R002_NO_FACING_SESSION_MODE
     elif args.leaky_fixture and args.leaky_fixture_reason == "LEAK_R007":
         session_mode = R007_NO_FACING_SESSION_MODE
     else:

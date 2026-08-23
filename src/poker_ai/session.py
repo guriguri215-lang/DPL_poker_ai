@@ -2,7 +2,7 @@
 
 Generates scenarios deterministically and solves each public river spot with CFR+.
 The historical path observes the jam-all stub before Hero's finite-iteration
-``vs_bet`` decision. Explicit R007 and R001 fixtures instead give OOP Hero the
+``vs_bet`` decision. Explicit R007, R001, and R002 fixtures instead give OOP Hero the
 existing tree's bounded ``start`` decision and record an opponent response only
 after Hero reaches the corresponding opportunity. Each decision is assembled into a current
 :class:`~poker_core.dpl_schema.DecisionProvenanceLog`. Public action observations feed
@@ -66,11 +66,14 @@ from .opponent import (
     CHECK_BACK_OPPONENT_ID,
     JAM_ALL_OPPONENT_ID,
     R001_FIXTURE_OPPONENT_ID,
+    R002_FIXTURE_OPPONENT_ID,
     STUB_OPPONENT_VERSION,
     StubOpponent,
     load_r001_fixture_synthesis,
+    load_r002_fixture_synthesis,
     r001_fixture_measurement,
-    sample_r001_fixture_response,
+    r002_fixture_measurement,
+    sample_river_large_bet_fixture_response,
 )
 from .posterior_bundle import (
     PosteriorBundleParts,
@@ -91,7 +94,13 @@ OPPONENT_VERSION = STUB_OPPONENT_VERSION
 FACING_ALL_IN_SESSION_MODE = "facing_all_in"
 R007_NO_FACING_SESSION_MODE = "r007_no_facing"
 R001_NO_FACING_SESSION_MODE = "r001_no_facing"
-SessionMode = Literal["facing_all_in", "r007_no_facing", "r001_no_facing"]
+R002_NO_FACING_SESSION_MODE = "r002_no_facing"
+SessionMode = Literal[
+    "facing_all_in",
+    "r007_no_facing",
+    "r001_no_facing",
+    "r002_no_facing",
+]
 
 
 @dataclass(frozen=True)
@@ -212,7 +221,7 @@ def _build_r007_dpl(
     return log
 
 
-def _build_r001_dpl(
+def _build_river_large_bet_dpl(
     scenario: Scenario,
     hand_id: str,
     session_id: str,
@@ -224,12 +233,13 @@ def _build_r001_dpl(
     exploit_provider: ExploitProvider | None,
     base_policy_provider: BasePolicyProvider,
     bet_fraction: float,
-    fold_probability: float,
+    target_action: str,
+    target_probability: float,
     response_rng: random.Random,
 ) -> DecisionProvenanceLog:
-    """Run one causal OOP CHECK/BET_75 decision for the R001 fixture."""
+    """Run the shared causal OOP CHECK/BET_75 decision for R001 or R002."""
 
-    scenario = _as_r001_scenario(scenario, bet_fraction=bet_fraction)
+    scenario = _as_river_large_bet_scenario(scenario, bet_fraction=bet_fraction)
     log, opponent_situation_key = _build_no_facing_decision(
         scenario,
         hand_id,
@@ -243,8 +253,9 @@ def _build_r001_dpl(
         base_policy_provider=base_policy_provider,
     )
     if log.selected_action == "BET_75":
-        opponent_action = sample_r001_fixture_response(
-            fold_probability=fold_probability,
+        opponent_action = sample_river_large_bet_fixture_response(
+            target_action=target_action,
+            target_probability=target_probability,
             rng=response_rng,
         )
         tracker.record_opponent_action(
@@ -384,7 +395,7 @@ def _as_oop_scenario(scenario: Scenario) -> Scenario:
     return Scenario.model_validate(payload)
 
 
-def _as_r001_scenario(scenario: Scenario, *, bet_fraction: float) -> Scenario:
+def _as_river_large_bet_scenario(scenario: Scenario, *, bet_fraction: float) -> Scenario:
     oop = _as_oop_scenario(scenario)
     minimum_stack = oop.pot * bet_fraction
     if oop.effective_stack >= minimum_stack:
@@ -392,6 +403,18 @@ def _as_r001_scenario(scenario: Scenario, *, bet_fraction: float) -> Scenario:
     payload = oop.model_dump(mode="python")
     payload["effective_stack"] = minimum_stack
     return Scenario.model_validate(payload)
+
+
+def _river_large_bet_fixture_for(session_mode: SessionMode):
+    """Return the one in-memory fixture used by a 0.75-pot session mode."""
+
+    if session_mode == R001_NO_FACING_SESSION_MODE:
+        fixture = load_r001_fixture_synthesis()
+        return fixture, r001_fixture_measurement(fixture)
+    if session_mode == R002_NO_FACING_SESSION_MODE:
+        fixture = load_r002_fixture_synthesis()
+        return fixture, r002_fixture_measurement(fixture)
+    raise ValueError(f"session mode {session_mode!r} is not a river-large-bet fixture")
 
 
 def _base_policy_provider_for(
@@ -408,8 +431,8 @@ def _base_policy_provider_for(
                 checkpoints=solver_config.checkpoints,
             )
         )
-    if session_mode == R001_NO_FACING_SESSION_MODE:
-        fixture = load_r001_fixture_synthesis()
+    if session_mode in {R001_NO_FACING_SESSION_MODE, R002_NO_FACING_SESSION_MODE}:
+        fixture, _measurement = _river_large_bet_fixture_for(session_mode)
         return CfrRiverR001NoFacingPolicyProvider(
             solver_config,
             bet_fraction=fixture.bet_fraction,
@@ -426,6 +449,8 @@ def _opponent_id_for(session_mode: SessionMode) -> str:
         return CHECK_BACK_OPPONENT_ID
     if session_mode == R001_NO_FACING_SESSION_MODE:
         return R001_FIXTURE_OPPONENT_ID
+    if session_mode == R002_NO_FACING_SESSION_MODE:
+        return R002_FIXTURE_OPPONENT_ID
     raise ValueError(f"unknown session_mode {session_mode!r}")
 
 
@@ -450,13 +475,16 @@ def iter_session_logs(
         solver_config,
         session_mode,
     )
-    r001_fixture = (
-        load_r001_fixture_synthesis() if session_mode == R001_NO_FACING_SESSION_MODE else None
-    )
-    r001_measurement = r001_fixture_measurement(r001_fixture) if r001_fixture is not None else None
+    large_bet_fixture = None
+    large_bet_measurement = None
+    if session_mode in {R001_NO_FACING_SESSION_MODE, R002_NO_FACING_SESSION_MODE}:
+        large_bet_fixture, large_bet_measurement = _river_large_bet_fixture_for(session_mode)
     response_rng = (
-        random.Random(f"{session_id}:{r001_fixture.config.seed}:r001-opponent-response-v1")
-        if r001_fixture is not None
+        random.Random(
+            f"{session_id}:{large_bet_fixture.config.seed}:"
+            f"{large_bet_measurement.reason_id.removeprefix('LEAK_').lower()}-opponent-response-v1"
+        )
+        if large_bet_fixture is not None and large_bet_measurement is not None
         else None
     )
     for index, scenario in enumerate(generate_scenarios(seed, num_hands)):
@@ -471,15 +499,16 @@ def iter_session_logs(
         }
         if session_mode == R007_NO_FACING_SESSION_MODE:
             yield _build_r007_dpl(scenario, hand_id, session_id, **common)
-        elif session_mode == R001_NO_FACING_SESSION_MODE:
-            if r001_fixture is None or r001_measurement is None or response_rng is None:
-                raise RuntimeError("R001 fixture environment was not initialized")
-            yield _build_r001_dpl(
+        elif session_mode in {R001_NO_FACING_SESSION_MODE, R002_NO_FACING_SESSION_MODE}:
+            if large_bet_fixture is None or large_bet_measurement is None or response_rng is None:
+                raise RuntimeError("river-large-bet fixture environment was not initialized")
+            yield _build_river_large_bet_dpl(
                 scenario,
                 hand_id,
                 session_id,
-                bet_fraction=r001_fixture.bet_fraction,
-                fold_probability=float(r001_measurement.opponent_rate),
+                bet_fraction=large_bet_fixture.bet_fraction,
+                target_action=large_bet_measurement.action,
+                target_probability=float(large_bet_measurement.opponent_rate),
                 response_rng=response_rng,
                 **common,
             )
@@ -507,6 +536,29 @@ def _opponent_ref_for(session_mode: SessionMode) -> OpponentRef:
             opponent_version=fixture.config.opponent_version,
             split=fixture.config.split,
             config=_config_ref(config_path, name="r001_fixture_opponent", role="other"),
+        )
+    if session_mode == R002_NO_FACING_SESSION_MODE:
+        fixture = load_r002_fixture_synthesis()
+        config = fixture.config
+        reason_id, delta = config.leak_vector[0]
+        inline_path = (
+            f"inline:noncatalog:{config.generator_version}:reason={reason_id}:delta={delta}:"
+            f"equilibrium={config.equilibrium_version}:"
+            f"artifact={config.equilibrium_artifact_sha256}:"
+            f"position={config.opponent_position}:allocation={config.combo_allocation}:"
+            f"lock_mode={config.lock_mode}:unlocked_policy_mode={config.unlocked_policy_mode}:"
+            f"seed={config.seed}"
+        )
+        return OpponentRef(
+            opponent_id=config.opponent_id,
+            opponent_version=config.opponent_version,
+            split=config.split,
+            config=ConfigRef(
+                name="r002_fixture_opponent",
+                role="other",
+                path=inline_path,
+                sha256=config.config_sha256,
+            ),
         )
     return OpponentRef(
         opponent_id=_opponent_id_for(session_mode),

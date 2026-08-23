@@ -18,8 +18,8 @@ from poker_ai.cfr_policy import (
     exact_oop_start_action_evs,
 )
 from poker_ai.decision import Observation
-from poker_ai.opponent import load_r001_fixture_synthesis
-from poker_ai.scenario import Scenario
+from poker_ai.opponent import load_r001_fixture_synthesis, load_r002_fixture_synthesis
+from poker_ai.scenario import Scenario, generate_scenarios
 from poker_core.state_cluster import classify_board
 
 
@@ -45,6 +45,26 @@ def _observation(position: str, *, facing_bet: float = 10.0) -> Observation:
         position=scenario.position,
         pot=scenario.pot,
         facing_bet=facing_bet,
+        effective_stack=scenario.effective_stack,
+        hero_combo=scenario.hero_combo_obj(),
+        hero_range=scenario.hero_range_obj(),
+        opponent_assumed_range=scenario.opponent_range_obj(),
+    )
+
+
+def _generated_oop_observation(seed: int) -> tuple[Scenario, Observation]:
+    generated = next(iter(generate_scenarios(seed, 1)))
+    payload = generated.model_dump(mode="python")
+    payload["position"] = "OOP"
+    payload["effective_stack"] = max(generated.effective_stack, generated.pot * 0.75)
+    scenario = Scenario.model_validate(payload)
+    return scenario, Observation(
+        hand_id=f"RIVER-LARGE-BET-{seed}",
+        session_id=f"S{seed}",
+        board=scenario.board_cards(),
+        position="OOP",
+        pot=scenario.pot,
+        facing_bet=0.0,
         effective_stack=scenario.effective_stack,
         hero_combo=scenario.hero_combo_obj(),
         hero_range=scenario.hero_range_obj(),
@@ -155,6 +175,67 @@ def test_r001_no_facing_provider_reuses_frozen_bet_fraction_and_exact_action_evs
     assert "bet_fraction=0.75" in solver_ref.path
     assert f"equilibrium={fixture.equilibrium_version}" in solver_ref.path
     assert f"artifact={fixture.equilibrium_artifact_sha256}" in solver_ref.path
+
+
+@pytest.mark.parametrize("iterations", [5, 40], ids=["iterations-5", "iterations-40"])
+def test_r001_r002_same_scenario_combo_exact_ev_regression(iterations):
+    r001 = load_r001_fixture_synthesis()
+    r002 = load_r002_fixture_synthesis()
+    config = CfrRiverPolicyConfig(iterations=iterations, average_delay=0, checkpoints=())
+    r001_provider = CfrRiverR001NoFacingPolicyProvider(
+        config,
+        bet_fraction=r001.bet_fraction,
+        equilibrium_version=r001.equilibrium_version,
+        equilibrium_artifact_sha256=r001.equilibrium_artifact_sha256,
+    )
+    r002_provider = CfrRiverR001NoFacingPolicyProvider(
+        config,
+        bet_fraction=r002.bet_fraction,
+        equilibrium_version=r002.equilibrium_version,
+        equilibrium_artifact_sha256=r002.equilibrium_artifact_sha256,
+    )
+
+    assert r001.bet_fraction == r002.bet_fraction == 0.75
+    assert r001.equilibrium_version == r002.equilibrium_version
+    assert r001.equilibrium_artifact_sha256 == r002.equilibrium_artifact_sha256
+    for seed in range(20260000, 20260016):
+        scenario, observation = _generated_oop_observation(seed)
+        state_cluster = classify_board(observation.board)
+        r001_selection = r001_provider.policy_for(observation, state_cluster=state_cluster)
+        r002_selection = r002_provider.policy_for(observation, state_cluster=state_cluster)
+        r001_policy = next(
+            entry.policy
+            for entry in r001_selection.strategy_table.entries
+            if entry.combo == scenario.hero_combo
+        )
+        r002_policy = next(
+            entry.policy
+            for entry in r002_selection.strategy_table.entries
+            if entry.combo == scenario.hero_combo
+        )
+
+        assert set(r001_policy) == set(r002_policy) == {"CHECK", "BET_75"}
+        assert all(
+            abs(r001_policy[action] - r002_policy[action]) <= 1e-12 for action in r001_policy
+        )
+        assert r001_selection.decision_action_ev is not None
+        assert r002_selection.decision_action_ev is not None
+        assert (
+            set(r001_selection.decision_action_ev)
+            == set(r002_selection.decision_action_ev)
+            == {
+                "CHECK",
+                "BET_75",
+            }
+        )
+        assert all(
+            abs(
+                r001_selection.decision_action_ev[action]
+                - r002_selection.decision_action_ev[action]
+            )
+            <= 1e-12
+            for action in r001_selection.decision_action_ev
+        )
 
 
 def test_r007_no_facing_provider_rejects_ip_hero():

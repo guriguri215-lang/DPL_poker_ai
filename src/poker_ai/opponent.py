@@ -1,8 +1,9 @@
 """Stub opponent with a hidden strategy Hero must never read (AI Spec 6.3).
 
 The historical stub jams all-in with its whole river range. The opt-in R007
-fixture uses a separate check-back stub after Hero checks. Each *action policy*
-is a **hidden strategy** --
+fixture uses a separate check-back stub after Hero checks. The R001/R002
+fixtures synthesize one frozen 0.75-pot opponent and reveal a sampled response
+only after Hero bets. Each *action policy* is a **hidden strategy** --
 Hero is forbidden from conditioning on it (that would be leak detection /
 exploitation, out of scope, and in general breaks the honesty of the setup, AI
 Spec 6.3). The opponent's *hand range*, by contrast, is public scenario
@@ -30,7 +31,9 @@ if TYPE_CHECKING:
 JAM_ALL_OPPONENT_ID = "stub_jam_all"
 CHECK_BACK_OPPONENT_ID = "stub_check_back_all"
 R001_FIXTURE_OPPONENT_ID = "nl-train-r001-d016-s102"
+R002_FIXTURE_OPPONENT_ID = "fixture-r002-d016-s102"
 STUB_OPPONENT_VERSION = "0.1.0"
+_RIVER_LARGE_BET_FIXTURE_DELTA = "0.16"
 
 
 class HiddenStrategyAccessError(RuntimeError):
@@ -91,12 +94,23 @@ def reveal_stub_opponent_answer_key(*, opponent_model_id: str) -> OpponentAnswer
 
     if opponent_model_id == CHECK_BACK_OPPONENT_ID:
         action_probabilities = (("CHECK", 1.0),)
-    elif opponent_model_id == R001_FIXTURE_OPPONENT_ID:
-        measurement = r001_fixture_measurement()
-        fold_probability = float(measurement.opponent_rate)
-        action_probabilities = (
-            ("CALL", 1.0 - fold_probability),
-            ("FOLD", fold_probability),
+    elif opponent_model_id in {R001_FIXTURE_OPPONENT_ID, R002_FIXTURE_OPPONENT_ID}:
+        measurement = (
+            r001_fixture_measurement()
+            if opponent_model_id == R001_FIXTURE_OPPONENT_ID
+            else r002_fixture_measurement()
+        )
+        target_probability = float(measurement.opponent_rate)
+        action_probabilities = tuple(
+            sorted(
+                (
+                    (measurement.action, target_probability),
+                    (
+                        "CALL" if measurement.action == "FOLD" else "FOLD",
+                        1.0 - target_probability,
+                    ),
+                )
+            )
         )
     else:
         action_probabilities = (("BET_ALL_IN", 1.0),)
@@ -109,7 +123,20 @@ def reveal_stub_opponent_answer_key(*, opponent_model_id: str) -> OpponentAnswer
 def load_r001_fixture_synthesis() -> SynthesizedOpponent:
     """Load the pinned Training R001 fixture through the existing catalog."""
 
+    return _load_river_large_bet_fixture_synthesis("LEAK_R001")
+
+
+def load_r002_fixture_synthesis() -> SynthesizedOpponent:
+    """Build the noncatalog R002 fixture from R001's frozen node provenance."""
+
+    return _load_river_large_bet_fixture_synthesis("LEAK_R002")
+
+
+def _load_river_large_bet_fixture_synthesis(reason_id: str) -> SynthesizedOpponent:
+    """Resolve only the shared frozen 0.75-pot inputs for R001 and R002."""
+
     from opponents.catalog import load_training_catalog
+    from opponents.model import OpponentModelConfig, leak_action_mapping
     from opponents.synthesis import synthesize_opponent
 
     matches = tuple(
@@ -119,9 +146,34 @@ def load_r001_fixture_synthesis() -> SynthesizedOpponent:
     )
     if len(matches) != 1:
         raise ValueError("pinned R001 fixture opponent must resolve exactly once")
-    synthesized = synthesize_opponent(config=matches[0])
-    if synthesized.config.leak_vector != (("LEAK_R001", "0.16"),):
-        raise ValueError("pinned R001 fixture leak vector changed")
+    anchor = matches[0]
+    if reason_id == "LEAK_R001":
+        config = anchor
+    elif reason_id == "LEAK_R002":
+        config = OpponentModelConfig(
+            opponent_id=R002_FIXTURE_OPPONENT_ID,
+            opponent_version=anchor.opponent_version,
+            split=anchor.split,
+            equilibrium_version=anchor.equilibrium_version,
+            equilibrium_artifact_sha256=anchor.equilibrium_artifact_sha256,
+            opponent_position=anchor.opponent_position,
+            leak_vector=((reason_id, _RIVER_LARGE_BET_FIXTURE_DELTA),),
+            seed=anchor.seed,
+            combo_allocation=anchor.combo_allocation,
+            lock_mode=anchor.lock_mode,
+            unlocked_policy_mode=anchor.unlocked_policy_mode,
+        )
+    else:
+        raise ValueError(f"unsupported river-large-bet fixture reason {reason_id!r}")
+
+    mapping = leak_action_mapping(reason_id)
+    if mapping.phase != "vs_bet" or mapping.action not in {"FOLD", "CALL"}:
+        raise ValueError("river-large-bet fixture mapping changed")
+    synthesized = synthesize_opponent(config=config)
+    if synthesized.config.leak_vector != ((reason_id, _RIVER_LARGE_BET_FIXTURE_DELTA),):
+        raise ValueError(f"pinned {reason_id} fixture leak vector changed")
+    if not math.isclose(synthesized.bet_fraction, 0.75, rel_tol=0.0, abs_tol=1e-12):
+        raise ValueError("river-large-bet fixture must remain fixed at 0.75 pot")
     return synthesized
 
 
@@ -130,9 +182,35 @@ def r001_fixture_measurement(
 ) -> TrueLeakMeasurement:
     """Derive R001 baseline and response rates through existing ground truth."""
 
+    return _river_large_bet_fixture_measurement(
+        synthesized or load_r001_fixture_synthesis(),
+        reason_id="LEAK_R001",
+        action="FOLD",
+    )
+
+
+def r002_fixture_measurement(
+    synthesized: SynthesizedOpponent | None = None,
+) -> TrueLeakMeasurement:
+    """Derive R002 baseline and response CALL rates through existing ground truth."""
+
+    return _river_large_bet_fixture_measurement(
+        synthesized or load_r002_fixture_synthesis(),
+        reason_id="LEAK_R002",
+        action="CALL",
+    )
+
+
+def _river_large_bet_fixture_measurement(
+    fixture: SynthesizedOpponent,
+    *,
+    reason_id: str,
+    action: str,
+) -> TrueLeakMeasurement:
+    """Measure one shared river-large-bet node without synthesis metadata."""
+
     from opponents.ground_truth import extract_true_leaks
 
-    fixture = synthesized or load_r001_fixture_synthesis()
     measurements = extract_true_leaks(
         fixture.game,
         fixture.equilibrium_strategy,
@@ -140,27 +218,31 @@ def r001_fixture_measurement(
         fixture.config,
     )
     if len(measurements) != 1:
-        raise ValueError("pinned R001 fixture must expose exactly one leak measurement")
+        raise ValueError(f"pinned {reason_id} fixture must expose exactly one leak measurement")
     measurement = measurements[0]
     if (
-        measurement.reason_id != "LEAK_R001"
+        measurement.reason_id != reason_id
         or measurement.phase != "vs_bet"
-        or measurement.action != "FOLD"
+        or measurement.action != action
     ):
-        raise ValueError("pinned R001 fixture mapping changed")
+        raise ValueError(f"pinned {reason_id} fixture mapping changed")
     return measurement
 
 
-def sample_r001_fixture_response(
+def sample_river_large_bet_fixture_response(
     *,
-    fold_probability: float,
+    target_action: str,
+    target_probability: float,
     rng: random.Random,
 ) -> OpponentAction:
     """Environment-only FOLD/CALL sample after a realised Hero BET_75."""
 
-    if not math.isfinite(fold_probability) or not 0.0 <= fold_probability <= 1.0:
-        raise ValueError("R001 fold_probability must be finite and in [0, 1]")
-    action = "FOLD" if rng.random() < fold_probability else "CALL"
+    if target_action not in {"FOLD", "CALL"}:
+        raise ValueError("river-large-bet target_action must be FOLD or CALL")
+    if not math.isfinite(target_probability) or not 0.0 <= target_probability <= 1.0:
+        raise ValueError("target_probability must be finite and in [0, 1]")
+    other_action = "CALL" if target_action == "FOLD" else "FOLD"
+    action = target_action if rng.random() < target_probability else other_action
     return OpponentAction(action=action, bet_size=0.0)
 
 

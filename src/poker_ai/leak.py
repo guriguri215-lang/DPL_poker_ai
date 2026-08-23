@@ -30,6 +30,7 @@ _POLICY_BET_ACTIONS: tuple[str, ...] = BET_ACTIONS
 _CHECK_BET_POLICY_ACTIONS = frozenset((*CHECK_ACTIONS, *_POLICY_BET_ACTIONS))
 BOUNDARY_ABS_TOLERANCE = "1e-12"
 R001_FIXTURE_MIN_DEVIATION = 0.08
+R002_FIXTURE_MIN_DEVIATION = R001_FIXTURE_MIN_DEVIATION
 GroundTruthBoundary = Literal["positive", "negative", "indifference"]
 
 
@@ -225,19 +226,51 @@ def leaky_r007_fixture_action_baseline_table(
 def leaky_r001_fixture_action_baseline_table() -> ActionBaselineTable:
     """Build R001's detector baseline from the pinned equilibrium artifact."""
 
-    from .opponent import load_r001_fixture_synthesis, r001_fixture_measurement
+    return _leaky_river_large_bet_fixture_action_baseline_table("LEAK_R001")
 
-    fixture = load_r001_fixture_synthesis()
-    measurement = r001_fixture_measurement(fixture)
+
+def leaky_r002_fixture_action_baseline_table() -> ActionBaselineTable:
+    """Build R002's CALL baseline from the same pinned equilibrium artifact."""
+
+    return _leaky_river_large_bet_fixture_action_baseline_table("LEAK_R002")
+
+
+def _leaky_river_large_bet_fixture_action_baseline_table(
+    reason_id: str,
+) -> ActionBaselineTable:
+    """Share only the frozen-node baseline derivation used by R001 and R002."""
+
+    from .opponent import (
+        load_r001_fixture_synthesis,
+        load_r002_fixture_synthesis,
+        r001_fixture_measurement,
+        r002_fixture_measurement,
+    )
+
+    if reason_id == "LEAK_R001":
+        fixture = load_r001_fixture_synthesis()
+        measurement = r001_fixture_measurement(fixture)
+        leak_type = "river_large_bet_overfold"
+        direction = "increase_large_bet_frequency"
+    elif reason_id == "LEAK_R002":
+        fixture = load_r002_fixture_synthesis()
+        measurement = r002_fixture_measurement(fixture)
+        leak_type = "river_large_bet_overcall"
+        direction = "adjust_large_bet_frequency_for_overcall"
+    else:
+        raise ValueError(f"unsupported river-large-bet baseline reason {reason_id!r}")
     return ActionBaselineTable(
-        table_version=f"{fixture.equilibrium_version}-r001-action-baseline",
+        table_version=(
+            f"{fixture.equilibrium_version}-"
+            f"{reason_id.lower().removeprefix('leak_')}-action-baseline"
+        ),
         rules=(
             ActionLeakRule(
-                reason_id="LEAK_R001",
-                leak_type="river_large_bet_overfold",
-                action_group=FOLD_ACTIONS,
+                reason_id=reason_id,
+                leak_type=leak_type,
+                action_group=(measurement.action,),
                 baseline_rate=float(measurement.baseline_rate),
-                direction="increase_large_bet_frequency",
+                direction=direction,
             ),
         ),
     )
