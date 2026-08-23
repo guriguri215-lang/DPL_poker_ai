@@ -281,5 +281,5 @@ def test_distribution_cli_version_writes_nothing(tmp_path, monkeypatch, capsys):
         explanation_bundle_cli.main(["--version"])
 
     assert stopped.value.code == 0
-    assert capsys.readouterr().out == "poker-xai-verify-explanation-bundle 0.1.0a14\n"
+    assert capsys.readouterr().out == "poker-xai-verify-explanation-bundle 0.1.0a15\n"
     assert tuple(tmp_path.iterdir()) == ()

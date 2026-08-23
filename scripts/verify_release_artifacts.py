@@ -101,6 +101,44 @@ def _tracked_payload(source: Path) -> set[str]:
     }
 
 
+def _tracked_opponent_data(source: Path) -> set[str]:
+    completed = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source),
+            "ls-files",
+            "-z",
+            "--",
+            "configs/opponents/equilibria/*.equilibrium.json",
+            "configs/opponents/training/*.opponent.json",
+            "configs/opponents/validation/*.opponent.json",
+        ],
+        check=False,
+        capture_output=True,
+        timeout=30,
+    )
+    if completed.returncode != 0:
+        raise VerificationError("unable to resolve tracked opponent runtime data")
+    tracked = {
+        raw.decode("utf-8", "surrogateescape") for raw in completed.stdout.split(b"\0") if raw
+    }
+    required = {
+        "configs/opponents/equilibria/river-large-bet-equilibrium-v1.equilibrium.json",
+        "configs/opponents/training/nl-train-r001-d016-s102.opponent.json",
+    }
+    if not required.issubset(tracked):
+        raise VerificationError("required tracked opponent runtime data is unavailable")
+    return tracked
+
+
+def _wheel_payload_sources(source: Path, version: str) -> dict[str, str]:
+    result = {path: f"src/{path}" for path in _tracked_payload(source)}
+    data_prefix = f"{NORMALIZED_NAME}-{version}.data/data/"
+    result.update({f"{data_prefix}{path}": path for path in _tracked_opponent_data(source)})
+    return result
+
+
 def _git_blob(source: Path, path: str) -> bytes:
     completed = subprocess.run(
         ["git", "-C", str(source), "cat-file", "blob", f"HEAD:{path}"],
@@ -290,7 +328,8 @@ def _verify_record(archive: zipfile.ZipFile, metadata_root: str) -> None:
 
 
 def verify_wheel(wheel: Path, source: Path, version: str) -> None:
-    expected_payload = _tracked_payload(source)
+    payload_sources = _wheel_payload_sources(source, version)
+    expected_payload = set(payload_sources)
     metadata_root = f"{NORMALIZED_NAME}-{version}.dist-info/"
     payload: set[str] = set()
     metadata_files: set[str] = set()
@@ -311,7 +350,12 @@ def verify_wheel(wheel: Path, source: Path, version: str) -> None:
                 metadata_files.add(info.filename.removeprefix(metadata_root))
             else:
                 payload.add(info.filename)
-                if data != _git_blob(source, f"src/{info.filename}"):
+                source_path = payload_sources.get(info.filename)
+                if source_path is None:
+                    raise VerificationError(
+                        "wheel payload does not exactly match tracked runtime sources"
+                    )
+                if data != _git_blob(source, source_path):
                     _fail(f"wheel:{info.filename}", "tracked-payload-byte-mismatch")
         if payload != expected_payload:
             raise VerificationError("wheel payload does not exactly match tracked runtime sources")
@@ -379,6 +423,7 @@ def verify_sdist(sdist: Path, source: Path, version: str) -> None:
                     _fail(f"sdist:{relative}", "tracked-payload-byte-mismatch")
         expected_repository = (
             expected_payload
+            | _tracked_opponent_data(source)
             | _tracked_top_level_sdist_tests(source)
             | _tracked_sdist_documents(source)
             | {
@@ -813,6 +858,183 @@ assert r007_bundle_output.getvalue().splitlines() == [
     'artifact_integrity=passed references=5',
     'explanation_checker=passed total=5 summary=consistent',
 ]
+
+from poker_ai.opponent import r001_fixture_measurement, r002_fixture_measurement
+
+
+def snapshot_files(root):
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in root.rglob('*')
+        if path.is_file()
+    }
+
+
+def run_large_bet_fixture(reason_id, seed, hands, session_root, previous_manifest=None):
+    action_group = ['FOLD'] if reason_id == 'LEAK_R001' else ['CALL']
+    opponent_id = (
+        'nl-train-r001-d016-s102'
+        if reason_id == 'LEAK_R001'
+        else 'fixture-r002-d016-s102'
+    )
+    session_mode = 'r001_no_facing' if reason_id == 'LEAK_R001' else 'r002_no_facing'
+    measurement = (
+        r001_fixture_measurement()
+        if reason_id == 'LEAK_R001'
+        else r002_fixture_measurement()
+    )
+    argv = [
+        '--seed',
+        str(seed),
+        '--hands',
+        str(hands),
+        '--solver-iterations',
+        '5',
+        '--leaky-fixture',
+        '--leaky-fixture-reason',
+        reason_id,
+        '--explanations',
+    ]
+    if previous_manifest is None:
+        argv.extend(['--exploration-epsilon', '1.0'])
+    else:
+        argv.extend(['--previous-session-manifest', str(previous_manifest)])
+    argv.extend(['--out-dir', str(session_root)])
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert loaded['poker-xai-run-session'](argv) == 0
+
+    session_id = f'S{seed:08d}'
+    manifest_path = session_root / f'{session_id}.manifest.json'
+    dpl_path = session_root / f'{session_id}.dpl.jsonl'
+    explanation_path = session_root / f'{session_id}.explanations.jsonl'
+    manifest = RunManifest.model_validate_json(manifest_path.read_text(encoding='utf-8'))
+    dpls = [
+        DecisionProvenanceLog.model_validate_json(line)
+        for line in dpl_path.read_text(encoding='utf-8').splitlines()
+    ]
+    explanations = [
+        ExplanationDocument.model_validate_json(line)
+        for line in explanation_path.read_text(encoding='utf-8').splitlines()
+    ]
+    assert len(dpls) == len(explanations) == hands
+    assert dpls[0].detected_leaks == []
+    assert all(set(dpl.base_policy) == {'CHECK', 'BET_75'} for dpl in dpls)
+    assert all(set(dpl.exploit_policy) == {'CHECK', 'BET_75'} for dpl in dpls)
+    assert all(set(dpl.final_policy) == {'CHECK', 'BET_75'} for dpl in dpls)
+    assert all(
+        dpl.ev_estimate.ev_source == 'solver_exact'
+        and dpl.ev_estimate.ev_definition == 'incremental_ev_from_current_node'
+        for dpl in dpls
+    )
+
+    prior_bets = {}
+    for dpl in dpls:
+        for leak in dpl.detected_leaks:
+            assert leak.reason_id == reason_id
+            assert leak.effective_sample_size == prior_bets.get(leak.situation_key, 0)
+            assert abs(leak.baseline_rate - float(measurement.baseline_rate)) <= 1e-12
+        if dpl.selected_action == 'BET_75':
+            situation_key = f'{dpl.state_cluster}:IP:river_vs_bet'
+            prior_bets[situation_key] = prior_bets.get(situation_key, 0) + 1
+
+    snapshot = json.loads(
+        (session_root / 'provenance/action_stats_terminal_snapshots.json').read_text(
+            encoding='utf-8'
+        )
+    )
+    baseline = json.loads(
+        (session_root / 'provenance/action_baseline_table.json').read_text(encoding='utf-8')
+    )
+    bet_count = sum(dpl.selected_action == 'BET_75' for dpl in dpls)
+    check_count = sum(dpl.selected_action == 'CHECK' for dpl in dpls)
+    assert bet_count > 0 and check_count > 0
+    assert sum(record['n'] for record in snapshot['records']) == bet_count
+    assert all(record['rule_id'] == reason_id for record in snapshot['records'])
+    assert all(record['action_group'] == action_group for record in snapshot['records'])
+    assert all(set(record['action_counts']) <= {'FOLD', 'CALL'} for record in snapshot['records'])
+    assert baseline['rules'][0]['reason_id'] == reason_id
+    assert baseline['rules'][0]['action_group'] == action_group
+    assert abs(baseline['rules'][0]['baseline_rate'] - float(measurement.baseline_rate)) <= 1e-12
+
+    solver_dpls = [dpl for dpl in dpls if dpl.exploit_source == 'nodelock_solver']
+    assert solver_dpls
+    improvement_tolerance = 1e-12 if reason_id == 'LEAK_R002' else 0.0
+    for dpl in solver_dpls:
+        assert [leak.reason_id for leak in dpl.detected_leaks] == [reason_id]
+        assert dpl.solver_result_id
+        assert 'allocation=baseline_scaled' in dpl.solver_result_id
+        assert 'lock_mode=HARD' in dpl.solver_result_id
+        assert 'unlocked_policy_mode=fix_to_baseline' in dpl.solver_result_id
+        assert dpl.ev_estimate.exploit_ev > dpl.ev_estimate.base_ev + improvement_tolerance
+
+    solver_ref = next(config for config in manifest.configs if config.role == 'solver')
+    assert manifest.code.entrypoint == 'poker-xai-run-session'
+    assert manifest.code.argv == argv
+    assert manifest.opponents[0].opponent_id == opponent_id
+    assert f'session_mode={session_mode}' in manifest.description
+    assert 'public_bet=BET_75' in solver_ref.path
+    assert 'bet_fraction=0.75' in solver_ref.path
+    assert 'equilibrium=river-large-bet-equilibrium-v1' in solver_ref.path
+    if reason_id == 'LEAK_R002':
+        opponent_config = manifest.opponents[0].config
+        assert opponent_config is not None
+        assert opponent_config.path.startswith('inline:noncatalog:')
+        assert 'reason=LEAK_R002' in opponent_config.path
+
+    for dpl, explanation in zip(dpls, explanations, strict=True):
+        verified = verify_explanation(explanation, dpl)
+        assert verified.passed, verified.issues
+    bundle_output = io.StringIO()
+    with contextlib.redirect_stdout(bundle_output):
+        assert loaded['poker-xai-verify-explanation-bundle'](
+            ['--manifest', str(manifest_path)]
+        ) == 0
+    assert bundle_output.getvalue().splitlines() == [
+        'artifact_integrity=passed references=5',
+        f'explanation_checker=passed total={hands} summary=consistent',
+    ]
+    evaluation = json.loads(
+        (session_root / f'{session_id}.post_session_evaluation.json').read_text(
+            encoding='utf-8'
+        )
+    )
+    assert evaluation['evaluation']['session_id'] == manifest.run_id
+    assert evaluation['evaluation']['opponent_model_id'] == opponent_id
+    assert evaluation['evaluation']['explanation_validity_score'] == 1.0
+    return manifest_path, manifest, dpls, evaluation
+
+
+run_large_bet_fixture(
+    'LEAK_R001',
+    20260000,
+    20,
+    output_root / 'r001-solver-backed',
+)
+r002_source_root = output_root / 'r002-source'
+r002_source_path, r002_source_manifest, r002_source_dpls, r002_source_evaluation = (
+    run_large_bet_fixture('LEAK_R002', 20260000, 40, r002_source_root)
+)
+r002_source_before_handoff = snapshot_files(r002_source_root)
+r002_successor_path, r002_successor_manifest, r002_successor_dpls, r002_successor_evaluation = (
+    run_large_bet_fixture(
+        'LEAK_R002',
+        20260012,
+        80,
+        output_root / 'r002-successor',
+        previous_manifest=r002_source_path,
+    )
+)
+assert snapshot_files(r002_source_root) == r002_source_before_handoff
+restored = r002_source_evaluation['next_session_settings']
+assert all(dpl.safety_alpha == restored['safety_alpha'] for dpl in r002_successor_dpls)
+successor_sampler = next(
+    config for config in r002_successor_manifest.configs if config.name == 'execution_sampler'
+)
+assert successor_sampler.path == 'inline:epsilon-uniform-v1:epsilon=1'
+assert r002_source_manifest.opponents == r002_successor_manifest.opponents
+assert r002_source_manifest.versions == r002_successor_manifest.versions
+assert r002_successor_evaluation['next_session_settings'] == restored
+assert r002_successor_path != r002_source_path
 """
     script = script.replace("EXPECTED_VERSION", repr(version)).replace(
         "EXPECTED_ENTRY_POINTS", repr(EXPECTED_ENTRY_POINTS)
@@ -887,6 +1109,8 @@ def verify(
             "saved-explanation-bundle-verification",
             "solver-backed-explanation-provenance",
             "r007-solver-backed-no-facing-explanation-provenance",
+            "r001-r002-release-surface-parity",
+            "r002-verified-two-session-handoff",
             "entry-point-metadata",
             "documentation-relative-links",
         ],

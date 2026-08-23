@@ -16,7 +16,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
-CURRENT_VERSION = "0.1.0a14"
+CURRENT_VERSION = "0.1.0a15"
 sys.path.insert(0, str(SCRIPTS))
 
 
@@ -139,7 +139,7 @@ def test_release_workflow_keeps_exact_python_and_offline_cross_platform_gates() 
         assert forbidden not in final_verifier
 
 
-def test_sdist_document_contract_is_exact_and_wheel_package_data_stays_explicit(
+def test_sdist_document_and_runtime_data_contracts_are_explicit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     tracked = {
@@ -169,11 +169,36 @@ def test_sdist_document_contract_is_exact_and_wheel_package_data_stays_explicit(
     }
     assert (ROOT / "MANIFEST.in").read_text(encoding="utf-8").splitlines() == [
         "include CONTRIBUTING.md",
+        "recursive-include configs/opponents/equilibria *.equilibrium.json",
+        "recursive-include configs/opponents/training *.opponent.json",
+        "recursive-include configs/opponents/validation *.opponent.json",
         "recursive-include docs *.md",
         "recursive-include src README.md",
     ]
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     assert project["tool"]["setuptools"]["include-package-data"] is False
+    assert project["tool"]["setuptools"]["data-files"] == {
+        "configs/opponents/equilibria": ["configs/opponents/equilibria/*.equilibrium.json"],
+        "configs/opponents/training": ["configs/opponents/training/*.opponent.json"],
+        "configs/opponents/validation": ["configs/opponents/validation/*.opponent.json"],
+    }
+
+
+def test_wheel_runtime_data_maps_to_the_existing_tracked_catalog_and_equilibrium() -> None:
+    tracked = release._tracked_opponent_data(ROOT)
+    training = {path for path in tracked if "/training/" in path}
+    validation = {path for path in tracked if "/validation/" in path}
+    equilibrium = {path for path in tracked if "/equilibria/" in path}
+    assert len(training) == len(validation) == 9
+    assert equilibrium == {
+        "configs/opponents/equilibria/river-large-bet-equilibrium-v1.equilibrium.json"
+    }
+    sources = release._wheel_payload_sources(ROOT, CURRENT_VERSION)
+    prefix = f"poker_xai-{CURRENT_VERSION}.data/data/"
+    assert {
+        member.removeprefix(prefix) for member in sources if member.startswith(prefix)
+    } == tracked
+    assert {sources[f"{prefix}{path}"] for path in tracked} == tracked
 
 
 def test_release_verifier_checks_unpacked_documentation_links(tmp_path: Path) -> None:
@@ -199,6 +224,7 @@ def test_sdist_document_bytes_must_equal_the_tracked_git_blob(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(release, "_tracked_payload", lambda _source: set())
+    monkeypatch.setattr(release, "_tracked_opponent_data", lambda _source: set())
     monkeypatch.setattr(release, "_tracked_top_level_sdist_tests", lambda _source: set())
     monkeypatch.setattr(release, "_tracked_sdist_documents", lambda _source: {"docs/README.md"})
     monkeypatch.setattr(release, "_git_blob", lambda _source, _path: b"tracked\n")
@@ -217,6 +243,7 @@ def test_sdist_rejects_generated_metadata_outside_the_exact_allowlist(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(release, "_tracked_payload", lambda _source: set())
+    monkeypatch.setattr(release, "_tracked_opponent_data", lambda _source: set())
     monkeypatch.setattr(release, "_tracked_top_level_sdist_tests", lambda _source: set())
     monkeypatch.setattr(release, "_tracked_sdist_documents", lambda _source: set())
     monkeypatch.setattr(release, "_git_blob", lambda _source, _path: b"tracked\n")
@@ -275,6 +302,8 @@ def _release_bundle(tmp_path: Path, layout: str) -> tuple[Path, Path, Path, Path
                     "saved-explanation-bundle-verification",
                     "solver-backed-explanation-provenance",
                     "r007-solver-backed-no-facing-explanation-provenance",
+                    "r001-r002-release-surface-parity",
+                    "r002-verified-two-session-handoff",
                     "entry-point-metadata",
                     "documentation-relative-links",
                 ],
@@ -486,6 +515,7 @@ def test_wheel_rejects_unsafe_empty_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(release, "_tracked_payload", lambda _source: set())
+    monkeypatch.setattr(release, "_tracked_opponent_data", lambda _source: set())
     wheel = tmp_path / "unsafe.whl"
     with zipfile.ZipFile(wheel, mode="w") as archive:
         archive.writestr("pkg/__pycache__/", b"")
@@ -497,6 +527,7 @@ def test_sdist_rejects_unsafe_empty_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(release, "_tracked_payload", lambda _source: set())
+    monkeypatch.setattr(release, "_tracked_opponent_data", lambda _source: set())
     sdist = tmp_path / "unsafe.tar.gz"
     with tarfile.open(sdist, mode="w:gz") as archive:
         root = tarfile.TarInfo(f"poker_xai-{CURRENT_VERSION}")
@@ -513,6 +544,7 @@ def test_wheel_payload_must_equal_the_tracked_git_blob(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(release, "_tracked_payload", lambda _source: {"module.py"})
+    monkeypatch.setattr(release, "_tracked_opponent_data", lambda _source: set())
     monkeypatch.setattr(release, "_git_blob", lambda _source, _path: b"tracked\n")
     wheel = tmp_path / "mismatch.whl"
     with zipfile.ZipFile(wheel, mode="w") as archive:

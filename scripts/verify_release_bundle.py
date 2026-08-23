@@ -27,6 +27,8 @@ SMOKE_CHECKS = [
     "saved-explanation-bundle-verification",
     "solver-backed-explanation-provenance",
     "r007-solver-backed-no-facing-explanation-provenance",
+    "r001-r002-release-surface-parity",
+    "r002-verified-two-session-handoff",
     "entry-point-metadata",
     "documentation-relative-links",
 ]

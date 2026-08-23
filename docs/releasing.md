@@ -3,31 +3,37 @@
 [Back to the documentation index](README.md).
 
 This maintainer checklist covers the complete GitHub-only publication path for
-`0.1.0a14`. It does not publish to PyPI or any other package index. Stop the
+`0.1.0a15`. It does not publish to PyPI or any other package index. Stop the
 publication process whenever an identity, CI, review, asset, checksum, manifest,
 or safety check does not match this checklist.
 
 ## 1. Update and review the version
 
 - Start a focused `agent/...` branch from the latest `main`.
-- Set the current project version in `pyproject.toml` to `0.1.0a14`.
+- Set the current project version in `pyproject.toml` to `0.1.0a15`.
 - Update only current-version workflow defaults, public examples, tests, and
   artifact names. Preserve historical descriptions of earlier alpha releases.
 - Run the release documentation contract test so the project version, workflow
   defaults, examples, and exact asset names cannot drift independently.
 - Confirm that the public runtime CLI, `poker-xai-run-session`, accepts
-  `--leaky-fixture-reason LEAK_R001` only with the explicit `--leaky-fixture`
-  opt-in. The ordinary session, bare `--leaky-fixture`, R007, and R008 defaults
-  must stay unchanged.
-- Confirm that the R001 fixture exposes only OOP `CHECK` and fixed `BET_75`, and
-  that `BET_75` derives the existing 0.75-pot equilibrium-artifact provenance.
+  `--leaky-fixture-reason LEAK_R001` or `--leaky-fixture-reason LEAK_R002` only
+  with the explicit `--leaky-fixture` opt-in. The ordinary session, bare
+  `--leaky-fixture`, R007, and R008 defaults must stay unchanged.
+- Confirm that the R001/R002 fixtures expose only OOP `CHECK` and fixed
+  `BET_75`, and that `BET_75` derives the existing 0.75-pot
+  equilibrium-artifact provenance.
 - Confirm that the environment records FOLD/CALL only after Hero actually chose
   `BET_75`, preserves zero opportunity after `CHECK`, and makes each response
   available only to later hands rather than the same decision.
-- Confirm that R001 detection uses the pinned baseline provenance and that the
-  exploit reuses the existing HARD/fix-to-baseline opponent/IP/vs_bet/FOLD
-  node-lock mapping, exact current-node action EV, DPL v3, explanations,
-  post-session evaluation, and saved-bundle verification paths.
+- Confirm that R001 uses the pinned FOLD baseline provenance while R002 uses the
+  complementary CALL baseline from the same frozen equilibrium. R002 remains a
+  content-hashed noncatalog fixture and its HARD/fix-to-baseline
+  opponent/IP/vs_bet/CALL candidate is accepted only when its exact current-node
+  action EV strictly improves by more than `1e-12 bb`.
+- Confirm that the tracked nine-opponent Training and nine-opponent Validation
+  catalogs and the frozen equilibrium resolve with identical tracked bytes from
+  source checkout, unpacked wheel, and unpacked sdist. R002 must not add a
+  catalog JSON or another source of truth.
 - Dependencies, the public action vocabulary, CFR defaults, frozen Scenario,
   DPL, RunManifest and Explanation schemas, solver public API, Phase 6, Gate B,
   entry points, defaults, workflow topology, release mechanism, and the exact
@@ -52,11 +58,11 @@ The repository uses a lightweight tag whose name is the version without a `v`
 prefix. From the verified `main` commit:
 
 ```text
-git tag 0.1.0a14
-git push origin 0.1.0a14
+git tag 0.1.0a15
+git push origin 0.1.0a15
 ```
 
-Confirm that `0.1.0a14`, the project version, and the tagged commit agree. Never
+Confirm that `0.1.0a15`, the project version, and the tagged commit agree. Never
 move, replace, or delete an existing branch, tag, or release.
 
 ## 4. Manually approve and run the release workflow
@@ -64,7 +70,7 @@ move, replace, or delete an existing branch, tag, or release.
 - In GitHub Actions, select the existing **Release artifacts** workflow and
   explicitly choose **Run workflow** from `main`.
 - Review the manual inputs before approving the dispatch: both `tag` and
-  `expected_version` must be exactly `0.1.0a14`.
+  `expected_version` must be exactly `0.1.0a15`.
 - Wait for the Ubuntu build and Windows verification jobs to succeed. The
   workflow must report that the tag points at the requested source, both clean
   builds are reproducible, archive smoke checks are offline, and the final
@@ -79,7 +85,7 @@ archive extraction, or archive-contained code execution:
 ```text
 python scripts/verify_release_bundle.py \
   --bundle <workflow-bundle-directory> \
-  --expected-version 0.1.0a14
+  --expected-version 0.1.0a15
 ```
 
 ## 5. Check the exact publication set
@@ -87,8 +93,8 @@ python scripts/verify_release_bundle.py \
 The prerelease may receive only these four files from that one unchanged
 workflow bundle:
 
-- `poker_xai-0.1.0a14-py3-none-any.whl` from `dist/`
-- `poker_xai-0.1.0a14.tar.gz` from `dist/`
+- `poker_xai-0.1.0a15-py3-none-any.whl` from `dist/`
+- `poker_xai-0.1.0a15.tar.gz` from `dist/`
 - `artifact-manifest.json` from `evidence/`
 - `SHA256SUMS` from `evidence/`
 
@@ -109,40 +115,50 @@ The release notes must explain the user-facing addition since the preceding
 release:
 
 - The public offline-session CLI adds the explicit
-  `--leaky-fixture --leaky-fixture-reason LEAK_R001` route. It starts Hero OOP
-  with only `CHECK` and fixed `BET_75`; the bet label is backed by the existing
+  `--leaky-fixture --leaky-fixture-reason LEAK_R002` route alongside R001. Both
+  start Hero OOP with only `CHECK` and fixed `BET_75`, backed by the existing
   versioned 0.75-pot equilibrium artifact rather than a new size parameter.
-- The environment records FOLD/CALL only after an actual `BET_75`. A `CHECK`
-  preserves zero opportunity, and a realized response can affect only later
-  hands, not the decision that produced it.
-- Detection uses the pinned R001 baseline provenance. After detection, the
-  exploit uses the existing HARD/fix-to-baseline opponent/IP/vs_bet/FOLD
-  node-lock mapping and emits the connected base/exploit/final policy, exact
-  current-node action EV, solver provenance, DPL v3, explanation, post-session,
-  and saved-bundle-verification outputs.
-- The ordinary session, bare `--leaky-fixture`, R007, and R008 defaults do not
-  change. Invalid CLI combinations fail before an output directory is created.
+- R001 observes FOLD against its pinned baseline; R002 observes the
+  complementary CALL baseline and uses an in-memory, content-hashed noncatalog
+  opponent. The Phase 6 catalogs remain exactly nine opponents per development
+  split, and R002 adds no catalog entry or JSON.
+- The environment records FOLD/CALL only after Hero actually chose `BET_75`. A
+  `CHECK` preserves zero opportunity, and a realized response is available only
+  to later hands rather than the same decision.
+- The R002 exploit uses the existing HARD/fix-to-baseline
+  opponent/IP/vs_bet/CALL node lock with `baseline_scaled` allocation. It emits
+  solver-backed exact current-node CHECK/BET_75 action EV, DPL v3, explanation,
+  post-session evaluation, and saved-bundle verification only when the locked
+  candidate strictly improves by more than the existing `1e-12 bb` tolerance.
+- The existing tracked catalog JSON and frozen equilibrium bytes are now
+  available from source checkout, unpacked wheel, and unpacked sdist with no
+  copied JSON or second data source. The ordinary session, bare
+  `--leaky-fixture`, R007, and R008 defaults do not change. Invalid CLI
+  combinations fail before an output directory is created.
 
-The notes must also record that the existing release smoke remains unchanged:
-it still covers two consecutive Hero sessions on source checkout, unpacked
-wheel, and unpacked sdist, with session two explicitly consuming session one's
-manifest via `--previous-session-manifest`. The existing saved explanation-bundle
-checks and R007/R008 smoke remain part of the unchanged workflow bundle. The
-R001 end-to-end fixture checks run in the repository CI without adding a release
-workflow, release asset, or publication mechanism.
+The notes must also record that release smoke adds R001/R002 release-surface
+parity and a verified R002 two-session handoff on source checkout, unpacked
+wheel, and unpacked sdist. The successor explicitly consumes the source
+session's manifest via `--previous-session-manifest`, leaves the source bundle
+unchanged, restores only the existing settings, reselects R002, and requires
+solver-backed exact-EV improvement and saved explanation-bundle checks in both
+sessions. Existing two consecutive Hero sessions for the ordinary-session
+handoff and R007/R008 smoke remain in the same workflow; this adds no release
+workflow, asset, or publication mechanism.
 
 Keep the simulation-only boundary and identify the published-release four-asset
 verification workflow, continued required manual verification, release
 documentation contract test, and exact four-asset contract. State that there is
 no new dependency, entry point, schema, default, solver public API, workflow
 topology, release mechanism, arbitrary bet-size parameter, raise, automatic
-session loop, or registry. Phase 6 and Gate B are unchanged. Preserve the
+session loop, registry, or Phase 6 catalog content. Phase 6 and Gate B are
+unchanged. Preserve the
 default facing-all-in limitation and state that 40 CFR+ iterations are a fixed
 alpha computation budget, not a convergence guarantee. Keep the offline
 simulation boundary and make no convergence, GTO, strategy-safety,
 profitability, or real-world performance claim.
 
-Create a GitHub prerelease for tag `0.1.0a14` and attach only the four verified
+Create a GitHub prerelease for tag `0.1.0a15` and attach only the four verified
 files above.
 
 ## 6. Re-download and verify the published assets
@@ -156,7 +172,7 @@ tag source checkout:
 python scripts/verify_release_bundle.py \
   --bundle <fresh-release-download-directory> \
   --layout flat \
-  --expected-version 0.1.0a14
+  --expected-version 0.1.0a15
 ```
 
 The flat mode enforces the same filenames, exact checksum targets and digests,
@@ -179,7 +195,7 @@ this checklist.
 The **Verify published release assets** workflow runs for the GitHub Release
 `published` event. A maintainer may rerun it manually from `main` with the
 `workflow_dispatch` inputs `tag` and `expected_version`, both set to
-`0.1.0a14`.
+`0.1.0a15`.
 
 The workflow has only `contents: read` permission and does not edit the Release,
 tag, assets, Issues, or pull requests. It fails unless the target is a published

@@ -14,12 +14,11 @@ from poker_solver.river_tree import RiverBettingConfig, build_river_game
 from poker_solver.strategy import StrategyProfile, validate_profile
 
 from ._canonical import parse_canonical_decimal
+from .catalog import DEFAULT_CATALOG_ROOT
 
 EQUILIBRIUM_ARTIFACT_SCHEMA_VERSION = "1.0.0"
 EQUILIBRIUM_ARTIFACT_TYPE = "frozen-equilibrium"
-DEFAULT_EQUILIBRIUM_ROOT = (
-    Path(__file__).resolve().parents[2] / "configs" / "opponents" / "equilibria"
-)
+DEFAULT_EQUILIBRIUM_ROOT = DEFAULT_CATALOG_ROOT / "equilibria"
 
 _VERSION = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
