@@ -21,6 +21,7 @@ SMOKE_SURFACES = ["source-checkout", "unpacked-wheel", "unpacked-sdist"]
 SMOKE_CHECKS = [
     "--version",
     "--help",
+    "normal-hero-cli-probability-argument-validation",
     "two-consecutive-hero-sessions",
     "explicit-previous-session-manifest",
     "manifest-round-trip",

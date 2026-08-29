@@ -324,7 +324,7 @@ def test_different_seed_changes_output():
 def test_manifest_is_valid_and_pins_versions_and_configs():
     manifest = build_manifest(20260704, HANDS, git_commit="unknown")
     assert isinstance(manifest, RunManifest)
-    assert manifest.code.package_version == "0.1.0a16"
+    assert manifest.code.package_version == "0.1.0a17"
     assert manifest.code.git_dirty is None
     assert manifest.code.entrypoint == "poker_ai.session.run_session"
     assert manifest.code.argv == []
@@ -455,7 +455,7 @@ def test_leaky_fixture_cli_smoke_writes_detected_leaks_and_mix(tmp_path, capsys)
     assert estimator["detector_min_confidence"] == 0.5
     assert estimator["rule_exploit_min_confidence"] == 0.95
     assert manifest.versions.baseline_table_version == "fixture-action-baseline"
-    assert manifest.code.package_version == "0.1.0a16"
+    assert manifest.code.package_version == "0.1.0a17"
     assert manifest.code.entrypoint == "cli/run_session.py"
     assert manifest.code.argv == raw_argv
     assert {
@@ -1118,6 +1118,66 @@ def test_distributed_session_entrypoint_and_help_are_available(capsys):
     assert "--out-dir" in help_text
 
 
+@pytest.mark.parametrize("option", ["--safety-alpha", "--exploration-epsilon"])
+@pytest.mark.parametrize("value", ["-0.1", "1.1", "nan", "inf"])
+def test_probability_arguments_fail_at_parse_boundary(tmp_path, monkeypatch, capsys, option, value):
+    from poker_ai import run_session_cli
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("invalid probability argument passed the parse boundary")
+
+    monkeypatch.setattr(run_session_cli, "load_next_session_settings", unexpected)
+    monkeypatch.setattr(run_session_cli, "NodelockExploitProvider", unexpected)
+    monkeypatch.setattr(run_session_cli, "collect_runtime_provenance", unexpected)
+    monkeypatch.setattr(run_session_cli, "run_session", unexpected)
+    monkeypatch.setattr(run_session_cli, "write_session_bundle", unexpected)
+    monkeypatch.setattr(run_session_cli, "write_verified_explanation_bundle", unexpected)
+    output_root = tmp_path / "must-not-exist"
+    with pytest.raises(SystemExit) as stopped:
+        run_session_cli.main(
+            [
+                "--leaky-fixture",
+                "--explanations",
+                "--previous-session-manifest",
+                str(tmp_path / "previous.manifest.json"),
+                option,
+                value,
+                "--out-dir",
+                str(output_root),
+            ]
+        )
+    captured = capsys.readouterr()
+    assert stopped.value.code == 2
+    assert captured.out == ""
+    assert captured.err.startswith("usage: ")
+    assert f"error: argument {option}:" in captured.err
+    assert "finite and in [0, 1]" in captured.err
+    assert "Traceback" not in captured.err
+    assert not output_root.exists()
+
+
+def test_probability_arguments_share_type_and_accept_closed_unit_interval():
+    from poker_ai import run_session_cli
+
+    parser = run_session_cli._parser(entrypoint="test")
+    actions = {
+        option: action
+        for action in parser._actions
+        for option in action.option_strings
+        if option in {"--safety-alpha", "--exploration-epsilon"}
+    }
+    assert actions["--safety-alpha"].type is actions["--exploration-epsilon"].type
+    omitted = parser.parse_args([])
+    assert omitted.safety_alpha is None
+    assert omitted.exploration_epsilon is None
+    for option, destination in (
+        ("--safety-alpha", "safety_alpha"),
+        ("--exploration-epsilon", "exploration_epsilon"),
+    ):
+        for raw, expected in (("0.0", 0.0), ("0.37", 0.37), ("1.0", 1.0)):
+            assert getattr(parser.parse_args([option, raw]), destination) == expected
+
+
 def test_session_version_commands_exit_without_starting_or_writing(tmp_path, monkeypatch, capsys):
     from poker_ai import run_session_cli
 
@@ -1131,14 +1191,14 @@ def test_session_version_commands_exit_without_starting_or_writing(tmp_path, mon
     with pytest.raises(SystemExit) as console_stopped:
         run_session_cli.main(["--version"])
     assert console_stopped.value.code == 0
-    assert capsys.readouterr().out == "poker-xai-run-session 0.1.0a16\n"
+    assert capsys.readouterr().out == "poker-xai-run-session 0.1.0a17\n"
     assert tuple(tmp_path.iterdir()) == ()
 
     compatibility_cli = _load_cli_module()
     with pytest.raises(SystemExit) as wrapper_stopped:
         compatibility_cli.main(["--version"])
     assert wrapper_stopped.value.code == 0
-    assert capsys.readouterr().out == "cli/run_session.py 0.1.0a16\n"
+    assert capsys.readouterr().out == "cli/run_session.py 0.1.0a17\n"
     assert tuple(tmp_path.iterdir()) == ()
 
 

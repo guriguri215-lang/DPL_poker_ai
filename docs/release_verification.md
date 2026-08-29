@@ -9,10 +9,10 @@ continue if any check fails.
 ## Obtain the four uploaded assets
 
 Open the [`poker-xai` GitHub Releases page](https://github.com/guriguri215-lang/DPL_poker_ai/releases),
-select release `0.1.0a16`, and download exactly these four uploaded assets:
+select release `0.1.0a17`, and download exactly these four uploaded assets:
 
-- `poker_xai-0.1.0a16-py3-none-any.whl`
-- `poker_xai-0.1.0a16.tar.gz`
+- `poker_xai-0.1.0a17-py3-none-any.whl`
+- `poker_xai-0.1.0a17.tar.gz`
 - `artifact-manifest.json`
 - `SHA256SUMS`
 
@@ -30,14 +30,14 @@ archive, or execute archive-contained code:
 python scripts/verify_release_bundle.py \
   --bundle <fresh-release-download-directory> \
   --layout flat \
-  --expected-version 0.1.0a16
+  --expected-version 0.1.0a17
 ```
 
 ## Automated maintainer re-verification
 
 The read-only **Verify published release assets** workflow runs on the GitHub
 Release `published` event and can also be rerun manually from `main` with its
-`workflow_dispatch` `tag` and `expected_version` inputs set to `0.1.0a16`. It has
+`workflow_dispatch` `tag` and `expected_version` inputs set to `0.1.0a17`. It has
 only `contents: read` permission and never modifies a Release, tag, asset,
 Issue, or pull request.
 
@@ -68,8 +68,8 @@ no `pip` command and performs no installation:
 set -- ./*
 [ "$#" -eq 4 ] || { echo "unexpected asset count" >&2; exit 1; }
 for name in \
-  poker_xai-0.1.0a16-py3-none-any.whl \
-  poker_xai-0.1.0a16.tar.gz \
+  poker_xai-0.1.0a17-py3-none-any.whl \
+  poker_xai-0.1.0a17.tar.gz \
   artifact-manifest.json \
   SHA256SUMS
 do
@@ -88,10 +88,10 @@ import hashlib
 from pathlib import Path
 
 manifest = json.loads(Path("artifact-manifest.json").read_text(encoding="utf-8"))
-assert manifest["version"] == "0.1.0a16"
+assert manifest["version"] == "0.1.0a17"
 artifact_names = {
-    "poker_xai-0.1.0a16-py3-none-any.whl",
-    "poker_xai-0.1.0a16.tar.gz",
+    "poker_xai-0.1.0a17-py3-none-any.whl",
+    "poker_xai-0.1.0a17.tar.gz",
 }
 assert set(manifest["artifacts"]) == artifact_names
 for name in artifact_names:
@@ -108,8 +108,8 @@ On PowerShell, the equivalent check is:
 $expected = @(
   'SHA256SUMS',
   'artifact-manifest.json',
-  'poker_xai-0.1.0a16-py3-none-any.whl',
-  'poker_xai-0.1.0a16.tar.gz'
+  'poker_xai-0.1.0a17-py3-none-any.whl',
+  'poker_xai-0.1.0a17.tar.gz'
 ) | Sort-Object
 $actual = @(Get-ChildItem -Force | ForEach-Object Name | Sort-Object)
 if (@(Compare-Object $expected $actual).Count -ne 0) {
@@ -118,8 +118,8 @@ if (@(Compare-Object $expected $actual).Count -ne 0) {
 
 $checksumTargets = @(
   'artifact-manifest.json',
-  'poker_xai-0.1.0a16-py3-none-any.whl',
-  'poker_xai-0.1.0a16.tar.gz'
+  'poker_xai-0.1.0a17-py3-none-any.whl',
+  'poker_xai-0.1.0a17.tar.gz'
 )
 $seen = @{}
 $verifiedHashes = @{}
@@ -142,11 +142,11 @@ if (@(Compare-Object ($checksumTargets | Sort-Object) ($seen.Keys | Sort-Object)
 }
 
 $manifest = Get-Content -Raw -LiteralPath .\artifact-manifest.json | ConvertFrom-Json
-if ($manifest.version -cne '0.1.0a16') { throw 'manifest version mismatch' }
+if ($manifest.version -cne '0.1.0a17') { throw 'manifest version mismatch' }
 $manifestArtifacts = @($manifest.artifacts.PSObject.Properties.Name | Sort-Object)
 $expectedArtifacts = @(
-  'poker_xai-0.1.0a16-py3-none-any.whl',
-  'poker_xai-0.1.0a16.tar.gz'
+  'poker_xai-0.1.0a17-py3-none-any.whl',
+  'poker_xai-0.1.0a17.tar.gz'
 ) | Sort-Object
 if (@(Compare-Object $expectedArtifacts $manifestArtifacts).Count -ne 0) {
   throw 'manifest artifact set mismatch'
@@ -167,7 +167,7 @@ if ($manifest.reproducible -ne $true -or $manifest.offline_smoke -ne $true) {
 After the checksum succeeds, inspect `artifact-manifest.json` as data rather
 than relying only on its filename:
 
-- `version` must be `0.1.0a16`.
+- `version` must be `0.1.0a17`.
 - `artifacts` must contain only the wheel and sdist names, with the same SHA-256
   digests already checked through `SHA256SUMS`.
 - `reproducible: true` means two independent clean-checkout builds produced the
@@ -178,7 +178,13 @@ than relying only on its filename:
 - `smoke_checks` records version/help commands, entry-point metadata, two
   consecutive Hero sessions on every surface, the second session's explicit
   `--previous-session-manifest` handoff from the first, RunManifest round-trip
-  validation, and documentation relative links. It also records a seed-32,
+  validation, and documentation relative links. Its normal Hero CLI probability
+  check rejects `-0.1`, `1.1`, `nan`, and `inf` for both `--safety-alpha` and
+  `--exploration-epsilon` with usage and exit code 2, without a traceback,
+  reading the deliberately missing previous-session manifest, or creating
+  output. Existing successful runs cover in-range explicit values, omitted
+  defaults, and saved-settings restoration on all three surfaces. It also
+  records a seed-32,
   two-hand `--leaky-fixture --explanations` run that requires an improved
   solver-backed DPL, matching non-empty node-lock solver provenance in its
   explanation, direct verification of every explanation, and successful saved
@@ -210,8 +216,8 @@ fixed alpha computation budget, not a convergence guarantee.
 ## Proceed after verification
 
 You may inspect either archive without installing it. For example,
-`python3 -I -m zipfile --list poker_xai-0.1.0a16-py3-none-any.whl` lists the
-wheel, while `tar -tzf poker_xai-0.1.0a16.tar.gz` lists the sdist. Extracting the
+`python3 -I -m zipfile --list poker_xai-0.1.0a17-py3-none-any.whl` lists the
+wheel, while `tar -tzf poker_xai-0.1.0a17.tar.gz` lists the sdist. Extracting the
 sdist gives a self-contained `README.md`, `CONTRIBUTING.md`, and public Markdown
 documentation tree whose relative links were checked by the release workflow.
 Read those files before choosing how to use the simulation-only research code.
