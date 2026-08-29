@@ -1,9 +1,10 @@
 """Stub opponent with a hidden strategy Hero must never read (AI Spec 6.3).
 
 The historical stub jams all-in with its whole river range. The opt-in R007
-fixture uses a separate check-back stub after Hero checks. The R001/R002
-fixtures synthesize one frozen 0.75-pot opponent and reveal a sampled response
-only after Hero bets. Each *action policy* is a **hidden strategy** --
+fixture uses a separate check-back stub after Hero checks. R001/R002 reuse one
+frozen 0.75-pot profile, while R003 pins one finite-iteration 0.33-pot profile;
+all three reveal a sampled response only after Hero bets. Each *action policy*
+is a **hidden strategy** --
 Hero is forbidden from conditioning on it (that would be leak detection /
 exploitation, out of scope, and in general breaks the honesty of the setup, AI
 Spec 6.3). The opponent's *hand range*, by contrast, is public scenario
@@ -17,9 +18,13 @@ the separate, clearly-named :meth:`act` method, which Hero is never handed.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import random
 from dataclasses import dataclass, field
+from decimal import Decimal
+from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from poker_core.range_model import Range
@@ -32,8 +37,16 @@ JAM_ALL_OPPONENT_ID = "stub_jam_all"
 CHECK_BACK_OPPONENT_ID = "stub_check_back_all"
 R001_FIXTURE_OPPONENT_ID = "nl-train-r001-d016-s102"
 R002_FIXTURE_OPPONENT_ID = "fixture-r002-d016-s102"
+R003_FIXTURE_OPPONENT_ID = "fixture-r003-d016-finite-cfr-s20260704"
 STUB_OPPONENT_VERSION = "0.1.0"
 _RIVER_LARGE_BET_FIXTURE_DELTA = "0.16"
+R003_FIXTURE_DELTA = "0.16"
+R003_FIXTURE_PROFILE_VERSION = "finite-cfr-r003-profile-v1"
+R003_FIXTURE_PROFILE_SEED = 20260704
+R003_FIXTURE_PROFILE_ITERATIONS = 40
+R003_FIXTURE_PROFILE_AVERAGE_DELAY = 0
+R003_FIXTURE_BET_FRACTION = 0.33
+R003_FIXTURE_RESPONSE_SAMPLER_VERSION = "r003-opponent-response-v1"
 
 
 class HiddenStrategyAccessError(RuntimeError):
@@ -94,12 +107,17 @@ def reveal_stub_opponent_answer_key(*, opponent_model_id: str) -> OpponentAnswer
 
     if opponent_model_id == CHECK_BACK_OPPONENT_ID:
         action_probabilities = (("CHECK", 1.0),)
-    elif opponent_model_id in {R001_FIXTURE_OPPONENT_ID, R002_FIXTURE_OPPONENT_ID}:
-        measurement = (
-            r001_fixture_measurement()
-            if opponent_model_id == R001_FIXTURE_OPPONENT_ID
-            else r002_fixture_measurement()
-        )
+    elif opponent_model_id in {
+        R001_FIXTURE_OPPONENT_ID,
+        R002_FIXTURE_OPPONENT_ID,
+        R003_FIXTURE_OPPONENT_ID,
+    }:
+        if opponent_model_id == R001_FIXTURE_OPPONENT_ID:
+            measurement = r001_fixture_measurement()
+        elif opponent_model_id == R002_FIXTURE_OPPONENT_ID:
+            measurement = r002_fixture_measurement()
+        else:
+            measurement = r003_fixture_measurement()
         target_probability = float(measurement.opponent_rate)
         action_probabilities = tuple(
             sorted(
@@ -201,6 +219,187 @@ def r002_fixture_measurement(
     )
 
 
+def r003_fixture_measurement() -> TrueLeakMeasurement:
+    """Return the fixed finite-CFR small-bet FOLD baseline and response rate."""
+
+    measurement, _path, _sha256 = _r003_fixture_contract()
+    return measurement
+
+
+def r003_fixture_config_identity() -> tuple[str, str]:
+    """Return the existing inline ConfigRef path/hash for the noncatalog fixture."""
+
+    _measurement, path, sha256 = _r003_fixture_contract()
+    return path, sha256
+
+
+@lru_cache(maxsize=1)
+def _r003_fixture_contract() -> tuple[TrueLeakMeasurement, str, str]:
+    """Build one deterministic 0.33-pot finite-CFR opponent contract in memory."""
+
+    from opponents.ground_truth import TrueLeakMeasurement
+    from opponents.model import leak_action_mapping
+    from poker_ai.scenario import Scenario, generate_scenarios
+    from poker_solver.nodelock import (
+        NodeLockConfig,
+        NodeLockRule,
+        apply_node_locks,
+        river_infoset_reach_weights,
+    )
+    from poker_solver.river_solve import solve_frozen_river_scenario
+    from poker_solver.river_tree import RiverBettingConfig, build_river_game
+
+    generated = next(generate_scenarios(R003_FIXTURE_PROFILE_SEED, 1))
+    scenario_payload = generated.model_dump(mode="python")
+    scenario_payload["position"] = "OOP"
+    scenario_payload["effective_stack"] = max(
+        generated.effective_stack,
+        generated.pot * R003_FIXTURE_BET_FRACTION,
+    )
+    scenario = Scenario.model_validate(scenario_payload)
+    result = solve_frozen_river_scenario(
+        scenario,
+        bet_fraction=R003_FIXTURE_BET_FRACTION,
+        iterations=R003_FIXTURE_PROFILE_ITERATIONS,
+        checkpoints=(),
+        average_delay=R003_FIXTURE_PROFILE_AVERAGE_DELAY,
+    )
+    game = build_river_game(
+        RiverBettingConfig(
+            pot=scenario.pot,
+            bet_fraction=R003_FIXTURE_BET_FRACTION,
+        ),
+        scenario.hero_range_obj(),
+        scenario.opponent_range_obj(),
+        scenario.board_cards(),
+    )
+    # Keep generic synthesis closed to R003; this fixture needs only the existing
+    # R001 vs_bet/FOLD semantics inside its bounded noncatalog contract.
+    mapping = leak_action_mapping("LEAK_R001")
+    target_infosets = tuple(
+        infoset
+        for infoset in game.infosets
+        if infoset.startswith("IP:")
+        and infoset.endswith(f":{mapping.phase}")
+        and mapping.action in game.actions_of(infoset)
+    )
+    if not target_infosets:
+        raise ValueError("R003 finite-CFR profile has no IP vs_bet FOLD infosets")
+    reach_weights = river_infoset_reach_weights(game, result.strategy)
+    denominator = math.fsum(reach_weights[infoset] for infoset in target_infosets)
+    if denominator <= 0.0:
+        raise ValueError("R003 finite-CFR profile has zero small-bet response reach")
+    baseline_rate = (
+        math.fsum(
+            reach_weights[infoset] * result.strategy[infoset][mapping.action]
+            for infoset in target_infosets
+        )
+        / denominator
+    )
+    target_rate = baseline_rate + float(Decimal(R003_FIXTURE_DELTA))
+    if not 0.0 < target_rate < 1.0:
+        raise ValueError("R003 fixture delta exceeds the finite-CFR probability headroom")
+
+    application = apply_node_locks(
+        game,
+        result.strategy,
+        NodeLockConfig(
+            rules=(
+                NodeLockRule(
+                    actor="IP",
+                    phase=mapping.phase,
+                    action=mapping.action,
+                    target_frequency=target_rate,
+                    combo_allocation="baseline_scaled",
+                    rule_id="LEAK_R003_synthetic_opponent",
+                ),
+            ),
+            lock_mode="HARD",
+            unlocked_policy_mode="fix_to_baseline",
+        ),
+        reach_weights=reach_weights,
+    )
+    if len(application.applied_locks) != 1:
+        raise ValueError("R003 fixture must apply exactly one FOLD node lock")
+    achieved_rate = application.applied_locks[0].achieved_frequency
+    if not math.isclose(achieved_rate, target_rate, rel_tol=0.0, abs_tol=1e-12):
+        raise ValueError("R003 fixture did not achieve its requested overfold rate")
+    baseline_decimal = Decimal(str(baseline_rate))
+    opponent_decimal = Decimal(str(achieved_rate))
+    true_leak = opponent_decimal - baseline_decimal
+    if abs(true_leak - Decimal(R003_FIXTURE_DELTA)) > Decimal("1e-12"):
+        raise ValueError("R003 fixture overfold delta changed")
+    measurement = TrueLeakMeasurement(
+        reason_id="LEAK_R003",
+        action=mapping.action,
+        phase=mapping.phase,
+        baseline_rate=baseline_decimal,
+        opponent_rate=opponent_decimal,
+        true_leak=true_leak,
+    )
+
+    baseline_profile_sha256 = _strategy_profile_sha256(result.strategy)
+    locked_profile_sha256 = _strategy_profile_sha256(application.profile)
+    provenance_payload = {
+        "fixture_version": R003_FIXTURE_PROFILE_VERSION,
+        "profile_kind": "finite_iteration_cfr",
+        "profile_source": "poker_solver.solve_frozen_river_scenario",
+        "equilibrium_or_gto_claim": False,
+        "reference_seed": R003_FIXTURE_PROFILE_SEED,
+        "reference_scenario_index": 0,
+        "reference_scenario": scenario.model_dump(mode="json"),
+        "solver": "cfr_plus",
+        "bet_fraction": R003_FIXTURE_BET_FRACTION,
+        "iterations": R003_FIXTURE_PROFILE_ITERATIONS,
+        "average_delay": R003_FIXTURE_PROFILE_AVERAGE_DELAY,
+        "solve_config_digest": result.solve_config_digest,
+        "baseline_profile_sha256": baseline_profile_sha256,
+        "locked_profile_sha256": locked_profile_sha256,
+        "reason_id": measurement.reason_id,
+        "action": measurement.action,
+        "phase": measurement.phase,
+        "delta": R003_FIXTURE_DELTA,
+        "baseline_rate": str(measurement.baseline_rate),
+        "opponent_rate": str(measurement.opponent_rate),
+        "combo_allocation": "baseline_scaled",
+        "lock_mode": application.lock_mode,
+        "unlocked_policy_mode": application.unlocked_policy_mode,
+        "response_sampler": R003_FIXTURE_RESPONSE_SAMPLER_VERSION,
+    }
+    encoded = json.dumps(
+        provenance_payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("ascii")
+    config_sha256 = hashlib.sha256(encoded).hexdigest()
+    inline_path = (
+        f"inline:noncatalog:{R003_FIXTURE_PROFILE_VERSION}:reason=LEAK_R003:"
+        f"delta={R003_FIXTURE_DELTA}:profile=finite_iteration_cfr:"
+        f"source=poker_solver.solve_frozen_river_scenario:"
+        f"seed={R003_FIXTURE_PROFILE_SEED}:scenario_index=0:"
+        f"public_bet=BET_33:bet_fraction={R003_FIXTURE_BET_FRACTION:g}:"
+        f"iterations={R003_FIXTURE_PROFILE_ITERATIONS}:"
+        f"average_delay={R003_FIXTURE_PROFILE_AVERAGE_DELAY}:"
+        f"solve_config={result.solve_config_digest}:"
+        f"baseline_profile={baseline_profile_sha256}:"
+        f"locked_profile={locked_profile_sha256}:allocation=baseline_scaled:"
+        f"lock_mode={application.lock_mode}:"
+        f"unlocked_policy_mode={application.unlocked_policy_mode}:"
+        f"response_sampler={R003_FIXTURE_RESPONSE_SAMPLER_VERSION}"
+    )
+    return measurement, inline_path, config_sha256
+
+
+def _strategy_profile_sha256(profile: dict[str, dict[str, float]]) -> str:
+    payload = {
+        infoset: {action: distribution[action] for action in sorted(distribution)}
+        for infoset, distribution in sorted(profile.items())
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _river_large_bet_fixture_measurement(
     fixture: SynthesizedOpponent,
     *,
@@ -235,7 +434,7 @@ def sample_river_large_bet_fixture_response(
     target_probability: float,
     rng: random.Random,
 ) -> OpponentAction:
-    """Environment-only FOLD/CALL sample after a realised Hero BET_75."""
+    """Environment-only FOLD/CALL sample after a realised fixed Hero river bet."""
 
     if target_action not in {"FOLD", "CALL"}:
         raise ValueError("river-large-bet target_action must be FOLD or CALL")

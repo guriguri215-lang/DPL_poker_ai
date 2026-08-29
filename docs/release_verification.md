@@ -206,12 +206,23 @@ than relying only on its filename:
   exact-EV gain and over/under-adjustment counts, followed by every existing
   next-session setting in the same fixed order. The smoke requires the display
   to leave its source bundle byte-for-byte unchanged.
+  R003 smoke first confirms that the reason is rejected without
+  `--leaky-fixture`, that an unsupported R004 selector is still rejected, and
+  that the omitted-selector default remains the facing-all-in `FOLD`/`CALL`
+  route. It then runs the explicit seed-20260004, 20-hand R003 command on every
+  surface and requires only `CHECK`/`BET_33`, causal post-bet `FOLD`/`CALL`
+  observations, the content-hashed finite-CFR inline opponent identity,
+  solver-backed exact action-EV improvement, explanations, post-session
+  evaluation, and saved-bundle verification. A one-hand successor explicitly
+  consumes the saved manifest, proves that the source bundle is unchanged, and
+  confirms restored alpha and epsilon without carrying prior observations.
 
 These results verify the release bundle and basic offline execution; they are
 not a solver convergence guarantee. The default river adapter remains limited
-to facing an all-in; the explicit R007 fixture adds only OOP `CHECK`/`BET_33`,
-while R001/R002 add only OOP `CHECK`/`BET_75`. The 40 CFR+ iterations remain a
-fixed alpha computation budget, not a convergence guarantee.
+to facing an all-in; the explicit R007/R003 fixtures add only OOP
+`CHECK`/`BET_33`, while R001/R002 add only OOP `CHECK`/`BET_75`. The 40 CFR+
+iterations remain a fixed alpha computation budget, not a convergence
+guarantee.
 
 ## Proceed after verification
 

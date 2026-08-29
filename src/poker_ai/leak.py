@@ -31,6 +31,7 @@ _CHECK_BET_POLICY_ACTIONS = frozenset((*CHECK_ACTIONS, *_POLICY_BET_ACTIONS))
 BOUNDARY_ABS_TOLERANCE = "1e-12"
 R001_FIXTURE_MIN_DEVIATION = 0.08
 R002_FIXTURE_MIN_DEVIATION = R001_FIXTURE_MIN_DEVIATION
+R003_FIXTURE_MIN_DEVIATION = R001_FIXTURE_MIN_DEVIATION
 GroundTruthBoundary = Literal["positive", "negative", "indifference"]
 
 
@@ -233,6 +234,33 @@ def leaky_r002_fixture_action_baseline_table() -> ActionBaselineTable:
     """Build R002's CALL baseline from the same pinned equilibrium artifact."""
 
     return _leaky_river_large_bet_fixture_action_baseline_table("LEAK_R002")
+
+
+def leaky_r003_fixture_action_baseline_table() -> ActionBaselineTable:
+    """Build R003's FOLD baseline from its fixed finite-CFR 0.33-pot profile."""
+
+    from .opponent import (
+        R003_FIXTURE_PROFILE_VERSION,
+        r003_fixture_config_identity,
+        r003_fixture_measurement,
+    )
+
+    measurement = r003_fixture_measurement()
+    _config_path, config_sha256 = r003_fixture_config_identity()
+    return ActionBaselineTable(
+        table_version=(
+            f"{R003_FIXTURE_PROFILE_VERSION}-cfg{config_sha256[:12]}-r003-action-baseline"
+        ),
+        rules=(
+            ActionLeakRule(
+                reason_id="LEAK_R003",
+                leak_type="river_small_bet_overfold",
+                action_group=(measurement.action,),
+                baseline_rate=float(measurement.baseline_rate),
+                direction="increase_small_bet_frequency",
+            ),
+        ),
+    )
 
 
 def _leaky_river_large_bet_fixture_action_baseline_table(
