@@ -5,7 +5,12 @@ import json
 from pathlib import Path
 
 import pytest
-from post_session_validation_support import remove_post_session_artifact, snapshot_bundle
+from post_session_validation_support import (
+    POST_SESSION_VALIDATION_CASES,
+    apply_post_session_validation_case,
+    remove_post_session_artifact,
+    snapshot_bundle,
+)
 
 from poker_ai import explanation_bundle_cli, run_session_cli
 from poker_ai.explanation_artifacts import (
@@ -31,6 +36,27 @@ def _write_bundle(root: Path, *, leaky: bool = False) -> Path:
         argv.insert(-2, "--leaky-fixture")
     assert run_session_cli.main(argv) == 0
     return root / "S20260704.manifest.json"
+
+
+def _write_large_bet_bundle(root: Path, *, reason_id: str, hands: int) -> Path:
+    argv = [
+        "--seed",
+        "20260000",
+        "--hands",
+        str(hands),
+        "--solver-iterations",
+        "5",
+        "--leaky-fixture",
+        "--leaky-fixture-reason",
+        reason_id,
+        "--exploration-epsilon",
+        "1.0",
+        "--explanations",
+        "--out-dir",
+        str(root),
+    ]
+    assert run_session_cli.main(argv) == 0
+    return root / "S20260000.manifest.json"
 
 
 def _payload(path: Path) -> dict:
@@ -258,6 +284,164 @@ def test_distribution_cli_reports_only_bundle_and_checker_results(tmp_path, caps
     assert snapshot_bundle(root) == before
 
 
+@pytest.mark.parametrize(
+    ("reason_id", "hands", "expected_metrics"),
+    [
+        (
+            "LEAK_R001",
+            20,
+            (
+                "evaluation.leak_detection_accuracy=0.6666666666666666",
+                "evaluation.average_estimation_error=0.42881210958357396",
+                "evaluation.exploit_ev_gain_vs_base=0.05055699675947243",
+                "evaluation.over_adjustment_count=0",
+                "evaluation.under_adjustment_count=0",
+                "evaluation.explanation_validity_score=1.0",
+            ),
+        ),
+        (
+            "LEAK_R002",
+            40,
+            (
+                "evaluation.leak_detection_accuracy=0.5",
+                "evaluation.average_estimation_error=0.1875",
+                "evaluation.exploit_ev_gain_vs_base=0.0327431223477687",
+                "evaluation.over_adjustment_count=0",
+                "evaluation.under_adjustment_count=0",
+                "evaluation.explanation_validity_score=1.0",
+            ),
+        ),
+    ],
+)
+def test_show_evaluation_reports_verified_r001_and_r002_values_and_settings(
+    tmp_path,
+    capsys,
+    reason_id,
+    hands,
+    expected_metrics,
+):
+    root = tmp_path / reason_id.lower()
+    manifest_path = _write_large_bet_bundle(root, reason_id=reason_id, hands=hands)
+    capsys.readouterr()
+    before = snapshot_bundle(root)
+
+    assert explanation_bundle_cli.main(["--manifest", str(manifest_path), "--show-evaluation"]) == 0
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert captured.out.splitlines() == [
+        "artifact_integrity=passed references=5",
+        f"explanation_checker=passed total={hands} summary=consistent",
+        *expected_metrics,
+        'next_session.leak_detector_config.method_version="beta-binomial-upper-tail-v1"',
+        "next_session.leak_detector_config.alpha0=1.0",
+        "next_session.leak_detector_config.beta0=1.0",
+        'next_session.leak_detector_config.tail="upper"',
+        "next_session.leak_detector_config.min_effective_sample_size=1",
+        "next_session.leak_detector_config.min_deviation=0.08",
+        "next_session.leak_detector_config.min_confidence=0.5",
+        "next_session.leak_detector_config.rule_exploit_min_confidence=0.95",
+        "next_session.leak_detector_config.nodelock_exploit_min_confidence=0.95",
+        "next_session.safety_alpha=1.0",
+        "next_session.epsilon=1.0",
+    ]
+    assert "session_id" not in captured.out
+    assert "opponent_model_id" not in captured.out
+    assert "notes" not in captured.out
+    assert "sha256" not in captured.out
+    assert str(root) not in captured.out
+    assert snapshot_bundle(root) == before
+
+
+def test_show_evaluation_uses_the_captured_post_session_bytes_once(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    root = tmp_path / "bundle"
+    manifest_path = _write_bundle(root)
+    evaluation_path = _artifact_path(manifest_path, ".post_session_evaluation.json")
+    capsys.readouterr()
+    before = snapshot_bundle(root)
+    original_read_bytes = Path.read_bytes
+    evaluation_reads = 0
+
+    def recording_read_bytes(path):
+        nonlocal evaluation_reads
+        if path == evaluation_path:
+            evaluation_reads += 1
+        return original_read_bytes(path)
+
+    with monkeypatch.context() as context:
+        context.setattr(Path, "read_bytes", recording_read_bytes)
+        assert (
+            explanation_bundle_cli.main(["--manifest", str(manifest_path), "--show-evaluation"])
+            == 0
+        )
+
+    assert evaluation_reads == 1
+    assert capsys.readouterr().err == ""
+    assert snapshot_bundle(root) == before
+
+
+_SHOW_EVALUATION_FAILURE_CASES = tuple(
+    case
+    for case in POST_SESSION_VALIDATION_CASES
+    if case.name
+    in {
+        "evaluation-file-missing",
+        "evaluation-reference-multiple",
+        "artifact-changed",
+        "session-mismatch",
+        "opponent-mismatch",
+    }
+)
+
+
+@pytest.mark.parametrize(
+    "case",
+    _SHOW_EVALUATION_FAILURE_CASES,
+    ids=lambda case: case.name,
+)
+def test_show_evaluation_fails_before_output_and_preserves_invalid_bundle(
+    tmp_path,
+    capsys,
+    case,
+):
+    root = tmp_path / "bundle"
+    manifest_path = _write_bundle(root)
+    capsys.readouterr()
+    expected_filename = apply_post_session_validation_case(manifest_path, case)
+    before = snapshot_bundle(root)
+
+    assert explanation_bundle_cli.main(["--manifest", str(manifest_path), "--show-evaluation"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert f"category={case.category}" in captured.err
+    assert f"filename={expected_filename}" in captured.err
+    assert snapshot_bundle(root) == before
+
+
+def test_show_evaluation_requires_post_session_artifact_without_partial_output(
+    tmp_path,
+    capsys,
+):
+    root = tmp_path / "bundle"
+    manifest_path = _write_bundle(root)
+    remove_post_session_artifact(manifest_path, package_version="0.1.0a8")
+    capsys.readouterr()
+    before = snapshot_bundle(root)
+
+    assert explanation_bundle_cli.main(["--manifest", str(manifest_path), "--show-evaluation"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "category=required-artifact-reference" in captured.err
+    assert f"filename={manifest_path.name}" in captured.err
+    assert snapshot_bundle(root) == before
+
+
 def test_distribution_cli_failure_has_no_partial_success_output(tmp_path, capsys):
     root = tmp_path / "bundle"
     manifest_path = _write_bundle(root)
@@ -281,5 +465,5 @@ def test_distribution_cli_version_writes_nothing(tmp_path, monkeypatch, capsys):
         explanation_bundle_cli.main(["--version"])
 
     assert stopped.value.code == 0
-    assert capsys.readouterr().out == "poker-xai-verify-explanation-bundle 0.1.0a15\n"
+    assert capsys.readouterr().out == "poker-xai-verify-explanation-bundle 0.1.0a16\n"
     assert tuple(tmp_path.iterdir()) == ()

@@ -38,6 +38,8 @@ from .post_session_evaluation import (
     POST_SESSION_EVALUATION_SCHEMA_VERSION,
     POST_SESSION_EVALUATION_SUFFIX,
     NextSessionSettings,
+    PostSessionArtifact,
+    PostSessionEvaluation,
     build_post_session_artifact,
     post_session_evaluation_filename,
 )
@@ -396,10 +398,27 @@ def verify_saved_explanation_bundle(
 ) -> SavedExplanationBundleVerification:
     """Read and verify a saved normal Hero explanation bundle without changing it."""
 
+    verification, _ = _verify_saved_explanation_bundle_contents(
+        manifest_path,
+        require_post_session=False,
+    )
+    return verification
+
+
+def _verify_saved_explanation_bundle_contents(
+    manifest_path: Path | str,
+    *,
+    require_post_session: bool,
+) -> tuple[SavedExplanationBundleVerification, PostSessionArtifact | None]:
+    """Verify and return displayable post-session data from one captured snapshot."""
+
     snapshot = _load_saved_explanation_bundle_snapshot(manifest_path)
     verification = _verify_saved_explanation_bundle_snapshot(snapshot)
-    _validated_post_session_settings(snapshot, required=False)
-    return verification
+    post_session = _validated_post_session_artifact(
+        snapshot,
+        required=require_post_session,
+    )
+    return verification, post_session
 
 
 def load_next_session_settings(manifest_path: Path | str) -> NextSessionSettings:
@@ -412,19 +431,20 @@ def load_next_session_settings(manifest_path: Path | str) -> NextSessionSettings
     answer key crosses the session boundary.
     """
 
-    snapshot = _load_saved_explanation_bundle_snapshot(manifest_path)
-    _verify_saved_explanation_bundle_snapshot(snapshot)
-    settings = _validated_post_session_settings(snapshot, required=True)
-    assert settings is not None
-    return settings
+    _, post_session = _verify_saved_explanation_bundle_contents(
+        manifest_path,
+        require_post_session=True,
+    )
+    assert post_session is not None
+    return post_session.next_session_settings
 
 
-def _validated_post_session_settings(
+def _validated_post_session_artifact(
     snapshot: _SavedExplanationBundleSnapshot,
     *,
     required: bool,
-) -> NextSessionSettings | None:
-    """Validate one current post-session artifact from the captured bundle bytes."""
+) -> PostSessionArtifact | None:
+    """Validate and reconstruct one post-session artifact from captured bundle bytes."""
 
     has_reference = any(
         path.endswith(POST_SESSION_EVALUATION_SUFFIX) for path in snapshot.artifacts
@@ -465,30 +485,34 @@ def _validated_post_session_settings(
     if payload["artifact_type"] != POST_SESSION_EVALUATION_ARTIFACT_TYPE:
         raise SavedExplanationBundleVerificationError("post-session-type-unsupported", filename)
 
-    evaluation = payload["evaluation"]
+    evaluation_payload = payload["evaluation"]
     try:
-        _validate_post_session_evaluation(evaluation)
+        evaluation = _validate_post_session_evaluation(evaluation_payload)
     except (KeyError, TypeError, ValueError) as exc:
         raise SavedExplanationBundleVerificationError(
             "post-session-artifact-invalid", filename
         ) from exc
-    if evaluation.get("session_id") != snapshot.manifest.run_id:
+    if evaluation.session_id != snapshot.manifest.run_id:
         raise SavedExplanationBundleVerificationError("post-session-session-mismatch", filename)
     if (
         len(snapshot.manifest.opponents) != 1
-        or evaluation.get("opponent_model_id") != snapshot.manifest.opponents[0].opponent_id
+        or evaluation.opponent_model_id != snapshot.manifest.opponents[0].opponent_id
     ):
         raise SavedExplanationBundleVerificationError("post-session-opponent-mismatch", filename)
 
     try:
-        return _parse_next_session_settings(payload["next_session_settings"])
+        settings = _parse_next_session_settings(payload["next_session_settings"])
     except (KeyError, TypeError, ValueError) as exc:
         raise SavedExplanationBundleVerificationError(
             "post-session-settings-invalid", filename
         ) from exc
+    return PostSessionArtifact(
+        evaluation=evaluation,
+        next_session_settings=settings,
+    )
 
 
-def _validate_post_session_evaluation(payload: object) -> None:
+def _validate_post_session_evaluation(payload: object) -> PostSessionEvaluation:
     """Fail closed on the complete versioned PR #19 evaluation shape."""
 
     fields = {
@@ -514,11 +538,16 @@ def _validate_post_session_evaluation(payload: object) -> None:
         "average_estimation_error",
         "explanation_validity_score",
     )
+    normalized_metrics: dict[str, float] = {}
     for field in bounded_metrics:
         value = _strict_finite_float(payload[field], field)
         if not 0.0 <= value <= 1.0:
             raise ValueError(f"{field} must be finite and in [0, 1]")
-    _strict_finite_float(payload["exploit_ev_gain_vs_base"], "exploit_ev_gain_vs_base")
+        normalized_metrics[field] = value
+    exploit_ev_gain = _strict_finite_float(
+        payload["exploit_ev_gain_vs_base"],
+        "exploit_ev_gain_vs_base",
+    )
 
     for field in ("over_adjustment_count", "under_adjustment_count"):
         value = payload[field]
@@ -528,6 +557,18 @@ def _validate_post_session_evaluation(payload: object) -> None:
     notes = payload["notes"]
     if not isinstance(notes, list) or any(not isinstance(note, str) for note in notes):
         raise TypeError("evaluation notes must be a list of strings")
+
+    return PostSessionEvaluation(
+        session_id=payload["session_id"],
+        opponent_model_id=payload["opponent_model_id"],
+        leak_detection_accuracy=normalized_metrics["leak_detection_accuracy"],
+        average_estimation_error=normalized_metrics["average_estimation_error"],
+        exploit_ev_gain_vs_base=exploit_ev_gain,
+        over_adjustment_count=payload["over_adjustment_count"],
+        under_adjustment_count=payload["under_adjustment_count"],
+        explanation_validity_score=normalized_metrics["explanation_validity_score"],
+        notes=tuple(notes),
+    )
 
 
 def _load_saved_explanation_bundle_snapshot(

@@ -8,19 +8,19 @@ on:
       tag:
         description: Existing published prerelease tag to verify
         required: true
-        default: "0.1.0a15"
+        default: "0.1.0a16"
         type: string
       expected_version:
         description: Exact distribution version
         required: true
-        default: "0.1.0a15"
+        default: "0.1.0a16"
         type: string
 
 permissions:
   contents: read
 
 env:
-  EXPECTED_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.expected_version || '0.1.0a15' }}
+  EXPECTED_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.expected_version || '0.1.0a16' }}
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
 
 jobs:
