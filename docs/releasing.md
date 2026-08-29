@@ -3,32 +3,42 @@
 [Back to the documentation index](README.md).
 
 This maintainer checklist covers the complete GitHub-only publication path for
-`0.1.0a17`. It does not publish to PyPI or any other package index. Stop the
+`0.1.0a18`. It does not publish to PyPI or any other package index. Stop the
 publication process whenever an identity, CI, review, asset, checksum, manifest,
 or safety check does not match this checklist.
 
 ## 1. Update and review the version
 
 - Start a focused `agent/...` branch from the latest `main`.
-- Set the current project version in `pyproject.toml` to `0.1.0a17`.
+- Set the current project version in `pyproject.toml` to `0.1.0a18`.
 - Update only current-version workflow defaults, public examples, tests, and
   artifact names. Preserve historical descriptions of earlier alpha releases.
 - Run the release documentation contract test so the project version, workflow
   defaults, examples, and exact asset names cannot drift independently.
-- Confirm that the public runtime CLI, `poker-xai-run-session`, requires explicit
-  normal Hero `--safety-alpha` and `--exploration-epsilon` values to be finite
-  and in `[0, 1]`. For both flags, `-0.1`, `1.1`, `nan`, and `inf` must stop in
-  argument parsing with usage and exit code 2, without a traceback or any
-  previous-session read, provenance collection, session/solver start, or output
-  creation.
-- Confirm that `0.0`, `1.0`, and ordinary in-range decimals remain accepted;
-  omitted flags preserve the normal and leaky defaults; verified saved settings
-  are still restored; explicit values still override them, including `0.0`;
-  and the public Python API retains its existing validation and defaults.
-- Confirm the same valid and invalid normal Hero CLI behavior on the source
-  checkout, unpacked wheel, and unpacked sdist. Keep all existing ordinary,
-  R007/R008, R001/R002, explanation, and explicit two-session handoff release
-  smoke checks in place.
+- Confirm that the public runtime CLI, `poker-xai-run-session`, selects R003 only
+  with the explicit pair `--leaky-fixture --leaky-fixture-reason LEAK_R003`.
+  The reason without the fixture flag, an R004 selector, the generic synthetic
+  opponent config, and the Phase 6 catalogs must continue to reject R003 before
+  a session starts or output is created. Omitting the selector must preserve the
+  existing facing-all-in fixture.
+- Confirm that R003 gives Hero only OOP `CHECK` and fixed 0.33-pot `BET_33`.
+  The environment may generate and record an opponent `FOLD` or `CALL` only
+  after Hero actually selects `BET_33`; that observation may affect later hands
+  but must not enter the same hand's decision.
+- Confirm that the small-bet baseline, locked response, and provenance come from
+  the pinned 40-iteration finite-CFR 0.33-pot profile and its content-hashed
+  inline noncatalog reference. The release must preserve the linked
+  `DetectedLeak`, existing provider, `SafetyMixer`, exact current-node action EV,
+  DPL, `RunManifest`, template explanation, post-session evaluation, and
+  explicit previous-session settings handoff.
+- Confirm that omitted flags and the existing normal and leaky defaults remain
+  unchanged; verified saved settings are still restored; explicit values still
+  override them, including `0.0`; and the public Python API retains its existing
+  validation and defaults.
+- Confirm the same R003 success and rejection boundaries on the source checkout,
+  unpacked wheel, and unpacked sdist. Keep all existing ordinary, R007/R008,
+  R001/R002, probability-validation, explanation, and explicit two-session
+  handoff release smoke checks in place.
 - Dependencies, the public action vocabulary, CFR defaults, frozen Scenario,
   DPL, RunManifest and Explanation schemas, solver public API, Phase 6, Gate B,
   entry points, defaults, workflow topology, release mechanism, and the exact
@@ -53,11 +63,11 @@ The repository uses a lightweight tag whose name is the version without a `v`
 prefix. From the verified `main` commit:
 
 ```text
-git tag 0.1.0a17
-git push origin 0.1.0a17
+git tag 0.1.0a18
+git push origin 0.1.0a18
 ```
 
-Confirm that `0.1.0a17`, the project version, and the tagged commit agree. Never
+Confirm that `0.1.0a18`, the project version, and the tagged commit agree. Never
 move, replace, or delete an existing branch, tag, or release.
 
 ## 4. Manually approve and run the release workflow
@@ -65,7 +75,7 @@ move, replace, or delete an existing branch, tag, or release.
 - In GitHub Actions, select the existing **Release artifacts** workflow and
   explicitly choose **Run workflow** from `main`.
 - Review the manual inputs before approving the dispatch: both `tag` and
-  `expected_version` must be exactly `0.1.0a17`.
+  `expected_version` must be exactly `0.1.0a18`.
 - Wait for the Ubuntu build and Windows verification jobs to succeed. The
   workflow must report that the tag points at the requested source, both clean
   builds are reproducible, archive smoke checks are offline, and the final
@@ -80,7 +90,7 @@ archive extraction, or archive-contained code execution:
 ```text
 python scripts/verify_release_bundle.py \
   --bundle <workflow-bundle-directory> \
-  --expected-version 0.1.0a17
+  --expected-version 0.1.0a18
 ```
 
 ## 5. Check the exact publication set
@@ -88,8 +98,8 @@ python scripts/verify_release_bundle.py \
 The prerelease may receive only these four files from that one unchanged
 workflow bundle:
 
-- `poker_xai-0.1.0a17-py3-none-any.whl` from `dist/`
-- `poker_xai-0.1.0a17.tar.gz` from `dist/`
+- `poker_xai-0.1.0a18-py3-none-any.whl` from `dist/`
+- `poker_xai-0.1.0a18.tar.gz` from `dist/`
 - `artifact-manifest.json` from `evidence/`
 - `SHA256SUMS` from `evidence/`
 
@@ -109,21 +119,26 @@ Any remediation that requires history changes needs explicit human approval.
 The release notes must explain the user-facing addition since the preceding
 release:
 
-- The normal Hero CLI now validates explicit `--safety-alpha` and
-  `--exploration-epsilon` values with one shared finite closed-unit-interval
-  argument parser. Values outside `[0, 1]`, `nan`, and `inf` produce usage and
-  exit code 2 without a traceback.
-- Invalid explicit values fail before the previous-session loader, provenance
-  collection, `run_session`, solver/provider construction, and output creation.
-- Valid boundaries `0.0` and `1.0`, ordinary decimals, omitted-flag defaults,
-  verified saved-settings restoration, explicit override precedence, and the
-  public Python API are unchanged.
-- Existing release smoke proves the same behavior on the source checkout,
-  unpacked wheel, and unpacked sdist. The release remains GitHub-only and uses
-  the existing exact four-asset contract.
-- The `BET_75` module documentation now reflects the already implemented R001
-  and R002 fixed 0.75-pot solver-backed path; this is a documentation-only
-  correction and does not change the action vocabulary or runtime behavior.
+- The normal Hero CLI now reproduces LEAK_R003 only through
+  `--leaky-fixture --leaky-fixture-reason LEAK_R003`. Missing the fixture flag,
+  requesting R004, and generic synthetic-opponent or catalog selection remain
+  rejected; an omitted selector preserves the existing default route.
+- R003 reuses the existing OOP `CHECK`/fixed 0.33-pot `BET_33` branch. The
+  opponent's `FOLD`/`CALL` is generated and recorded only after an actual
+  `BET_33`, so it can influence later hands but never the current decision.
+- Its small-bet baseline and locked response come from one pinned 40-iteration
+  finite-CFR profile. The exact seed, scenario, solver configuration, baseline,
+  lock, and sampler identity are carried by a content-hashed inline noncatalog
+  provenance reference; this is a fixed alpha computation, not a GTO claim.
+- The resulting `DetectedLeak`, existing opponent-tendency provider,
+  `SafetyMixer`, exact current-node action EV, DPL, `RunManifest`, template
+  explanation, post-session evaluation, and explicit previous-session settings
+  handoff remain connected across the source checkout, unpacked wheel, and
+  unpacked sdist.
+- Existing release smoke preserves the ordinary default, R007/R008, R001/R002,
+  flag omission, explicit override, probability-validation, explanation, and
+  public Python API behavior. The release remains GitHub-only and uses the
+  existing exact four-asset contract.
 
 Identify the published-release four-asset verification workflow, continued
 required manual verification, release documentation contract test, and exact
@@ -136,7 +151,7 @@ iterations are a fixed alpha computation budget, not a convergence guarantee.
 Keep the simulation-only offline boundary and make no convergence, GTO,
 strategy-safety, profitability, or real-world performance claim.
 
-Create a GitHub prerelease for tag `0.1.0a17` and attach only the four verified
+Create a GitHub prerelease for tag `0.1.0a18` and attach only the four verified
 files above.
 
 ## 6. Re-download and verify the published assets
@@ -150,7 +165,7 @@ tag source checkout:
 python scripts/verify_release_bundle.py \
   --bundle <fresh-release-download-directory> \
   --layout flat \
-  --expected-version 0.1.0a17
+  --expected-version 0.1.0a18
 ```
 
 The flat mode enforces the same filenames, exact checksum targets and digests,
@@ -173,7 +188,7 @@ this checklist.
 The **Verify published release assets** workflow runs for the GitHub Release
 `published` event. A maintainer may rerun it manually from `main` with the
 `workflow_dispatch` inputs `tag` and `expected_version`, both set to
-`0.1.0a17`.
+`0.1.0a18`.
 
 The workflow has only `contents: read` permission and does not edit the Release,
 tag, assets, Issues, or pull requests. It fails unless the target is a published

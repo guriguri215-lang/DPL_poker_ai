@@ -16,7 +16,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
-CURRENT_VERSION = "0.1.0a17"
+CURRENT_VERSION = "0.1.0a18"
 sys.path.insert(0, str(SCRIPTS))
 
 
