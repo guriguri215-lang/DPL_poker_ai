@@ -197,6 +197,23 @@ poker-xai-verify-explanation-bundle --manifest experiments_output/quickstart/S20
 This read-only command verifies manifest artifact paths and hashes, one-to-one
 DPL/explanation identity and order, every explanation with the existing checker,
 and the saved checker summary. It neither reruns the session nor writes output.
+Add `--show-evaluation` when you also want the six stored post-session metrics
+and every stored next-session setting in deterministic `key=value` form:
+
+```bash
+poker-xai-verify-explanation-bundle --manifest experiments_output/quickstart/S20260704.manifest.json --show-evaluation
+```
+
+The extra lines appear only after the manifest, every artifact and hash, the
+DPL/explanation pairs, checker summary, post-session schema and binding, and
+next-session settings have all passed on one captured snapshot. The command
+does not display hashes, local paths, answer-key data, diagnostic notes, or
+session/opponent identities. Without `--show-evaluation`, output and support for
+older bundles without a post-session artifact remain unchanged; requesting the
+extra display for such a bundle fails without partial success output. The
+display confirms the integrity and supported shape of already saved values. It
+does not rerun the evaluator, independently recompute the metrics, or provide a
+solver-convergence, GTO, strategy-safety, profitability, or real-play guarantee.
 
 Identify either command without starting a session or creating output files:
 

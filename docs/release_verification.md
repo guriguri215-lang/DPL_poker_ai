@@ -9,10 +9,10 @@ continue if any check fails.
 ## Obtain the four uploaded assets
 
 Open the [`poker-xai` GitHub Releases page](https://github.com/guriguri215-lang/DPL_poker_ai/releases),
-select release `0.1.0a15`, and download exactly these four uploaded assets:
+select release `0.1.0a16`, and download exactly these four uploaded assets:
 
-- `poker_xai-0.1.0a15-py3-none-any.whl`
-- `poker_xai-0.1.0a15.tar.gz`
+- `poker_xai-0.1.0a16-py3-none-any.whl`
+- `poker_xai-0.1.0a16.tar.gz`
 - `artifact-manifest.json`
 - `SHA256SUMS`
 
@@ -30,14 +30,14 @@ archive, or execute archive-contained code:
 python scripts/verify_release_bundle.py \
   --bundle <fresh-release-download-directory> \
   --layout flat \
-  --expected-version 0.1.0a15
+  --expected-version 0.1.0a16
 ```
 
 ## Automated maintainer re-verification
 
 The read-only **Verify published release assets** workflow runs on the GitHub
 Release `published` event and can also be rerun manually from `main` with its
-`workflow_dispatch` `tag` and `expected_version` inputs set to `0.1.0a15`. It has
+`workflow_dispatch` `tag` and `expected_version` inputs set to `0.1.0a16`. It has
 only `contents: read` permission and never modifies a Release, tag, asset,
 Issue, or pull request.
 
@@ -68,8 +68,8 @@ no `pip` command and performs no installation:
 set -- ./*
 [ "$#" -eq 4 ] || { echo "unexpected asset count" >&2; exit 1; }
 for name in \
-  poker_xai-0.1.0a15-py3-none-any.whl \
-  poker_xai-0.1.0a15.tar.gz \
+  poker_xai-0.1.0a16-py3-none-any.whl \
+  poker_xai-0.1.0a16.tar.gz \
   artifact-manifest.json \
   SHA256SUMS
 do
@@ -88,10 +88,10 @@ import hashlib
 from pathlib import Path
 
 manifest = json.loads(Path("artifact-manifest.json").read_text(encoding="utf-8"))
-assert manifest["version"] == "0.1.0a15"
+assert manifest["version"] == "0.1.0a16"
 artifact_names = {
-    "poker_xai-0.1.0a15-py3-none-any.whl",
-    "poker_xai-0.1.0a15.tar.gz",
+    "poker_xai-0.1.0a16-py3-none-any.whl",
+    "poker_xai-0.1.0a16.tar.gz",
 }
 assert set(manifest["artifacts"]) == artifact_names
 for name in artifact_names:
@@ -108,8 +108,8 @@ On PowerShell, the equivalent check is:
 $expected = @(
   'SHA256SUMS',
   'artifact-manifest.json',
-  'poker_xai-0.1.0a15-py3-none-any.whl',
-  'poker_xai-0.1.0a15.tar.gz'
+  'poker_xai-0.1.0a16-py3-none-any.whl',
+  'poker_xai-0.1.0a16.tar.gz'
 ) | Sort-Object
 $actual = @(Get-ChildItem -Force | ForEach-Object Name | Sort-Object)
 if (@(Compare-Object $expected $actual).Count -ne 0) {
@@ -118,8 +118,8 @@ if (@(Compare-Object $expected $actual).Count -ne 0) {
 
 $checksumTargets = @(
   'artifact-manifest.json',
-  'poker_xai-0.1.0a15-py3-none-any.whl',
-  'poker_xai-0.1.0a15.tar.gz'
+  'poker_xai-0.1.0a16-py3-none-any.whl',
+  'poker_xai-0.1.0a16.tar.gz'
 )
 $seen = @{}
 $verifiedHashes = @{}
@@ -142,11 +142,11 @@ if (@(Compare-Object ($checksumTargets | Sort-Object) ($seen.Keys | Sort-Object)
 }
 
 $manifest = Get-Content -Raw -LiteralPath .\artifact-manifest.json | ConvertFrom-Json
-if ($manifest.version -cne '0.1.0a15') { throw 'manifest version mismatch' }
+if ($manifest.version -cne '0.1.0a16') { throw 'manifest version mismatch' }
 $manifestArtifacts = @($manifest.artifacts.PSObject.Properties.Name | Sort-Object)
 $expectedArtifacts = @(
-  'poker_xai-0.1.0a15-py3-none-any.whl',
-  'poker_xai-0.1.0a15.tar.gz'
+  'poker_xai-0.1.0a16-py3-none-any.whl',
+  'poker_xai-0.1.0a16.tar.gz'
 ) | Sort-Object
 if (@(Compare-Object $expectedArtifacts $manifestArtifacts).Count -ne 0) {
   throw 'manifest artifact set mismatch'
@@ -167,7 +167,7 @@ if ($manifest.reproducible -ne $true -or $manifest.offline_smoke -ne $true) {
 After the checksum succeeds, inspect `artifact-manifest.json` as data rather
 than relying only on its filename:
 
-- `version` must be `0.1.0a15`.
+- `version` must be `0.1.0a16`.
 - `artifacts` must contain only the wheel and sdist names, with the same SHA-256
   digests already checked through `SHA256SUMS`.
 - `reproducible: true` means two independent clean-checkout builds produced the
@@ -194,7 +194,12 @@ than relying only on its filename:
   saved-bundle verification. R002 also runs a verified successor session that
   explicitly consumes the first manifest, preserves the first bundle, restores
   settings, reselects R002, and proves solver-backed improvement in both
-  sessions.
+  sessions. On the R001 and R002 saved bundles, every surface also confirms the
+  unchanged two-line default verifier output and the explicit
+  `--show-evaluation` output: all six stored evaluation metrics, including the
+  exact-EV gain and over/under-adjustment counts, followed by every existing
+  next-session setting in the same fixed order. The smoke requires the display
+  to leave its source bundle byte-for-byte unchanged.
 
 These results verify the release bundle and basic offline execution; they are
 not a solver convergence guarantee. The default river adapter remains limited
@@ -205,8 +210,8 @@ fixed alpha computation budget, not a convergence guarantee.
 ## Proceed after verification
 
 You may inspect either archive without installing it. For example,
-`python3 -I -m zipfile --list poker_xai-0.1.0a15-py3-none-any.whl` lists the
-wheel, while `tar -tzf poker_xai-0.1.0a15.tar.gz` lists the sdist. Extracting the
+`python3 -I -m zipfile --list poker_xai-0.1.0a16-py3-none-any.whl` lists the
+wheel, while `tar -tzf poker_xai-0.1.0a16.tar.gz` lists the sdist. Extracting the
 sdist gives a self-contained `README.md`, `CONTRIBUTING.md`, and public Markdown
 documentation tree whose relative links were checked by the release workflow.
 Read those files before choosing how to use the simulation-only research code.

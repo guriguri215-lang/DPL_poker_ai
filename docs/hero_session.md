@@ -108,6 +108,32 @@ alpha to `0.0`, and epsilon to `0.0`. Otherwise every current value is retained.
 In particular, false negatives and under-adjustment do not lower a threshold or
 raise alpha/epsilon in this slice.
 
+## Read a saved evaluation after complete bundle verification
+
+Use the saved RunManifest and opt in to the additional display:
+
+```text
+poker-xai-verify-explanation-bundle --manifest experiments_output/tutorial/S00000007.manifest.json --show-evaluation
+```
+
+The command first performs the ordinary saved-bundle checks without changing
+the bundle. Only after every manifest reference and hash, DPL/explanation pair,
+checker-summary value, post-session field and session/opponent binding, and
+next-session setting has passed does it print the six existing evaluation
+metrics and the existing detector, safety-alpha, and epsilon settings in fixed
+`key=value` order. The displayed `evaluation.exploit_ev_gain_vs_base` is the
+saved mean exact `final_ev - base_ev` metric described above; it is not rounded
+by the display. Hashes, filesystem paths, the answer key, diagnostic notes, and
+session/opponent identities are omitted.
+
+Without `--show-evaluation`, the verifier retains its existing two-line output
+and older explanation bundles without this artifact remain verifiable. With the
+flag, a missing or invalid post-session artifact fails before any success line
+is emitted. The display reads the already saved, hash-bound result; it does not
+rerun the evaluator or solver, independently reproduce the metric, recommend
+that the next settings be used, or establish convergence, GTO play,
+strategy-safety, profitability, or real-world performance.
+
 ## Run the solver-backed no-facing fixtures
 
 ### R007 check-back fixture

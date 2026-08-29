@@ -870,6 +870,44 @@ def snapshot_files(root):
     }
 
 
+def expected_evaluation_lines(payload):
+    evaluation = payload['evaluation']
+    settings = payload['next_session_settings']
+    detector = settings['leak_detector_config']
+    values = (
+        ('evaluation.leak_detection_accuracy', evaluation['leak_detection_accuracy']),
+        ('evaluation.average_estimation_error', evaluation['average_estimation_error']),
+        ('evaluation.exploit_ev_gain_vs_base', evaluation['exploit_ev_gain_vs_base']),
+        ('evaluation.over_adjustment_count', evaluation['over_adjustment_count']),
+        ('evaluation.under_adjustment_count', evaluation['under_adjustment_count']),
+        ('evaluation.explanation_validity_score', evaluation['explanation_validity_score']),
+        ('next_session.leak_detector_config.method_version', detector['method_version']),
+        ('next_session.leak_detector_config.alpha0', detector['alpha0']),
+        ('next_session.leak_detector_config.beta0', detector['beta0']),
+        ('next_session.leak_detector_config.tail', detector['tail']),
+        (
+            'next_session.leak_detector_config.min_effective_sample_size',
+            detector['min_effective_sample_size'],
+        ),
+        ('next_session.leak_detector_config.min_deviation', detector['min_deviation']),
+        ('next_session.leak_detector_config.min_confidence', detector['min_confidence']),
+        (
+            'next_session.leak_detector_config.rule_exploit_min_confidence',
+            detector['rule_exploit_min_confidence'],
+        ),
+        (
+            'next_session.leak_detector_config.nodelock_exploit_min_confidence',
+            detector['nodelock_exploit_min_confidence'],
+        ),
+        ('next_session.safety_alpha', settings['safety_alpha']),
+        ('next_session.epsilon', settings['epsilon']),
+    )
+    return [
+        f'{key}={json.dumps(value, ensure_ascii=True, allow_nan=False, separators=(",", ":"))}'
+        for key, value in values
+    ]
+
+
 def run_large_bet_fixture(reason_id, seed, hands, session_root, previous_manifest=None):
     action_group = ['FOLD'] if reason_id == 'LEAK_R001' else ['CALL']
     opponent_id = (
@@ -1001,6 +1039,18 @@ def run_large_bet_fixture(reason_id, seed, hands, session_root, previous_manifes
     assert evaluation['evaluation']['session_id'] == manifest.run_id
     assert evaluation['evaluation']['opponent_model_id'] == opponent_id
     assert evaluation['evaluation']['explanation_validity_score'] == 1.0
+    before_display = snapshot_files(session_root)
+    display_output = io.StringIO()
+    with contextlib.redirect_stdout(display_output):
+        assert loaded['poker-xai-verify-explanation-bundle'](
+            ['--manifest', str(manifest_path), '--show-evaluation']
+        ) == 0
+    assert display_output.getvalue().splitlines() == [
+        'artifact_integrity=passed references=5',
+        f'explanation_checker=passed total={hands} summary=consistent',
+        *expected_evaluation_lines(evaluation),
+    ]
+    assert snapshot_files(session_root) == before_display
     return manifest_path, manifest, dpls, evaluation
 
 
