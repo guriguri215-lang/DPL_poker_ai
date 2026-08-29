@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "poker-xai"
-version = "0.1.0a17"
+version = "0.1.0a18"
 description = "Early-alpha simulation framework for auditable poker decision provenance, bounded CFR experiments, synthetic leaks, and explanation checks"
 readme = "README.md"
 requires-python = ">=3.12"

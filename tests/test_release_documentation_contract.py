@@ -112,25 +112,27 @@ def test_manual_and_automated_post_publication_checks_are_documented() -> None:
         assert "cannot undo a publication" in document
 
 
-def test_release_notes_contract_covers_cli_probability_fail_fast_and_limits() -> None:
+def test_release_notes_contract_covers_r003_vertical_slice_and_limits() -> None:
     runbook = _normalized("docs/releasing.md")
     for required in (
         "public runtime CLI, `poker-xai-run-session`",
-        "`--safety-alpha` and `--exploration-epsilon` values to be finite and in `[0, 1]`",
-        "`-0.1`, `1.1`, `nan`, and `inf`",
-        "argument parsing with usage and exit code 2",
-        "without a traceback",
-        "previous-session read",
-        "session/solver start",
-        "`0.0`, `1.0`, and ordinary in-range decimals",
-        "omitted flags preserve the normal and leaky defaults",
+        "`--leaky-fixture --leaky-fixture-reason LEAK_R003`",
+        "generic synthetic opponent config",
+        "Phase 6 catalogs must continue to reject R003",
+        "OOP `CHECK` and fixed 0.33-pot `BET_33`",
+        "only after Hero actually selects `BET_33`",
+        "may affect later hands but must not enter the same hand's decision",
+        "pinned 40-iteration finite-CFR 0.33-pot profile",
+        "content-hashed inline noncatalog reference",
+        "`DetectedLeak`, existing provider, `SafetyMixer`, exact current-node action EV",
+        "DPL, `RunManifest`, template explanation, post-session evaluation",
+        "explicit previous-session settings handoff",
+        "omitted flags and the existing normal and leaky defaults remain unchanged",
         "verified saved settings are still restored",
         "explicit values still override them, including `0.0`",
         "public Python API",
         "source checkout, unpacked wheel, and unpacked sdist",
         "existing exact four-asset contract",
-        "`BET_75` module documentation",
-        "documentation-only correction",
         "no new dependency, entry point, schema, artifact, registry, file discovery, default",
         "automatic handoff",
         "automatic session loop",
@@ -151,14 +153,15 @@ def test_release_notes_contract_covers_cli_probability_fail_fast_and_limits() ->
 
     release_verification = _normalized("docs/release_verification.md")
     for required in (
-        "normal Hero CLI probability check",
-        "`-0.1`, `1.1`, `nan`, and `inf`",
-        "both `--safety-alpha` and `--exploration-epsilon`",
-        "usage and exit code 2",
-        "without a traceback",
-        "deliberately missing previous-session manifest",
-        "creating output",
-        "in-range explicit values, omitted defaults, and saved-settings restoration",
-        "all three surfaces",
+        "R003 smoke first confirms that the reason is rejected without `--leaky-fixture`",
+        "unsupported R004 selector is still rejected",
+        "omitted-selector default remains the facing-all-in `FOLD`/`CALL` route",
+        "only `CHECK`/`BET_33`",
+        "causal post-bet `FOLD`/`CALL` observations",
+        "content-hashed finite-CFR inline opponent identity",
+        "solver-backed exact action-EV improvement",
+        "post-session evaluation",
+        "one-hand successor explicitly consumes the saved manifest",
+        "restored alpha and epsilon without carrying prior observations",
     ):
         assert required in release_verification, required

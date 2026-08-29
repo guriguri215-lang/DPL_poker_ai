@@ -3,7 +3,8 @@
 Hero-side pipeline: observation, finite-iteration CFR river base strategy,
 action-only leak detection, SafetyMixer, ActionSelector and the session runner.
 The original Phase 2 river MVP (ADR-0007) is connected to the combo-granular CFR
-solver for bounded all-in decisions and explicit R007/R001/R002 OOP no-facing fixtures.
+solver for bounded all-in decisions and explicit R007/R001/R002/R003 OOP no-facing
+fixtures.
 
 ## Task 3 vertical slice
 
@@ -13,9 +14,9 @@ Decision Provenance Log (JSONL) → schema validation. Showdown-required leaks a
 an LLM surface layer are outside the implemented normal-session path.
 
 - `actions.py` — the river action vocabulary; the default path realises facing an
-  all-in (`FOLD` / `CALL`), R007 realises only OOP `CHECK` / `BET_33`, and
-  R001/R002 only OOP `CHECK` / `BET_75`. Every exposed decision uses exact fixed-tree
-  action EV.
+  all-in (`FOLD` / `CALL`), R007/R003 realise only OOP `CHECK` / `BET_33`, and
+  R001/R002 only OOP `CHECK` / `BET_75`. Every exposed decision uses exact
+  fixed-tree action EV.
 - `scenario.py` + no config file — the **frozen Q3** scenario schema
   (`SCENARIO_SCHEMA_VERSION = 0.1.0`, ADR-0014) and a deterministic seed-driven
   generator (M-5).
@@ -26,8 +27,9 @@ an LLM surface layer are outside the implemented normal-session path.
   small/concentrated ranges (ADR-0015).
 - `cfr_policy.py` — the normal base-policy providers. The historical provider maps
   the observed all-in to a combo- and position-specific `vs_bet` entry. The R007
-  adapter maps the existing single 0.33-pot tree size to `BET_33`; R001 and R002
-  share the adapter that maps the frozen equilibrium's 0.75-pot size to `BET_75`.
+  adapter maps the existing single 0.33-pot tree size to `BET_33` for R007 and
+  R003; R001 and R002 share the adapter that maps the frozen equilibrium's
+  0.75-pot size to `BET_75`.
   These adapters return the OOP `start` entry and evaluate exact current-node action EV without adding
   a solver public API or multi-size tree.
 - `base_policy.py` — the provider boundary and compatibility-only adapter for the
@@ -35,17 +37,21 @@ an LLM surface layer are outside the implemented normal-session path.
 - `baseline_strategy.py` + `baseline_strategy.yaml` — the retained **stub** fixture
   (`baseline_table_version` ends with `-stub`; not an equilibrium).
 - `opponent.py` — fixed `jam_all`, R007 `check_back_all`, pinned versioned R001,
-  and content-hashed noncatalog R002 synthesis fixture identities. Hidden action behavior stays
-  environment-side; only the public assumed range is available to Hero.
+  content-hashed noncatalog R002 synthesis, and the pinned finite-CFR R003
+  reference-profile identity. Hidden action behavior stays environment-side;
+  only the public assumed range is available to Hero.
 - `observation.py` — action-only public observation counts by situation key. It
   accepts public action labels, never opponent objects or hidden policies.
 - `leak.py` — MVP action-rate LeakDetector for `LEAK_R001`, `LEAK_R002`,
-  `LEAK_R007`, and `LEAK_R008`, producing DPL `DetectedLeak` records from public
-  observations only. R001's FOLD and R002's CALL baselines derive from the same
-  frozen equilibrium; the normal CLI baseline remains unchanged.
+  `LEAK_R003`, `LEAK_R007`, and `LEAK_R008`, producing DPL `DetectedLeak`
+  records from public observations only. R001's FOLD and R002's CALL baselines
+  derive from the same frozen equilibrium; R003's FOLD baseline derives from
+  its pinned 0.33-pot finite-CFR profile. The normal CLI baseline remains
+  unchanged.
 - `exploit.py` — solver-backed node-lock and retained rule-based exploit
   providers. The node-lock provider handles eligible `LEAK_R001`, `LEAK_R002`,
-  `LEAK_R007`, and `LEAK_R008` records with the existing HARD/fix-to-baseline solver, uses the rule provider
+  `LEAK_R003`, `LEAK_R007`, and `LEAK_R008` records with the existing
+  HARD/fix-to-baseline solver, uses the rule provider
   when the fixed river tree cannot apply a lock, and changes policy only when
   exact per-action EV strictly improves over the base policy.
 - `mixer.py` — the SafetyMixer (`final = (1-alpha)*base + alpha*exploit`, the DPL
@@ -99,15 +105,24 @@ Use R001 for IP overfold (`FOLD` above baseline). Use R002 for IP overcall
 poker-xai-run-session --seed 20260000 --hands 40 --solver-iterations 5 --leaky-fixture --leaky-fixture-reason LEAK_R002 --exploration-epsilon 1.0 --explanations --out-dir experiments_output/r002
 ```
 
-Both paths use the packaged `poker_ai.run_session_cli` implementation and record
+Use R003 for IP overfold after the fixed 0.33-pot `BET_33`. Its content-hashed
+noncatalog identity pins a 40-iteration CFR+ reference profile and makes no
+equilibrium or GTO claim:
+
+```text
+poker-xai-run-session --seed 20260004 --hands 20 --solver-iterations 5 --leaky-fixture --leaky-fixture-reason LEAK_R003 --exploration-epsilon 1.0 --explanations --out-dir experiments_output/r003
+```
+
+These fixture paths use the packaged `poker_ai.run_session_cli` implementation and record
 their actual entrypoint, raw arguments, package version, and anchored-or-unknown
 Git provenance in the RunManifest.
 
-The default adapter is limited to heads-up river decisions facing an all-in. R007
-is limited to OOP `CHECK`/`BET_33`; it records a check-back only after Hero checks.
-R001/R002 are limited to OOP `CHECK`/fixed `BET_75`; they record `FOLD`/`CALL`
-only after Hero bets. Neither response is carried into the same decision. Arbitrary or
-additional no-facing sizes, raises, and an automatic session loop remain
+The default adapter is limited to heads-up river decisions facing an all-in.
+R007/R003 are limited to OOP `CHECK`/`BET_33`; R007 records a check-back only
+after Hero checks, while R003 records `FOLD`/`CALL` only after Hero bets.
+R001/R002 are limited to OOP `CHECK`/fixed `BET_75` and also record `FOLD`/`CALL`
+only after Hero bets. No response is carried into the same decision. Arbitrary
+or additional no-facing sizes, raises, and an automatic session loop remain
 unsupported.
 Exact action EV means exact traversal of the fixed current-node model for the
 current combo, not an exact strategy profile. The 40-iteration default is a

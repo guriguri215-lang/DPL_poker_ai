@@ -50,27 +50,34 @@ override alpha or epsilon. Any load or semantic-validation failure stops before
 this sequence begins and before a new run output directory is created. Without
 the option, the sequence uses its historical defaults unchanged. Bare
 `--leaky-fixture` also keeps the historical R008 facing-all-in fixture. The
-explicit `--leaky-fixture-reason LEAK_R007`, `LEAK_R001`, and `LEAK_R002`
+explicit `--leaky-fixture-reason LEAK_R007`, `LEAK_R001`, `LEAK_R002`, and
+`LEAK_R003`
 selectors choose bounded alternate branches within the same session entry point.
 
 1. A seed deterministically produces simulated river scenarios.
 2. On the default/R008 path, the environment lets the jam-all stub act, then
-   gives Hero only the public observation and assumed range. On the R007 and
-   R001/R002 paths, Hero is OOP with no bet facing. Hero is never given an
+   gives Hero only the public observation and assumed range. On the R007, R003,
+   and R001/R002 paths, Hero is OOP with no bet facing. Hero is never given an
    opponent's hidden strategy.
 3. The CFR+ river adapter produces Hero's finite-iteration combo-specific
    `vs_bet` policy for the default path or the existing tree's OOP `start`
-   policy: `CHECK`/fixed 0.33-pot `BET_33` for R007, or `CHECK`/fixed 0.75-pot
-   `BET_75` for R001 and R002. Both large-bet fixtures read size and
+   policy: `CHECK`/fixed 0.33-pot `BET_33` for R007 and R003, or
+   `CHECK`/fixed 0.75-pot `BET_75` for R001 and R002. R003 records a
+   content-hashed finite-iteration reference-profile identity without claiming
+   equilibrium or GTO status. Both large-bet fixtures read size and
    equilibrium-artifact provenance from `river-large-bet-equilibrium-v1`; the
    current Hero solve records its separate runtime solver configuration.
 4. Public opponent actions update the action-only observation tracker. For R007,
    the environment records a check-back only after Hero actually checks. For
-   R001/R002, it records `FOLD` or `CALL` only after Hero actually bets. In all
+   R001/R002/R003, it records `FOLD` or `CALL` only after Hero actually bets. In all
    paths detection happens before that response, so it can affect only later
    hands; an unreached situation is retained with zero observations. R001 uses
-   the canonical `FOLD` mapping and R002 the canonical `CALL` mapping; both
-   baseline and true rates come from the existing ground-truth extractor. The
+   the canonical `FOLD` mapping, R002 the canonical `CALL` mapping, and R003
+   reuses only R001's `vs_bet`/`FOLD` provider semantics while remaining outside
+   the generic synthetic mapping. R001/R002 rates come from the existing
+   ground-truth extractor; R003 uses the
+   pinned reach-weighted 0.33-pot finite-CFR baseline and an inline noncatalog
+   identity. The
    leak detector may produce hypotheses, and an optional exploit provider may
    propose a policy through the same HARD node-lock and fallback boundary.
 5. SafetyMixer forms `final_policy` as
@@ -109,8 +116,9 @@ contracts. The [session tutorial](hero_session.md) shows the supported command.
 
 The default river adapter supports only a Hero decision while facing an all-in,
 so its legal actions are `FOLD` and `CALL`. The explicit R007 fixture adds only
-OOP `CHECK` and fixed 0.33-pot `BET_33`; R001/R002 add only OOP `CHECK` and the
-frozen 0.75-pot `BET_75`. Neither adds an arbitrary size, multi-size tree, raise, or
+OOP `CHECK` and fixed 0.33-pot `BET_33`; R003 reuses exactly that legal-action
+surface for small-bet overfold; R001/R002 add only OOP `CHECK` and the frozen
+0.75-pot `BET_75`. None adds an arbitrary size, multi-size tree, raise, or
 general no-facing session loop. The default CFR+ budget is 40 iterations with
 average delay 0 and no checkpoints.
 Forty iterations is an alpha default, not a convergence guarantee; the resulting
@@ -119,6 +127,6 @@ policy has no exact-equilibrium or GTO certificate.
 One explicit, verified handoff from a named previous RunManifest into one later
 normal Hero session is implemented. The handoff carries settings only: it does
 not carry the prior baseline, opponent/session mode, posterior/action history,
-or answer key. The caller must explicitly select R007, R001, or R002 again for a
+or answer key. The caller must explicitly select R007, R001, R002, or R003 again for a
 matching successor. Implicit manifest discovery, latest-file search, a session
 registry, and an automatic multi-session loop remain outside this slice.

@@ -16,7 +16,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
-CURRENT_VERSION = "0.1.0a17"
+CURRENT_VERSION = "0.1.0a18"
 sys.path.insert(0, str(SCRIPTS))
 
 
@@ -308,6 +308,9 @@ def _release_bundle(tmp_path: Path, layout: str) -> tuple[Path, Path, Path, Path
                     "r007-solver-backed-no-facing-explanation-provenance",
                     "r001-r002-release-surface-parity",
                     "r002-verified-two-session-handoff",
+                    "r003-explicit-cli-rejection-and-default-parity",
+                    "r003-solver-backed-release-surface-parity",
+                    "r003-verified-two-session-handoff",
                     "entry-point-metadata",
                     "documentation-relative-links",
                 ],
