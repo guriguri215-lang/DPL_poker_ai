@@ -3,38 +3,32 @@
 [Back to the documentation index](README.md).
 
 This maintainer checklist covers the complete GitHub-only publication path for
-`0.1.0a16`. It does not publish to PyPI or any other package index. Stop the
+`0.1.0a17`. It does not publish to PyPI or any other package index. Stop the
 publication process whenever an identity, CI, review, asset, checksum, manifest,
 or safety check does not match this checklist.
 
 ## 1. Update and review the version
 
 - Start a focused `agent/...` branch from the latest `main`.
-- Set the current project version in `pyproject.toml` to `0.1.0a16`.
+- Set the current project version in `pyproject.toml` to `0.1.0a17`.
 - Update only current-version workflow defaults, public examples, tests, and
   artifact names. Preserve historical descriptions of earlier alpha releases.
 - Run the release documentation contract test so the project version, workflow
   defaults, examples, and exact asset names cannot drift independently.
-- Confirm that the public runtime CLI, `poker-xai-verify-explanation-bundle`,
-  keeps its exact two-line default output, exit codes, public Python API, and
-  read-only behavior when `--show-evaluation` is absent.
-- Confirm that `--show-evaluation` prints only after the manifest, every
-  `ArtifactRef` and hash, DPL/explanation pairing, explanation checker, verifier
-  summary, post-session schema and session/opponent binding, and next-session
-  settings all pass on one captured snapshot. It must not reread the
-  post-session artifact after verification.
-- Confirm the fixed `key=value` order contains the six existing evaluation
-  metrics and every existing next-session setting, without hashes, local paths,
-  answer-key data, diagnostic notes, or session/opponent identities.
-- Confirm that an older bundle without a post-session artifact remains
-  verifiable without the flag and fails without partial success output when the
-  display is requested. Tamper, missing or duplicate artifacts, identity
-  mismatches, and invalid settings must also fail before stdout and leave the
-  bundle unchanged.
-- Confirm on saved R001 and R002 bundles that the stored evaluation values,
-  exact exploit-EV gain, over/under-adjustment counts, explanation validity,
-  and next-session settings match across source checkout, unpacked wheel, and
-  unpacked sdist.
+- Confirm that the public runtime CLI, `poker-xai-run-session`, requires explicit
+  normal Hero `--safety-alpha` and `--exploration-epsilon` values to be finite
+  and in `[0, 1]`. For both flags, `-0.1`, `1.1`, `nan`, and `inf` must stop in
+  argument parsing with usage and exit code 2, without a traceback or any
+  previous-session read, provenance collection, session/solver start, or output
+  creation.
+- Confirm that `0.0`, `1.0`, and ordinary in-range decimals remain accepted;
+  omitted flags preserve the normal and leaky defaults; verified saved settings
+  are still restored; explicit values still override them, including `0.0`;
+  and the public Python API retains its existing validation and defaults.
+- Confirm the same valid and invalid normal Hero CLI behavior on the source
+  checkout, unpacked wheel, and unpacked sdist. Keep all existing ordinary,
+  R007/R008, R001/R002, explanation, and explicit two-session handoff release
+  smoke checks in place.
 - Dependencies, the public action vocabulary, CFR defaults, frozen Scenario,
   DPL, RunManifest and Explanation schemas, solver public API, Phase 6, Gate B,
   entry points, defaults, workflow topology, release mechanism, and the exact
@@ -59,11 +53,11 @@ The repository uses a lightweight tag whose name is the version without a `v`
 prefix. From the verified `main` commit:
 
 ```text
-git tag 0.1.0a16
-git push origin 0.1.0a16
+git tag 0.1.0a17
+git push origin 0.1.0a17
 ```
 
-Confirm that `0.1.0a16`, the project version, and the tagged commit agree. Never
+Confirm that `0.1.0a17`, the project version, and the tagged commit agree. Never
 move, replace, or delete an existing branch, tag, or release.
 
 ## 4. Manually approve and run the release workflow
@@ -71,7 +65,7 @@ move, replace, or delete an existing branch, tag, or release.
 - In GitHub Actions, select the existing **Release artifacts** workflow and
   explicitly choose **Run workflow** from `main`.
 - Review the manual inputs before approving the dispatch: both `tag` and
-  `expected_version` must be exactly `0.1.0a16`.
+  `expected_version` must be exactly `0.1.0a17`.
 - Wait for the Ubuntu build and Windows verification jobs to succeed. The
   workflow must report that the tag points at the requested source, both clean
   builds are reproducible, archive smoke checks are offline, and the final
@@ -86,7 +80,7 @@ archive extraction, or archive-contained code execution:
 ```text
 python scripts/verify_release_bundle.py \
   --bundle <workflow-bundle-directory> \
-  --expected-version 0.1.0a16
+  --expected-version 0.1.0a17
 ```
 
 ## 5. Check the exact publication set
@@ -94,8 +88,8 @@ python scripts/verify_release_bundle.py \
 The prerelease may receive only these four files from that one unchanged
 workflow bundle:
 
-- `poker_xai-0.1.0a16-py3-none-any.whl` from `dist/`
-- `poker_xai-0.1.0a16.tar.gz` from `dist/`
+- `poker_xai-0.1.0a17-py3-none-any.whl` from `dist/`
+- `poker_xai-0.1.0a17.tar.gz` from `dist/`
 - `artifact-manifest.json` from `evidence/`
 - `SHA256SUMS` from `evidence/`
 
@@ -115,46 +109,34 @@ Any remediation that requires history changes needs explicit human approval.
 The release notes must explain the user-facing addition since the preceding
 release:
 
-- The existing `poker-xai-verify-explanation-bundle` entry point adds the
-  explicit `--show-evaluation` opt-in. Without the flag, its exact two-line
-  output, exit codes, public Python API, read-only behavior, and support for
-  older bundles remain unchanged.
-- The opt-in prints only after complete verification of the manifest, every
-  artifact reference and hash, DPL/explanation pairing, checker and saved
-  summary, post-session schema and session/opponent binding, and all
-  next-session settings. The displayed values come from the same captured
-  snapshot; the artifact is not reread after verification.
-- The deterministic `key=value` display contains the six existing evaluation
-  metrics—detection accuracy, estimation error, exact exploit-EV gain,
-  over/under-adjustment counts, and explanation validity—followed by every
-  existing detector, safety-alpha, and epsilon setting. It omits hashes, local
-  paths, answer-key data, internal diagnostic notes, and session/opponent
-  identities.
-- A legacy bundle without post-session data still verifies with no flag but
-  fails clearly with the opt-in. Tamper, missing or duplicate data, binding
-  mismatches, and invalid settings produce no partial success output and do not
-  change the bundle.
-- R001 and R002 release smoke confirms the stored values and same display on
-  source checkout, unpacked wheel, and unpacked sdist while keeping the source
-  bundle byte-for-byte unchanged. Existing ordinary-session, R007/R008, R001,
-  R002, and explicit two-session handoff checks remain in place.
+- The normal Hero CLI now validates explicit `--safety-alpha` and
+  `--exploration-epsilon` values with one shared finite closed-unit-interval
+  argument parser. Values outside `[0, 1]`, `nan`, and `inf` produce usage and
+  exit code 2 without a traceback.
+- Invalid explicit values fail before the previous-session loader, provenance
+  collection, `run_session`, solver/provider construction, and output creation.
+- Valid boundaries `0.0` and `1.0`, ordinary decimals, omitted-flag defaults,
+  verified saved-settings restoration, explicit override precedence, and the
+  public Python API are unchanged.
+- Existing release smoke proves the same behavior on the source checkout,
+  unpacked wheel, and unpacked sdist. The release remains GitHub-only and uses
+  the existing exact four-asset contract.
+- The `BET_75` module documentation now reflects the already implemented R001
+  and R002 fixed 0.75-pot solver-backed path; this is a documentation-only
+  correction and does not change the action vocabulary or runtime behavior.
 
-The notes must distinguish integrity and supported-shape verification from
-independent recomputation: the command does not rerun a session, solver, or
-answer-key evaluator, validate the metric methodology externally, or recommend
-the displayed next-session settings. Identify the published-release four-asset
-verification workflow, continued required manual verification, release
-documentation contract test, and exact four-asset contract. State that there is
-no new dependency, entry point, schema, artifact, registry, file discovery,
-default, solver public API, workflow topology, release mechanism, automatic
-handoff, session loop, arbitrary bet-size parameter, raise, or Phase 6 catalog
-content. Phase 6 and Gate B are unchanged. Preserve the default facing-all-in
-limitation and state that 40 CFR+ iterations are a fixed alpha computation
-budget, not a convergence guarantee. Keep the simulation-only offline boundary
-and make no convergence, GTO, strategy-safety, profitability, or real-world
-performance claim.
+Identify the published-release four-asset verification workflow, continued
+required manual verification, release documentation contract test, and exact
+four-asset contract. State that there is no new dependency, entry point, schema,
+artifact, registry, file discovery, default, solver public API, workflow
+topology, release mechanism, automatic handoff, session loop, arbitrary
+bet-size parameter, raise, or Phase 6 catalog content. Phase 6 and Gate B are
+unchanged. Preserve the default facing-all-in limitation and state that 40 CFR+
+iterations are a fixed alpha computation budget, not a convergence guarantee.
+Keep the simulation-only offline boundary and make no convergence, GTO,
+strategy-safety, profitability, or real-world performance claim.
 
-Create a GitHub prerelease for tag `0.1.0a16` and attach only the four verified
+Create a GitHub prerelease for tag `0.1.0a17` and attach only the four verified
 files above.
 
 ## 6. Re-download and verify the published assets
@@ -168,7 +150,7 @@ tag source checkout:
 python scripts/verify_release_bundle.py \
   --bundle <fresh-release-download-directory> \
   --layout flat \
-  --expected-version 0.1.0a16
+  --expected-version 0.1.0a17
 ```
 
 The flat mode enforces the same filenames, exact checksum targets and digests,
@@ -191,7 +173,7 @@ this checklist.
 The **Verify published release assets** workflow runs for the GitHub Release
 `published` event. A maintainer may rerun it manually from `main` with the
 `workflow_dispatch` inputs `tag` and `expected_version`, both set to
-`0.1.0a16`.
+`0.1.0a17`.
 
 The workflow has only `contents: read` permission and does not edit the Release,
 tag, assets, Issues, or pull requests. It fails unless the target is a published

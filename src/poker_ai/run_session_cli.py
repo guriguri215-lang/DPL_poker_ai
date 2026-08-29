@@ -10,6 +10,7 @@ inputs; the 40-iteration default is not a convergence guarantee.
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -49,6 +50,16 @@ LEGACY_ENTRYPOINT = "cli/run_session.py"
 MODULE_ENTRYPOINT = "python -m poker_ai.run_session_cli"
 
 
+def _finite_unit_interval(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be finite and in [0, 1]") from None
+    if not math.isfinite(parsed) or not 0.0 <= parsed <= 1.0:
+        raise argparse.ArgumentTypeError("must be finite and in [0, 1]")
+    return parsed
+
+
 def _parser(*, entrypoint: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -63,7 +74,7 @@ def _parser(*, entrypoint: str) -> argparse.ArgumentParser:
     parser.add_argument("--hands", type=int, default=200, help="number of hands (default: 200)")
     parser.add_argument(
         "--safety-alpha",
-        type=float,
+        type=_finite_unit_interval,
         default=None,
         help=(
             "SafetyMixer alpha in [0, 1] (default: restored setting, otherwise "
@@ -72,7 +83,7 @@ def _parser(*, entrypoint: str) -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--exploration-epsilon",
-        type=float,
+        type=_finite_unit_interval,
         default=None,
         help=(
             "post-SafetyMixer epsilon exploration rate in [0, 1] "

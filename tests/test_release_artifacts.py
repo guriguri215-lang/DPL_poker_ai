@@ -16,7 +16,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
-CURRENT_VERSION = "0.1.0a16"
+CURRENT_VERSION = "0.1.0a17"
 sys.path.insert(0, str(SCRIPTS))
 
 
@@ -103,6 +103,9 @@ def test_release_workflow_keeps_exact_python_and_offline_cross_platform_gates() 
     assert "loaded['poker-xai-verify-explanation-bundle'](['--version'])" in verifier
     assert "loaded['poker-xai-run-session'](first_argv)" in verifier
     assert "loaded['poker-xai-run-session'](second_argv)" in verifier
+    assert "for value in ('-0.1', '1.1', 'nan', 'inf')" in verifier
+    assert "assert stopped.code == 2" in verifier
+    assert "assert 'Traceback' not in error" in verifier
     assert "'--previous-session-manifest'" in verifier
     assert "positive_argv = [" in verifier
     assert "'--leaky-fixture'" in verifier
@@ -296,6 +299,7 @@ def _release_bundle(tmp_path: Path, layout: str) -> tuple[Path, Path, Path, Path
                 "smoke_checks": [
                     "--version",
                     "--help",
+                    "normal-hero-cli-probability-argument-validation",
                     "two-consecutive-hero-sessions",
                     "explicit-previous-session-manifest",
                     "manifest-round-trip",

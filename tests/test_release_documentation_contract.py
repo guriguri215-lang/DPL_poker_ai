@@ -112,31 +112,26 @@ def test_manual_and_automated_post_publication_checks_are_documented() -> None:
         assert "cannot undo a publication" in document
 
 
-def test_release_notes_contract_covers_verified_evaluation_display_and_limits() -> None:
+def test_release_notes_contract_covers_cli_probability_fail_fast_and_limits() -> None:
     runbook = _normalized("docs/releasing.md")
     for required in (
-        "explicit `--show-evaluation` opt-in",
-        "exact two-line default output",
-        "exit codes, public Python API, read-only behavior",
-        "all pass on one captured snapshot",
-        "must not reread the post-session artifact after verification",
-        "six existing evaluation metrics",
-        "exact exploit-EV gain",
-        "over/under-adjustment counts",
-        "explanation validity",
-        "every existing next-session setting",
-        "without hashes, local paths, answer-key data, diagnostic notes",
-        "older bundle without a post-session artifact remains verifiable without the flag",
-        "Tamper, missing or duplicate artifacts",
-        "fail before stdout and leave the bundle unchanged",
-        "legacy bundle without post-session data still verifies with no flag",
-        "produce no partial success output and do not change the bundle",
-        "same captured snapshot; the artifact is not reread after verification",
+        "public runtime CLI, `poker-xai-run-session`",
+        "`--safety-alpha` and `--exploration-epsilon` values to be finite and in `[0, 1]`",
+        "`-0.1`, `1.1`, `nan`, and `inf`",
+        "argument parsing with usage and exit code 2",
+        "without a traceback",
+        "previous-session read",
+        "session/solver start",
+        "`0.0`, `1.0`, and ordinary in-range decimals",
+        "omitted flags preserve the normal and leaky defaults",
+        "verified saved settings are still restored",
+        "explicit values still override them, including `0.0`",
+        "public Python API",
         "source checkout, unpacked wheel, and unpacked sdist",
-        "source bundle byte-for-byte unchanged",
-        "does not rerun a session, solver, or answer-key evaluator",
-        "independent recomputation",
-        "no new dependency, entry point, schema, artifact, registry, file discovery",
+        "existing exact four-asset contract",
+        "`BET_75` module documentation",
+        "documentation-only correction",
+        "no new dependency, entry point, schema, artifact, registry, file discovery, default",
         "automatic handoff",
         "automatic session loop",
         "workflow topology, release mechanism",
@@ -156,11 +151,14 @@ def test_release_notes_contract_covers_verified_evaluation_display_and_limits() 
 
     release_verification = _normalized("docs/release_verification.md")
     for required in (
-        "`--show-evaluation` output",
-        "all six stored evaluation metrics",
-        "exact-EV gain and over/under-adjustment counts",
-        "every existing next-session setting",
-        "same fixed order",
-        "byte-for-byte unchanged",
+        "normal Hero CLI probability check",
+        "`-0.1`, `1.1`, `nan`, and `inf`",
+        "both `--safety-alpha` and `--exploration-epsilon`",
+        "usage and exit code 2",
+        "without a traceback",
+        "deliberately missing previous-session manifest",
+        "creating output",
+        "in-range explicit values, omitted defaults, and saved-settings restoration",
+        "all three surfaces",
     ):
         assert required in release_verification, required

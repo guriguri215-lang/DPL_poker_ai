@@ -619,6 +619,39 @@ assert '--out-dir' in help_output.getvalue()
 assert '--version' in help_output.getvalue()
 assert not output_root.exists()
 
+invalid_output_root = output_root / 'invalid-probability'
+for option in ('--safety-alpha', '--exploration-epsilon'):
+    for value in ('-0.1', '1.1', 'nan', 'inf'):
+        invalid_stdout = io.StringIO()
+        invalid_stderr = io.StringIO()
+        try:
+            with (
+                contextlib.redirect_stdout(invalid_stdout),
+                contextlib.redirect_stderr(invalid_stderr),
+            ):
+                loaded['poker-xai-run-session'](
+                    [
+                        '--leaky-fixture',
+                        '--previous-session-manifest',
+                        str(output_root.parent / 'must-not-be-read.manifest.json'),
+                        option,
+                        value,
+                        '--out-dir',
+                        str(invalid_output_root),
+                    ]
+                )
+        except SystemExit as stopped:
+            assert stopped.code == 2
+        else:
+            raise AssertionError(f'{option}={value} did not stop through argparse')
+        error = invalid_stderr.getvalue()
+        assert invalid_stdout.getvalue() == ''
+        assert error.startswith('usage: ')
+        assert f'error: argument {option}:' in error
+        assert 'finite and in [0, 1]' in error
+        assert 'Traceback' not in error
+        assert not invalid_output_root.exists()
+
 bundle_help_output = io.StringIO()
 try:
     with contextlib.redirect_stdout(bundle_help_output):
@@ -1153,6 +1186,7 @@ def verify(
         "smoke_checks": [
             "--version",
             "--help",
+            "normal-hero-cli-probability-argument-validation",
             "two-consecutive-hero-sessions",
             "explicit-previous-session-manifest",
             "manifest-round-trip",

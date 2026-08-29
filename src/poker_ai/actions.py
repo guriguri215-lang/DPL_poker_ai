@@ -11,9 +11,10 @@ The historical path generates a facing-all-in spot whose legal set collapses to
 ``FOLD`` / ``CALL``. The opt-in R007 fixture also realizes ``CHECK`` and the
 existing fixed tree's 0.33-pot ``BET`` branch as public ``BET_33``. Its downstream
 responses are evaluated through the fixed CFR+/HARD-node-lock tree, so the action
-EV remains exact ``solver_exact`` under ADR-0008. ``BET_75``, non-all-in facing
-bets, and raises remain unrealized. See :mod:`poker_ai.decision` for the EV
-convention.
+EV remains exact ``solver_exact`` under ADR-0008. The R001 and R002 fixtures
+likewise realize the frozen equilibrium's 0.75-pot branch as public ``BET_75``
+with exact solver EV. Generic no-facing decisions, non-all-in facing bets, and
+raises remain unrealized. See :mod:`poker_ai.decision` for the EV convention.
 """
 
 from __future__ import annotations
