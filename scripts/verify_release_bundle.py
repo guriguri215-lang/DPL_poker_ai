@@ -33,6 +33,9 @@ SMOKE_CHECKS = [
     "r003-explicit-cli-rejection-and-default-parity",
     "r003-solver-backed-release-surface-parity",
     "r003-verified-two-session-handoff",
+    "r004-explicit-cli-rejection-and-default-parity",
+    "r004-solver-backed-release-surface-parity",
+    "r004-verified-two-session-handoff",
     "entry-point-metadata",
     "documentation-relative-links",
 ]

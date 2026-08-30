@@ -127,6 +127,13 @@ def test_release_workflow_keeps_exact_python_and_offline_cross_platform_gates() 
     assert "r004_successor_argv = [" in verifier
     assert 'run_root / "offline_release_smoke.py"' in verifier
     assert '"-c",\n            script' not in verifier
+    for r004_check in (
+        "r004-explicit-cli-rejection-and-default-parity",
+        "r004-solver-backed-release-surface-parity",
+        "r004-verified-two-session-handoff",
+    ):
+        assert f'"{r004_check}"' in verifier
+        assert r004_check in bundle.SMOKE_CHECKS
     assert "source-checkout" in verifier
     assert "verify_documentation_links(documentation_root)" in verifier
     assert workflow.count("verify_release_bundle.py") == 3
@@ -317,6 +324,9 @@ def _release_bundle(tmp_path: Path, layout: str) -> tuple[Path, Path, Path, Path
                     "r003-explicit-cli-rejection-and-default-parity",
                     "r003-solver-backed-release-surface-parity",
                     "r003-verified-two-session-handoff",
+                    "r004-explicit-cli-rejection-and-default-parity",
+                    "r004-solver-backed-release-surface-parity",
+                    "r004-verified-two-session-handoff",
                     "entry-point-metadata",
                     "documentation-relative-links",
                 ],
