@@ -77,7 +77,7 @@ def test_r003_is_canonical_and_requires_the_explicit_fixture_flag(tmp_path, caps
             [
                 "--leaky-fixture",
                 "--leaky-fixture-reason",
-                "LEAK_R004",
+                "LEAK_R005",
                 "--out-dir",
                 str(output_root),
             ]
@@ -85,7 +85,7 @@ def test_r003_is_canonical_and_requires_the_explicit_fixture_flag(tmp_path, caps
 
     captured = capsys.readouterr()
     assert unsupported.value.code == 2
-    assert "invalid choice: 'LEAK_R004'" in captured.err
+    assert "invalid choice: 'LEAK_R005'" in captured.err
     assert not output_root.exists()
 
 

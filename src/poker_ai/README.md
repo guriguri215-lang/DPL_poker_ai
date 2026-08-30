@@ -3,7 +3,7 @@
 Hero-side pipeline: observation, finite-iteration CFR river base strategy,
 action-only leak detection, SafetyMixer, ActionSelector and the session runner.
 The original Phase 2 river MVP (ADR-0007) is connected to the combo-granular CFR
-solver for bounded all-in decisions and explicit R007/R001/R002/R003 OOP no-facing
+solver for bounded all-in decisions and explicit R007/R001/R002/R003/R004 OOP no-facing
 fixtures.
 
 ## Task 3 vertical slice
@@ -14,7 +14,7 @@ Decision Provenance Log (JSONL) → schema validation. Showdown-required leaks a
 an LLM surface layer are outside the implemented normal-session path.
 
 - `actions.py` — the river action vocabulary; the default path realises facing an
-  all-in (`FOLD` / `CALL`), R007/R003 realise only OOP `CHECK` / `BET_33`, and
+  all-in (`FOLD` / `CALL`), R007/R003/R004 realise only OOP `CHECK` / `BET_33`, and
   R001/R002 only OOP `CHECK` / `BET_75`. Every exposed decision uses exact
   fixed-tree action EV.
 - `scenario.py` + no config file — the **frozen Q3** scenario schema
@@ -27,8 +27,8 @@ an LLM surface layer are outside the implemented normal-session path.
   small/concentrated ranges (ADR-0015).
 - `cfr_policy.py` — the normal base-policy providers. The historical provider maps
   the observed all-in to a combo- and position-specific `vs_bet` entry. The R007
-  adapter maps the existing single 0.33-pot tree size to `BET_33` for R007 and
-  R003; R001 and R002 share the adapter that maps the frozen equilibrium's
+  adapter maps the existing single 0.33-pot tree size to `BET_33` for R007,
+  R003, and R004; R001 and R002 share the adapter that maps the frozen equilibrium's
   0.75-pot size to `BET_75`.
   These adapters return the OOP `start` entry and evaluate exact current-node action EV without adding
   a solver public API or multi-size tree.
@@ -37,20 +37,20 @@ an LLM surface layer are outside the implemented normal-session path.
 - `baseline_strategy.py` + `baseline_strategy.yaml` — the retained **stub** fixture
   (`baseline_table_version` ends with `-stub`; not an equilibrium).
 - `opponent.py` — fixed `jam_all`, R007 `check_back_all`, pinned versioned R001,
-  content-hashed noncatalog R002 synthesis, and the pinned finite-CFR R003
-  reference-profile identity. Hidden action behavior stays environment-side;
+  content-hashed noncatalog R002 synthesis, and the pinned finite-CFR R003/R004
+  reference-profile identities. Hidden action behavior stays environment-side;
   only the public assumed range is available to Hero.
 - `observation.py` — action-only public observation counts by situation key. It
   accepts public action labels, never opponent objects or hidden policies.
 - `leak.py` — MVP action-rate LeakDetector for `LEAK_R001`, `LEAK_R002`,
-  `LEAK_R003`, `LEAK_R007`, and `LEAK_R008`, producing DPL `DetectedLeak`
+  `LEAK_R003`, `LEAK_R004`, `LEAK_R007`, and `LEAK_R008`, producing DPL `DetectedLeak`
   records from public observations only. R001's FOLD and R002's CALL baselines
-  derive from the same frozen equilibrium; R003's FOLD baseline derives from
-  its pinned 0.33-pot finite-CFR profile. The normal CLI baseline remains
+  derive from the same frozen equilibrium; R003's FOLD and R004's CALL baselines
+  derive from one pinned 0.33-pot finite-CFR profile. The normal CLI baseline remains
   unchanged.
 - `exploit.py` — solver-backed node-lock and retained rule-based exploit
   providers. The node-lock provider handles eligible `LEAK_R001`, `LEAK_R002`,
-  `LEAK_R003`, `LEAK_R007`, and `LEAK_R008` records with the existing
+  `LEAK_R003`, `LEAK_R004`, `LEAK_R007`, and `LEAK_R008` records with the existing
   HARD/fix-to-baseline solver, uses the rule provider
   when the fixed river tree cannot apply a lock, and changes policy only when
   exact per-action EV strictly improves over the base policy.
@@ -113,13 +113,21 @@ equilibrium or GTO claim:
 poker-xai-run-session --seed 20260004 --hands 20 --solver-iterations 5 --leaky-fixture --leaky-fixture-reason LEAK_R003 --exploration-epsilon 1.0 --explanations --out-dir experiments_output/r003
 ```
 
+Use R004 for IP overcall at that same fixed `BET_33` node. It reuses the R003
+reference profile, locks `vs_bet/CALL` to baseline plus `0.16`, and remains
+outside generic synthesis and the Phase 6 catalogs:
+
+```text
+poker-xai-run-session --seed 20260004 --hands 160 --solver-iterations 5 --leaky-fixture --leaky-fixture-reason LEAK_R004 --exploration-epsilon 1.0 --explanations --out-dir experiments_output/r004
+```
+
 These fixture paths use the packaged `poker_ai.run_session_cli` implementation and record
 their actual entrypoint, raw arguments, package version, and anchored-or-unknown
 Git provenance in the RunManifest.
 
 The default adapter is limited to heads-up river decisions facing an all-in.
-R007/R003 are limited to OOP `CHECK`/`BET_33`; R007 records a check-back only
-after Hero checks, while R003 records `FOLD`/`CALL` only after Hero bets.
+R007/R003/R004 are limited to OOP `CHECK`/`BET_33`; R007 records a check-back only
+after Hero checks, while R003/R004 record `FOLD`/`CALL` only after Hero bets.
 R001/R002 are limited to OOP `CHECK`/fixed `BET_75` and also record `FOLD`/`CALL`
 only after Hero bets. No response is carried into the same decision. Arbitrary
 or additional no-facing sizes, raises, and an automatic session loop remain

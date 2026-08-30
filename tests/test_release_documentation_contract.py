@@ -112,17 +112,17 @@ def test_manual_and_automated_post_publication_checks_are_documented() -> None:
         assert "cannot undo a publication" in document
 
 
-def test_release_notes_contract_covers_r003_vertical_slice_and_limits() -> None:
+def test_release_notes_contract_covers_r004_vertical_slice_and_limits() -> None:
     runbook = _normalized("docs/releasing.md")
     for required in (
         "public runtime CLI, `poker-xai-run-session`",
-        "`--leaky-fixture --leaky-fixture-reason LEAK_R003`",
+        "`--leaky-fixture --leaky-fixture-reason LEAK_R004`",
         "generic synthetic opponent config",
-        "Phase 6 catalogs must continue to reject R003",
+        "Phase 6 catalogs must continue to reject R004",
         "OOP `CHECK` and fixed 0.33-pot `BET_33`",
         "only after Hero actually selects `BET_33`",
         "may affect later hands but must not enter the same hand's decision",
-        "pinned 40-iteration finite-CFR 0.33-pot profile",
+        "pinned 40-iteration finite-CFR",
         "content-hashed inline noncatalog reference",
         "`DetectedLeak`, existing provider, `SafetyMixer`, exact current-node action EV",
         "DPL, `RunManifest`, template explanation, post-session evaluation",
@@ -153,8 +153,9 @@ def test_release_notes_contract_covers_r003_vertical_slice_and_limits() -> None:
 
     release_verification = _normalized("docs/release_verification.md")
     for required in (
-        "R003 smoke first confirms that the reason is rejected without `--leaky-fixture`",
-        "unsupported R004 selector is still rejected",
+        "R004 smoke first confirms that the reason is rejected without `--leaky-fixture`",
+        "unsupported R005 selector is still rejected",
+        "generic synthetic mapping remains closed to R004",
         "omitted-selector default remains the facing-all-in `FOLD`/`CALL` route",
         "only `CHECK`/`BET_33`",
         "causal post-bet `FOLD`/`CALL` observations",
@@ -162,6 +163,6 @@ def test_release_notes_contract_covers_r003_vertical_slice_and_limits() -> None:
         "solver-backed exact action-EV improvement",
         "post-session evaluation",
         "one-hand successor explicitly consumes the saved manifest",
-        "restored alpha and epsilon without carrying prior observations",
+        "restored alpha and epsilon without carrying prior observations or a fixture selector",
     ):
         assert required in release_verification, required

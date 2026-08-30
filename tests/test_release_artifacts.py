@@ -16,7 +16,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
-CURRENT_VERSION = "0.1.0a18"
+CURRENT_VERSION = "0.1.0a19"
 sys.path.insert(0, str(SCRIPTS))
 
 
@@ -121,6 +121,12 @@ def test_release_workflow_keeps_exact_python_and_offline_cross_platform_gates() 
     assert "r007_manifest.code.entrypoint" in verifier
     assert "r007_manifest.code.argv == r007_argv" in verifier
     assert "r007_bundle_output" in verifier
+    assert "for noncatalog_reason in ('LEAK_R003', 'LEAK_R004')" in verifier
+    assert "['--leaky-fixture', '--leaky-fixture-reason', 'LEAK_R005']" in verifier
+    assert "run_fixed_bet_fixture('LEAK_R004'" in verifier
+    assert "r004_successor_argv = [" in verifier
+    assert 'run_root / "offline_release_smoke.py"' in verifier
+    assert '"-c",\n            script' not in verifier
     assert "source-checkout" in verifier
     assert "verify_documentation_links(documentation_root)" in verifier
     assert workflow.count("verify_release_bundle.py") == 3
