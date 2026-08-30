@@ -37,7 +37,7 @@ safety, GTO status, solver convergence, or EV superiority.
   HARD node locks, deterministic template explanations, source-DPL checks, and
   post-session answer-key evaluation with a conservative next-setting artifact.
 - **Experimental and bounded**: heads-up river facing-all-in sessions, plus
-  explicit offline R007/R003 `CHECK`/`BET_33` and R001/R002 `CHECK`/`BET_75`
+  explicit offline R007/R003/R004 `CHECK`/`BET_33` and R001/R002 `CHECK`/`BET_75`
   fixtures, with finite-iteration combo- and position-specific policies. They
   have no convergence, exact-equilibrium, or GTO certificate.
 - **Unavailable**: live input, screen scraping, poker-site APIs, and real-money
@@ -118,8 +118,8 @@ negatives and under-adjustment do not automatically increase aggression.
 Generation is LLM-free, network-free, and adds no dependency or DPL/RunManifest
 schema change.
 
-The same entry point has explicit R007, R001, R002, and R003 fixtures that reach the
-existing river tree's OOP no-facing node. R007 uses the fixed 0.33-pot branch:
+The same entry point has explicit R007, R001, R002, R003, and R004 fixtures that
+reach the existing river tree's OOP no-facing node. R007 uses the fixed 0.33-pot branch:
 
 ```bash
 poker-xai-run-session --seed 20260704 --hands 5 --solver-iterations 5 --leaky-fixture --leaky-fixture-reason LEAK_R007 --exploration-epsilon 1.0 --explanations --out-dir experiments_output/r007
@@ -149,6 +149,25 @@ that caused it. An eligible exploit reuses the existing opponent/IP/`vs_bet`/
 On the normal Hero CLI, R003 is selected only through the explicit fixture pair
 above; omitting `--leaky-fixture` is rejected, and the general
 synthetic-opponent catalog/config surface remains unchanged.
+
+R004 uses the same pinned 0.33-pot reference profile for the complementary
+small-bet overcall experiment:
+
+```bash
+poker-xai-run-session --seed 20260004 --hands 160 --solver-iterations 5 --leaky-fixture --leaky-fixture-reason LEAK_R004 --exploration-epsilon 1.0 --explanations --out-dir experiments_output/r004
+```
+
+Hero still has only `CHECK` and `BET_33`. The reach-weighted IP `vs_bet` CALL
+baseline is `0.7328227049493046`; the existing `0.16` fixture delta produces a
+CALL target of `0.8928227049493046`. The environment samples `CALL` or `FOLD`
+only after an actual `BET_33`, after that hand's Hero decision has been recorded.
+The response can therefore affect only later hands. Eligible solver candidates
+use opponent/IP/`vs_bet`/`CALL`, `baseline_scaled`, `HARD`, and
+`fix_to_baseline`, and must improve exact current-node EV by more than the
+existing `1e-12 bb` tolerance. The inline noncatalog `ConfigRef` content-hashes
+the reason, action, solver settings, and baseline and locked profile digests.
+Both fixture flags are required. Generic synthetic-opponent configuration and
+the Phase 6 catalogs continue to reject R004.
 
 R001 uses the frozen `river-large-bet-equilibrium-v1` size and the pinned
 versioned training fixture `nl-train-r001-d016-s102`:
@@ -187,9 +206,9 @@ an exact equilibrium, that CFR+ converged, or that the result is GTO. With
 `--explanations`, the directory contains DPL v3 JSONL, its RunManifest, template
 explanations, verifier summary, post-session evaluation, and the existing
 `provenance/` artifacts. Bare `--leaky-fixture` still selects R008, and all normal,
-R007, R001, R002, R008, alpha, epsilon, and solver defaults are unchanged. These fixtures
-add no arbitrary bet-size option, multi-size tree, raise, schema, dependency,
-entry point, registry, or automatic session loop.
+R007, R001, R002, R003, R008, alpha, epsilon, and solver defaults are unchanged.
+These fixtures add no arbitrary bet-size option, multi-size tree, raise, schema,
+dependency, entry point, registry, or automatic session loop.
 
 Pass that completed session's RunManifest explicitly to make the verified
 settings the defaults for one later normal Hero session:
@@ -207,6 +226,8 @@ existing `LeakDetectorConfig`, safety alpha, and epsilon. Explicit
 the restored defaults. Omitting `--previous-session-manifest` preserves the
 earlier normal and `--leaky-fixture` defaults. There is no implicit manifest
 discovery, latest-file search, session registry, or automatic session loop.
+The saved settings never carry a fixture reason: a successor must explicitly
+repeat both R004 fixture flags to run R004 again.
 
 The saved bundle can later be rechecked offline from its manifest:
 
@@ -259,7 +280,7 @@ directory and unrelated installations are never used as substitutes.
 The manifest records `poker-xai-run-session` or `cli/run_session.py` as the
 actual entrypoint and preserves the complete argument vector after the
 entrypoint, before argument parsing. The default river path remains limited to
-facing an all-in. The explicit R007, R001, R002, and R003 fixtures add only their
+facing an all-in. The explicit R007, R001, R002, R003, and R004 fixtures add only their
 bounded OOP `CHECK`/fixed-bet branches above. CFR+ defaults to 40 iterations,
 which is not a convergence guarantee.
 
@@ -333,8 +354,8 @@ Early alpha, simulation-only development. The frozen core contracts now use DPL
 v3 with read-only DPL v1/v2 loading compatibility, alongside the Reason Ontology
 and RunManifest. Normal Hero sessions use CFR+ to produce finite-iteration combo-
 and position-specific policies. The default facing-all-in path remains `vs_bet`;
-R007 check-back and R003 small-bet overfold explicitly select OOP
-`CHECK`/`BET_33`, while R001 overfold and R002 overcall explicitly share OOP
+R007 check-back, R003 small-bet overfold, and R004 small-bet overcall explicitly
+select OOP `CHECK`/`BET_33`, while R001 overfold and R002 overcall explicitly share OOP
 `CHECK`/the frozen 0.75-pot `BET_75` branch. The
 default is 40 iterations,
 average delay 0, and no checkpoints. These policies

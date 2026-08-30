@@ -324,7 +324,7 @@ def test_different_seed_changes_output():
 def test_manifest_is_valid_and_pins_versions_and_configs():
     manifest = build_manifest(20260704, HANDS, git_commit="unknown")
     assert isinstance(manifest, RunManifest)
-    assert manifest.code.package_version == "0.1.0a18"
+    assert manifest.code.package_version == "0.1.0a19"
     assert manifest.code.git_dirty is None
     assert manifest.code.entrypoint == "poker_ai.session.run_session"
     assert manifest.code.argv == []
@@ -455,7 +455,7 @@ def test_leaky_fixture_cli_smoke_writes_detected_leaks_and_mix(tmp_path, capsys)
     assert estimator["detector_min_confidence"] == 0.5
     assert estimator["rule_exploit_min_confidence"] == 0.95
     assert manifest.versions.baseline_table_version == "fixture-action-baseline"
-    assert manifest.code.package_version == "0.1.0a18"
+    assert manifest.code.package_version == "0.1.0a19"
     assert manifest.code.entrypoint == "cli/run_session.py"
     assert manifest.code.argv == raw_argv
     assert {
@@ -1191,14 +1191,14 @@ def test_session_version_commands_exit_without_starting_or_writing(tmp_path, mon
     with pytest.raises(SystemExit) as console_stopped:
         run_session_cli.main(["--version"])
     assert console_stopped.value.code == 0
-    assert capsys.readouterr().out == "poker-xai-run-session 0.1.0a18\n"
+    assert capsys.readouterr().out == "poker-xai-run-session 0.1.0a19\n"
     assert tuple(tmp_path.iterdir()) == ()
 
     compatibility_cli = _load_cli_module()
     with pytest.raises(SystemExit) as wrapper_stopped:
         compatibility_cli.main(["--version"])
     assert wrapper_stopped.value.code == 0
-    assert capsys.readouterr().out == "cli/run_session.py 0.1.0a18\n"
+    assert capsys.readouterr().out == "cli/run_session.py 0.1.0a19\n"
     assert tuple(tmp_path.iterdir()) == ()
 
 

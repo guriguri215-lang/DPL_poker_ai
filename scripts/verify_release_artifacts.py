@@ -582,12 +582,15 @@ import poker_ai.explanation_bundle_cli as explanation_bundle_cli
 assert Path(explanation_bundle_cli.__file__).resolve().is_relative_to(import_root)
 
 from opponents.model import leak_action_mapping
-try:
-    leak_action_mapping('LEAK_R003')
-except ValueError as rejected:
-    assert str(rejected) == "unsupported synthetic leak reason 'LEAK_R003'"
-else:
-    raise AssertionError('generic synthetic LEAK_R003 mapping must remain rejected')
+for noncatalog_reason in ('LEAK_R003', 'LEAK_R004'):
+    try:
+        leak_action_mapping(noncatalog_reason)
+    except ValueError as rejected:
+        assert str(rejected) == f"unsupported synthetic leak reason {noncatalog_reason!r}"
+    else:
+        raise AssertionError(
+            f'generic synthetic {noncatalog_reason} mapping must remain rejected'
+        )
 
 version_output = io.StringIO()
 try:
@@ -624,6 +627,7 @@ else:
 assert '--solver-iterations' in help_output.getvalue()
 assert '--leaky-fixture-reason' in help_output.getvalue()
 assert 'LEAK_R003' in help_output.getvalue()
+assert 'LEAK_R004' in help_output.getvalue()
 assert '--out-dir' in help_output.getvalue()
 assert '--version' in help_output.getvalue()
 assert not output_root.exists()
@@ -634,23 +638,27 @@ for invalid_argv, expected_error in (
         '--leaky-fixture-reason LEAK_R003 requires --leaky-fixture',
     ),
     (
-        ['--leaky-fixture', '--leaky-fixture-reason', 'LEAK_R004'],
-        "invalid choice: 'LEAK_R004'",
+        ['--leaky-fixture-reason', 'LEAK_R004'],
+        '--leaky-fixture-reason LEAK_R004 requires --leaky-fixture',
+    ),
+    (
+        ['--leaky-fixture', '--leaky-fixture-reason', 'LEAK_R005'],
+        "invalid choice: 'LEAK_R005'",
     ),
 ):
-    r003_rejection_root = output_root / 'r003-rejection'
+    selector_rejection_root = output_root / 'selector-rejection'
     rejection_stderr = io.StringIO()
     try:
         with contextlib.redirect_stderr(rejection_stderr):
             loaded['poker-xai-run-session'](
-                [*invalid_argv, '--out-dir', str(r003_rejection_root)]
+                [*invalid_argv, '--out-dir', str(selector_rejection_root)]
             )
     except SystemExit as stopped:
         assert stopped.code == 2
     else:
-        raise AssertionError(f'R003 rejection boundary did not stop: {invalid_argv!r}')
+        raise AssertionError(f'fixture selector boundary did not stop: {invalid_argv!r}')
     assert expected_error in rejection_stderr.getvalue()
-    assert not r003_rejection_root.exists()
+    assert not selector_rejection_root.exists()
 
 invalid_output_root = output_root / 'invalid-probability'
 for option in ('--safety-alpha', '--exploration-epsilon'):
@@ -933,10 +941,13 @@ assert r007_bundle_output.getvalue().splitlines() == [
 
 from poker_ai.opponent import (
     R003_FIXTURE_OPPONENT_ID,
+    R004_FIXTURE_OPPONENT_ID,
     r001_fixture_measurement,
     r002_fixture_measurement,
     r003_fixture_config_identity,
     r003_fixture_measurement,
+    r004_fixture_config_identity,
+    r004_fixture_measurement,
 )
 
 
@@ -1006,6 +1017,13 @@ def run_fixed_bet_fixture(reason_id, seed, hands, session_root, previous_manifes
         opponent_id = R003_FIXTURE_OPPONENT_ID
         session_mode = 'r003_no_facing'
         measurement = r003_fixture_measurement()
+        public_bet = 'BET_33'
+        bet_fraction = '0.33'
+    elif reason_id == 'LEAK_R004':
+        action_group = ['CALL']
+        opponent_id = R004_FIXTURE_OPPONENT_ID
+        session_mode = 'r004_no_facing'
+        measurement = r004_fixture_measurement()
         public_bet = 'BET_33'
         bet_fraction = '0.33'
     else:
@@ -1085,7 +1103,7 @@ def run_fixed_bet_fixture(reason_id, seed, hands, session_root, previous_manifes
 
     solver_dpls = [dpl for dpl in dpls if dpl.exploit_source == 'nodelock_solver']
     assert solver_dpls
-    improvement_tolerance = 1e-12 if reason_id == 'LEAK_R002' else 0.0
+    improvement_tolerance = 1e-12 if reason_id in {'LEAK_R002', 'LEAK_R004'} else 0.0
     for dpl in solver_dpls:
         assert [leak.reason_id for leak in dpl.detected_leaks] == [reason_id]
         assert dpl.solver_result_id
@@ -1123,6 +1141,24 @@ def run_fixed_bet_fixture(reason_id, seed, hands, session_root, previous_manifes
         assert 'average_delay=0' in opponent_config.path
         assert 'solve_config=' in opponent_config.path
         assert 'response_sampler=r003-opponent-response-v1' in opponent_config.path
+    if reason_id == 'LEAK_R004':
+        opponent_config = manifest.opponents[0].config
+        expected_path, expected_sha256 = r004_fixture_config_identity()
+        assert opponent_config is not None
+        assert opponent_config.path == expected_path
+        assert opponent_config.sha256 == expected_sha256
+        assert opponent_config.path.startswith('inline:noncatalog:')
+        assert 'reason=LEAK_R004' in opponent_config.path
+        assert 'action=CALL' in opponent_config.path
+        assert 'phase=vs_bet' in opponent_config.path
+        assert 'profile=finite_iteration_cfr' in opponent_config.path
+        assert 'public_bet=BET_33' in opponent_config.path
+        assert 'seed=20260704' in opponent_config.path
+        assert 'scenario_index=0' in opponent_config.path
+        assert 'iterations=40' in opponent_config.path
+        assert 'average_delay=0' in opponent_config.path
+        assert 'solve_config=' in opponent_config.path
+        assert 'response_sampler=r004-opponent-response-v1' in opponent_config.path
 
     for dpl, explanation in zip(dpls, explanations, strict=True):
         verified = verify_explanation(explanation, dpl)
@@ -1270,16 +1306,99 @@ assert r003_successor_bundle.getvalue().splitlines() == [
     'artifact_integrity=passed references=5',
     'explanation_checker=passed total=1 summary=consistent',
 ]
+
+r004_source_root = output_root / 'r004-source'
+r004_source_path, r004_source_manifest, r004_source_dpls, r004_source_evaluation = (
+    run_fixed_bet_fixture('LEAK_R004', 20260004, 160, r004_source_root)
+)
+r004_source_before_handoff = snapshot_files(r004_source_root)
+r004_restored = r004_source_evaluation['next_session_settings']
+assert set(r004_restored) == {'leak_detector_config', 'safety_alpha', 'epsilon'}
+r004_successor_root = output_root / 'r004-successor'
+r004_successor_argv = [
+    '--seed',
+    '20260012',
+    '--hands',
+    '1',
+    '--solver-iterations',
+    '5',
+    '--leaky-fixture',
+    '--leaky-fixture-reason',
+    'LEAK_R004',
+    '--explanations',
+    '--previous-session-manifest',
+    str(r004_source_path),
+    '--out-dir',
+    str(r004_successor_root),
+]
+with contextlib.redirect_stdout(io.StringIO()):
+    assert loaded['poker-xai-run-session'](r004_successor_argv) == 0
+assert snapshot_files(r004_source_root) == r004_source_before_handoff
+r004_successor_manifest_path = r004_successor_root / 'S20260012.manifest.json'
+r004_successor_manifest = RunManifest.model_validate_json(
+    r004_successor_manifest_path.read_text(encoding='utf-8')
+)
+r004_successor_dpls = [
+    DecisionProvenanceLog.model_validate_json(line)
+    for line in (r004_successor_root / 'S20260012.dpl.jsonl')
+    .read_text(encoding='utf-8')
+    .splitlines()
+]
+assert len(r004_successor_dpls) == 1
+assert r004_successor_manifest.code.argv == r004_successor_argv
+assert r004_successor_manifest.opponents == r004_source_manifest.opponents
+assert r004_successor_manifest.versions == r004_source_manifest.versions
+assert r004_successor_dpls[0].detected_leaks == []
+assert all(set(dpl.final_policy) == {'CHECK', 'BET_33'} for dpl in r004_successor_dpls)
+assert all(dpl.safety_alpha == r004_restored['safety_alpha'] for dpl in r004_successor_dpls)
+r004_successor_sampler = next(
+    config for config in r004_successor_manifest.configs if config.name == 'execution_sampler'
+)
+assert r004_successor_sampler.path == (
+    f"inline:epsilon-uniform-v1:epsilon={r004_restored['epsilon']:g}"
+)
+r004_successor_estimator = json.loads(
+    (r004_successor_root / 'provenance/leak_confidence_estimator.json').read_text(
+        encoding='utf-8'
+    )
+)
+r004_restored_detector = r004_restored['leak_detector_config']
+assert r004_successor_estimator == {
+    'method_version': r004_restored_detector['method_version'],
+    'alpha0': r004_restored_detector['alpha0'],
+    'beta0': r004_restored_detector['beta0'],
+    'tail': r004_restored_detector['tail'],
+    'tau': r004_restored_detector['min_deviation'],
+    'min_effective_sample_size': r004_restored_detector['min_effective_sample_size'],
+    'detector_min_confidence': r004_restored_detector['min_confidence'],
+    'rule_exploit_min_confidence': r004_restored_detector['rule_exploit_min_confidence'],
+    'nodelock_exploit_min_confidence': (
+        r004_restored_detector['nodelock_exploit_min_confidence']
+    ),
+    'run_identity': r004_successor_estimator['run_identity'],
+    'baseline_table': r004_successor_estimator['baseline_table'],
+}
+r004_successor_bundle = io.StringIO()
+with contextlib.redirect_stdout(r004_successor_bundle):
+    assert loaded['poker-xai-verify-explanation-bundle'](
+        ['--manifest', str(r004_successor_manifest_path)]
+    ) == 0
+assert r004_successor_bundle.getvalue().splitlines() == [
+    'artifact_integrity=passed references=5',
+    'explanation_checker=passed total=1 summary=consistent',
+]
 """
     script = script.replace("EXPECTED_VERSION", repr(version)).replace(
         "EXPECTED_ENTRY_POINTS", repr(EXPECTED_ENTRY_POINTS)
     )
+    smoke_script = run_root / "offline_release_smoke.py"
+    with smoke_script.open("w", encoding="utf-8", newline="\n") as stream:
+        stream.write(script)
     checked = _run(
         [
             sys.executable,
             "-I",
-            "-c",
-            script,
+            str(smoke_script),
             str(import_root),
             str(output_root),
             str(source_project) if source_project is not None else "",
@@ -1350,6 +1469,9 @@ def verify(
             "r003-explicit-cli-rejection-and-default-parity",
             "r003-solver-backed-release-surface-parity",
             "r003-verified-two-session-handoff",
+            "r004-explicit-cli-rejection-and-default-parity",
+            "r004-solver-backed-release-surface-parity",
+            "r004-verified-two-session-handoff",
             "entry-point-metadata",
             "documentation-relative-links",
         ],
