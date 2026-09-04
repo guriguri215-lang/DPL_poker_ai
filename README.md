@@ -138,10 +138,11 @@ poker-xai-run-session --seed 20260004 --hands 20 --solver-iterations 5 --leaky-f
 
 Hero can select only `CHECK` or `BET_33`. The content-hashed, noncatalog fixture
 derives its IP `vs_bet` FOLD baseline from one pinned 40-iteration CFR+ profile
-and sets the environment's FOLD rate 0.16 above that baseline. The profile,
-reference scenario, solver inputs, baseline and locked-profile hashes, and
-response sampler are pinned in the opponent's inline `ConfigRef`; this is a
-finite-iteration reference profile, not an equilibrium or GTO claim. The
+and sets the environment's FOLD rate 0.16 above that baseline. The visible
+inline `ConfigRef` names `LEAK_R003`, `FOLD`, `vs_bet`, and `cfr_plus` and pins
+the reference scenario, solver inputs, baseline and locked-profile hashes, and
+response sampler; this is a finite-iteration reference profile, not an
+equilibrium or GTO claim. The
 environment samples and records `FOLD` or `CALL` only after Hero actually
 selects `BET_33`, so the response can affect later hands but not the decision
 that caused it. An eligible exploit reuses the existing opponent/IP/`vs_bet`/
@@ -158,8 +159,8 @@ poker-xai-run-session --seed 20260004 --hands 160 --solver-iterations 5 --leaky-
 ```
 
 Hero still has only `CHECK` and `BET_33`. The reach-weighted IP `vs_bet` CALL
-baseline is `0.7328227049493046`; the existing `0.16` fixture delta produces a
-CALL target of `0.8928227049493046`. The environment samples `CALL` or `FOLD`
+baseline is `0.7328227049493047`; the existing `0.16` fixture delta produces a
+CALL target of `0.8928227049493047`. The environment samples `CALL` or `FOLD`
 only after an actual `BET_33`, after that hand's Hero decision has been recorded.
 The response can therefore affect only later hands. Eligible solver candidates
 use opponent/IP/`vs_bet`/`CALL`, `baseline_scaled`, `HARD`, and

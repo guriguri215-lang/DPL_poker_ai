@@ -105,6 +105,8 @@ result = verify_saved_explanation_bundle(
 This verifies artifact integrity, saved-artifact semantics, and the
 in-repository explanation checker only. It does not certify solver convergence,
 strategy safety or optimality, GTO status, external or third-party validation,
-or reproduction of a research result. The source session remains limited to a
-Hero decision while facing an all-in. Its default 40 CFR+ iterations are a fixed
-early-alpha computation budget, not a convergence guarantee.
+or reproduction of a research result. The default source-session route remains
+limited to a Hero decision while facing an all-in; explicit R007/R003/R004 and
+R001/R002 fixtures use their bounded no-facing `CHECK`/fixed-bet routes. The
+default 40 CFR+ iterations are a fixed early-alpha computation budget, not a
+convergence guarantee.
