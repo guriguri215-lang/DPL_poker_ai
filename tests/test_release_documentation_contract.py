@@ -112,21 +112,27 @@ def test_manual_and_automated_post_publication_checks_are_documented() -> None:
         assert "cannot undo a publication" in document
 
 
-def test_release_notes_contract_covers_r004_vertical_slice_and_limits() -> None:
+def test_release_notes_contract_covers_r003_visible_provenance_and_limits() -> None:
     runbook = _normalized("docs/releasing.md")
     for required in (
         "public runtime CLI, `poker-xai-run-session`",
-        "`--leaky-fixture --leaky-fixture-reason LEAK_R004`",
+        "`--leaky-fixture --leaky-fixture-reason LEAK_R003`",
         "generic synthetic opponent config",
-        "Phase 6 catalogs must continue to reject R004",
-        "OOP `CHECK` and fixed 0.33-pot `BET_33`",
+        "Phase 6 catalogs must continue to reject R003",
+        "R003 still gives Hero only OOP `CHECK` and fixed 0.33-pot `BET_33`",
         "only after Hero actually selects `BET_33`",
         "may affect later hands but must not enter the same hand's decision",
         "pinned 40-iteration finite-CFR",
-        "content-hashed inline noncatalog reference",
+        "visible, content-hashed inline noncatalog `ConfigRef`",
+        "`reason=LEAK_R003`",
+        "`action=FOLD`",
+        "`phase=vs_bet`",
+        "`solver=cfr_plus`",
         "`DetectedLeak`, existing provider, `SafetyMixer`, exact current-node action EV",
         "DPL, `RunManifest`, template explanation, post-session evaluation",
         "explicit previous-session settings handoff",
+        "R004's canonical generated display values",
+        "solver calculations and solver inputs remain unchanged",
         "omitted flags and the existing normal and leaky defaults remain unchanged",
         "verified saved settings are still restored",
         "explicit values still override them, including `0.0`",
@@ -153,6 +159,13 @@ def test_release_notes_contract_covers_r004_vertical_slice_and_limits() -> None:
 
     release_verification = _normalized("docs/release_verification.md")
     for required in (
+        "The R003 smoke runs the explicit bounded fixture on every surface",
+        "visible inline `ConfigRef`",
+        "`reason=LEAK_R003`",
+        "`action=FOLD`",
+        "`phase=vs_bet`",
+        "`solver=cfr_plus`",
+        "existing solver-backed checks and one-hand handoff remain in place",
         "R004 smoke first confirms that the reason is rejected without `--leaky-fixture`",
         "unsupported R005 selector is still rejected",
         "generic synthetic mapping remains closed to R004",
