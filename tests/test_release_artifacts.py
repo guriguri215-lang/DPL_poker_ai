@@ -16,7 +16,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
-CURRENT_VERSION = "0.1.0a19"
+CURRENT_VERSION = "0.1.0a20"
 sys.path.insert(0, str(SCRIPTS))
 
 
@@ -125,6 +125,13 @@ def test_release_workflow_keeps_exact_python_and_offline_cross_platform_gates() 
     assert "['--leaky-fixture', '--leaky-fixture-reason', 'LEAK_R005']" in verifier
     assert "run_fixed_bet_fixture('LEAK_R004'" in verifier
     assert "r004_successor_argv = [" in verifier
+    for r003_token in (
+        "reason=LEAK_R003",
+        "action=FOLD",
+        "phase=vs_bet",
+        "solver=cfr_plus",
+    ):
+        assert f"assert '{r003_token}' in opponent_config.path" in verifier
     assert 'run_root / "offline_release_smoke.py"' in verifier
     assert '"-c",\n            script' not in verifier
     for r004_check in (

@@ -1133,6 +1133,10 @@ def run_fixed_bet_fixture(reason_id, seed, hands, session_root, previous_manifes
         assert opponent_config.path == expected_path
         assert opponent_config.sha256 == expected_sha256
         assert opponent_config.path.startswith('inline:noncatalog:')
+        assert 'reason=LEAK_R003' in opponent_config.path
+        assert 'action=FOLD' in opponent_config.path
+        assert 'phase=vs_bet' in opponent_config.path
+        assert 'solver=cfr_plus' in opponent_config.path
         assert 'profile=finite_iteration_cfr' in opponent_config.path
         assert 'public_bet=BET_33' in opponent_config.path
         assert 'seed=20260704' in opponent_config.path
