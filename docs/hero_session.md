@@ -177,10 +177,11 @@ Hero starts OOP with only `CHECK` and `BET_33`; no other bet size or raise is
 available. R003 is a content-hashed, in-memory noncatalog fixture. Its baseline
 is the reach-weighted IP `FOLD` rate at `vs_bet` in one pinned 40-iteration CFR+
 0.33-pot profile, and its environment response rate is exactly 0.16 higher. The
-inline opponent `ConfigRef` pins the reference scenario, solver inputs,
-baseline and locked-profile hashes, lock modes, and response sampler. The
-profile is a finite-iteration reference, not a convergence, exact-equilibrium,
-or GTO certificate.
+visible inline opponent `ConfigRef` names `LEAK_R003`, `FOLD`, `vs_bet`, and
+`cfr_plus` and pins the reference scenario, solver inputs, baseline and
+locked-profile hashes, lock modes, and response sampler. The profile is a
+finite-iteration reference, not a convergence, exact-equilibrium, or GTO
+certificate.
 
 The environment samples `FOLD` or `CALL` only after Hero actually selects
 `BET_33`. Detection for that hand has already completed, so the response is
@@ -206,8 +207,8 @@ poker-xai-run-session --seed 20260004 --hands 160 --solver-iterations 5 --leaky-
 
 R004 uses R003's exact reference scenario, 40-iteration finite-CFR profile,
 0.33-pot size, and OOP `CHECK`/`BET_33` adapter. Its reach-weighted IP
-`vs_bet/CALL` baseline is `0.7328227049493046`; adding the existing `0.16`
-fixture delta gives a target of `0.8928227049493046`, which remains strictly
+`vs_bet/CALL` baseline is `0.7328227049493047`; adding the existing `0.16`
+fixture delta gives a target of `0.8928227049493047`, which remains strictly
 between zero and one. The environment applies that target with the existing
 `baseline_scaled`, `HARD`, `fix_to_baseline` node lock. The content-hashed inline
 identity includes R004, CALL, the solver settings, and both profile digests; it

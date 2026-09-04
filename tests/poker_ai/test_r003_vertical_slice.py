@@ -127,6 +127,19 @@ def test_r003_fixed_profile_supplies_response_and_inline_provenance():
     assert re.fullmatch(r"[0-9a-f]{64}", sha256)
 
 
+def test_r003_inline_provenance_names_action_phase_and_solver():
+    path, _sha256 = r003_fixture_config_identity()
+
+    for token in (
+        "reason=LEAK_R003",
+        "action=FOLD",
+        "phase=vs_bet",
+        "solver=cfr_plus",
+        "seed=20260704",
+    ):
+        assert token in path
+
+
 def test_r003_cli_is_causal_solver_backed_explained_and_handoff_ready(tmp_path, capsys):
     source_seed = 20260004
     source_root = tmp_path / "source"

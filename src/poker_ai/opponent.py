@@ -396,8 +396,9 @@ def _r003_fixture_contract() -> tuple[TrueLeakMeasurement, str, str]:
     config_sha256 = hashlib.sha256(encoded).hexdigest()
     inline_path = (
         f"inline:noncatalog:{R003_FIXTURE_PROFILE_VERSION}:reason=LEAK_R003:"
+        f"action={measurement.action}:phase={measurement.phase}:"
         f"delta={R003_FIXTURE_DELTA}:profile=finite_iteration_cfr:"
-        f"source=poker_solver.solve_frozen_river_scenario:"
+        "source=poker_solver.solve_frozen_river_scenario:solver=cfr_plus:"
         f"seed={R003_FIXTURE_PROFILE_SEED}:scenario_index=0:"
         f"public_bet=BET_33:bet_fraction={R003_FIXTURE_BET_FRACTION:g}:"
         f"iterations={R003_FIXTURE_PROFILE_ITERATIONS}:"
