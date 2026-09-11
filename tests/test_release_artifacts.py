@@ -121,8 +121,10 @@ def test_release_workflow_keeps_exact_python_and_offline_cross_platform_gates() 
     assert "r007_manifest.code.entrypoint" in verifier
     assert "r007_manifest.code.argv == r007_argv" in verifier
     assert "r007_bundle_output" in verifier
-    assert "for noncatalog_reason in ('LEAK_R003', 'LEAK_R004')" in verifier
-    assert "['--leaky-fixture', '--leaky-fixture-reason', 'LEAK_R005']" in verifier
+    assert "for noncatalog_reason in ('LEAK_R003', 'LEAK_R004', 'LEAK_R005')" in verifier
+    assert "['--leaky-fixture', '--leaky-fixture-reason', 'LEAK_R006']" in verifier
+    assert "r005-public-showdown-fixed-raise-and-verified-handoff" in bundle.SMOKE_CHECKS
+    assert "r005_source_before" in verifier
     assert "run_fixed_bet_fixture('LEAK_R004'" in verifier
     assert "r004_successor_argv = [" in verifier
     for r003_token in (
@@ -334,6 +336,7 @@ def _release_bundle(tmp_path: Path, layout: str) -> tuple[Path, Path, Path, Path
                     "r004-explicit-cli-rejection-and-default-parity",
                     "r004-solver-backed-release-surface-parity",
                     "r004-verified-two-session-handoff",
+                    "r005-public-showdown-fixed-raise-and-verified-handoff",
                     "entry-point-metadata",
                     "documentation-relative-links",
                 ],

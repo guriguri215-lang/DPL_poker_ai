@@ -194,6 +194,10 @@ def validate_posterior_bundle(
     bundle_root: Path | str,
 ) -> ValidatedPosteriorBundle:
     """Apply the ADR-0019 contextual exactly-one, path, hash, and join hard gate."""
+    from ._r005_bundle import _is_r005, _validate_r005_directory
+
+    if _is_r005(manifest):
+        return _validate_r005_directory(manifest, bundle_root)
     if manifest.versions.dpl_schema_version != DPL_SCHEMA_VERSION:
         raise ValueError("posterior bundle requires the current DPL schema version")
 

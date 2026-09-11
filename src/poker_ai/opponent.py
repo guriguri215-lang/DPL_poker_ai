@@ -40,6 +40,33 @@ R002_FIXTURE_OPPONENT_ID = "fixture-r002-d016-s102"
 R003_FIXTURE_OPPONENT_ID = "fixture-r003-d016-finite-cfr-s20260704"
 R004_FIXTURE_OPPONENT_ID = "fixture-r004-d016-finite-cfr-s20260704"
 STUB_OPPONENT_VERSION = "0.1.0"
+
+
+@dataclass(frozen=True)
+class _R005AnswerKey:
+    """Environment-only conditional truth, revealed after all Hero decisions."""
+
+    opponent_model_id: str
+    bluff_rate: float
+
+
+def _sample_r005_raised_combo(rng: random.Random) -> str:
+    """Deal from the public prior, conditioned on the fixed opponent raise.
+
+    Rejected draws are scenario construction, not played/observed hands. The
+    returned private combo stays in the environment until Hero actually CALLs.
+    """
+    combos = ("AsAd", "KsKd", "6c5c", "8c6d")
+    while True:
+        combo = rng.choice(combos)
+        if combo in combos[:2] or rng.random() < 1 / 24:
+            return combo
+
+
+def _reveal_r005_answer_key() -> _R005AnswerKey:
+    return _R005AnswerKey("fixture-r005-polarized-raise-v1", 1 / 25)
+
+
 _RIVER_LARGE_BET_FIXTURE_DELTA = "0.16"
 R003_FIXTURE_DELTA = "0.16"
 R003_FIXTURE_PROFILE_VERSION = "finite-cfr-r003-profile-v1"

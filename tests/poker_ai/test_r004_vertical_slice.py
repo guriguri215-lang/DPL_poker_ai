@@ -116,7 +116,7 @@ def test_r004_is_canonical_explicit_only_and_noncatalog(tmp_path, capsys):
             [
                 "--leaky-fixture",
                 "--leaky-fixture-reason",
-                "LEAK_R005",
+                "LEAK_R006",
                 "--out-dir",
                 str(output_root),
             ]
@@ -124,7 +124,7 @@ def test_r004_is_canonical_explicit_only_and_noncatalog(tmp_path, capsys):
 
     captured = capsys.readouterr()
     assert unsupported.value.code == 2
-    assert "invalid choice: 'LEAK_R005'" in captured.err
+    assert "invalid choice: 'LEAK_R006'" in captured.err
     assert not output_root.exists()
 
 

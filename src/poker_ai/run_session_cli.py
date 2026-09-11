@@ -133,6 +133,7 @@ def _parser(*, entrypoint: str) -> argparse.ArgumentParser:
             "LEAK_R002",
             "LEAK_R003",
             "LEAK_R004",
+            "LEAK_R005",
             "LEAK_R007",
             "LEAK_R008",
         ),
@@ -144,7 +145,8 @@ def _parser(*, entrypoint: str) -> argparse.ArgumentParser:
             "CHECK/BET_75 overfold slice, and LEAK_R002 uses that same node "
             "for an overcall slice; LEAK_R003 opts in to the OOP CHECK/BET_33 "
             "small-bet overfold slice; LEAK_R004 uses that same small-bet node "
-            "for an overcall slice"
+            "for an overcall slice; LEAK_R005 selects fixed raised episodes with "
+            "public-showdown underbluff evidence"
         ),
     )
     parser.add_argument(
@@ -196,7 +198,20 @@ def main(argv: list[str] | None = None, *, entrypoint: str = CONSOLE_ENTRYPOINT)
     )
     leak_detector = None
     exploit_provider = None
-    if args.leaky_fixture:
+    if args.leaky_fixture and args.leaky_fixture_reason == "LEAK_R005":
+        from ._r005 import _R005Detector, _R005ExploitProvider
+
+        r005_solver_config = CfrRiverPolicyConfig(
+            iterations=args.solver_iterations,
+            average_delay=args.solver_average_delay,
+            checkpoints=(),
+        )
+        leak_detector = _R005Detector(
+            r005_solver_config,
+            previous_settings.leak_detector_config if previous_settings is not None else None,
+        )
+        exploit_provider = _R005ExploitProvider(r005_solver_config, leak_detector.config)
+    elif args.leaky_fixture:
         detector_config = (
             previous_settings.leak_detector_config
             if previous_settings is not None
@@ -248,7 +263,9 @@ def main(argv: list[str] | None = None, *, entrypoint: str = CONSOLE_ENTRYPOINT)
         leak_detector = LeakDetector(config=previous_settings.leak_detector_config)
 
     provenance = collect_runtime_provenance()
-    if args.leaky_fixture and args.leaky_fixture_reason == "LEAK_R001":
+    if args.leaky_fixture and args.leaky_fixture_reason == "LEAK_R005":
+        session_mode = "r005_fixed_raise"
+    elif args.leaky_fixture and args.leaky_fixture_reason == "LEAK_R001":
         session_mode = R001_NO_FACING_SESSION_MODE
     elif args.leaky_fixture and args.leaky_fixture_reason == "LEAK_R002":
         session_mode = R002_NO_FACING_SESSION_MODE
@@ -283,9 +300,14 @@ def main(argv: list[str] | None = None, *, entrypoint: str = CONSOLE_ENTRYPOINT)
     if args.explanations:
         # The environment reveals this only after run_session has completed every
         # Hero decision. It is passed to post-session evaluation, never to Hero.
-        answer_key = reveal_stub_opponent_answer_key(
-            opponent_model_id=result.manifest.opponents[0].opponent_id
-        )
+        if session_mode == "r005_fixed_raise":
+            from .opponent import _reveal_r005_answer_key
+
+            answer_key = _reveal_r005_answer_key()
+        else:
+            answer_key = reveal_stub_opponent_answer_key(
+                opponent_model_id=result.manifest.opponents[0].opponent_id
+            )
         try:
             explanation_paths = write_verified_explanation_bundle(
                 result,

@@ -113,6 +113,7 @@ SessionMode = Literal[
     "r002_no_facing",
     "r003_no_facing",
     "r004_no_facing",
+    "r005_fixed_raise",
 ]
 
 
@@ -518,6 +519,10 @@ def _base_policy_provider_for(
     solver_config: CfrRiverPolicyConfig,
     session_mode: SessionMode,
 ) -> BasePolicyProvider:
+    if session_mode == "r005_fixed_raise":
+        from ._r005 import _R005BasePolicy
+
+        return _R005BasePolicy(solver_config)
     if session_mode == FACING_ALL_IN_SESSION_MODE:
         return CfrRiverPolicyProvider(solver_config)
     if session_mode in {
@@ -544,6 +549,10 @@ def _base_policy_provider_for(
 
 
 def _opponent_id_for(session_mode: SessionMode) -> str:
+    if session_mode == "r005_fixed_raise":
+        from ._r005 import _OPPONENT_ID
+
+        return _OPPONENT_ID
     if session_mode == FACING_ALL_IN_SESSION_MODE:
         return OPPONENT_ID
     if session_mode == R007_NO_FACING_SESSION_MODE:
@@ -573,6 +582,19 @@ def iter_session_logs(
     _base_policy_provider: BasePolicyProvider | None = None,
 ) -> Iterator[DecisionProvenanceLog]:
     """Yield one validated DPL per generated hand (deterministic for a seed)."""
+    if session_mode == "r005_fixed_raise":
+        yield from run_session(
+            seed,
+            num_hands,
+            leak_detector=leak_detector,
+            safety_alpha=safety_alpha,
+            exploration_epsilon=exploration_epsilon,
+            exploit_provider=exploit_provider,
+            solver_config=solver_config,
+            session_mode=session_mode,
+            _base_policy_provider=_base_policy_provider,
+        ).logs
+        return
     session_id = _session_id_for(seed)
     tracker = _tracker or ObservationTracker()
     detector = leak_detector or LeakDetector()
@@ -856,6 +878,24 @@ def run_session(
     _base_policy_provider: BasePolicyProvider | None = None,
 ) -> SessionResult:
     """Run a full session in memory: validated DPLs plus the manifest."""
+    if session_mode == "r005_fixed_raise":
+        from ._r005_bundle import _run_r005_session
+
+        return _run_r005_session(
+            seed,
+            num_hands,
+            git_commit=git_commit,
+            git_dirty=git_dirty,
+            package_version=package_version,
+            entrypoint=entrypoint,
+            argv=argv,
+            leak_detector=leak_detector,
+            safety_alpha=safety_alpha,
+            exploration_epsilon=exploration_epsilon,
+            exploit_provider=exploit_provider,
+            solver_config=solver_config,
+            _base_policy_provider=_base_policy_provider,
+        )
     detector = leak_detector or LeakDetector()
     tracker = ObservationTracker()
     base_policy_provider = _base_policy_provider or _base_policy_provider_for(
@@ -912,6 +952,10 @@ def write_jsonl(
 ) -> Path:
     """Write current posterior DPL JSONL after its contextual bundle hard gate passes."""
     validate_posterior_bundle(manifest, bundle_root)
+    from ._r005_bundle import _is_r005, _validate_r005_directory
+
+    if _is_r005(manifest, logs=logs):
+        _validate_r005_directory(manifest, bundle_root, logs=logs)
     if any(log.schema_version != manifest.versions.dpl_schema_version for log in logs):
         raise ValueError("DPL log version does not match the posterior manifest")
     out = Path(path)
