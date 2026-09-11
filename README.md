@@ -211,8 +211,49 @@ R007, R001, R002, R003, R008, alpha, epsilon, and solver defaults are unchanged.
 These fixtures add no arbitrary bet-size option, multi-size tree, raise, schema,
 dependency, entry point, registry, or automatic session loop.
 
-Pass that completed session's RunManifest explicitly to make the verified
-settings the defaults for one later normal Hero session:
+R005 is a separate opt-in river raise underbluff experiment:
+
+```bash
+poker-xai-run-session --seed 20260704 --hands 100 --leaky-fixture --leaky-fixture-reason LEAK_R005 --explanations --out-dir ../r005-output
+poker-xai-verify-explanation-bundle --manifest ../r005-output/S20260704.manifest.json --show-evaluation
+```
+
+Each hand is a conditional decision episode after the fixed public history
+`BET_33` (3.3 bb into 10 bb) → `RAISE_ALL_IN` (raise to 10 bb).
+The opening bet is a fixture precondition. Hero then chooses only `CALL` or
+`FOLD`, with 6.7 bb to call. The board, Hero combo, and public ranges are fixed.
+Opponent value hands beat every hand in Hero's public support; bluff hands lose
+to every hand in that support. The detector compares the proportion of bluffs
+**inside raises**, using the same conditional context for the finite-CFR
+baseline and public observations.
+
+Only a completed `CALL` reveals the opponent's cards, and that evidence becomes
+available from the next hand. Uncalled raises remain unknown. With a fixed Hero
+combo and an independent current opponent deal, Hero's call selection cannot
+depend on the current hidden cards. Sample size counts revealed raises, not all
+raises. Insufficient evidence leaves the base policy unchanged. The provider
+HARD-locks bluff raise frequencies from the observed composition and accepts a
+lower-call policy only with positive exact EV improvement under that locked
+model. SafetyMixer and optional epsilon sampling use their existing contracts.
+
+`provenance/r005_public_showdowns.json` records public history, reveal timing,
+unknown outcomes, and the terminal posterior. Its separate conditional-baseline
+and estimator references let the saved verifier reconstruct each decision from
+earlier public reveals, including solver identity, policies, EV, explanations,
+and post-session settings. Existing action-count artifacts retain their meaning.
+To run another R005 episode from verified settings, pass
+`--previous-session-manifest ../r005-output/S20260704.manifest.json` and repeat
+both R005 fixture flags; prior observations are not inherited.
+
+This fixture does not generalize to arbitrary boards, mixed-strength ranges,
+raise sizes, or live play. Its estimates require the fixed sampling assumptions;
+finite-CFR profiles and model-conditional exact EV do not establish equilibrium,
+GTO, profitability, or strategy safety. R006 and generic synthetic R005 models
+remain unsupported.
+
+Pass a completed session's RunManifest explicitly to make the verified
+settings the defaults for one later normal Hero session. For the earlier
+`quickstart` example:
 
 ```bash
 poker-xai-run-session --seed 20260705 --hands 5 --previous-session-manifest experiments_output/quickstart/S20260704.manifest.json --out-dir experiments_output/quickstart-next
@@ -228,7 +269,7 @@ the restored defaults. Omitting `--previous-session-manifest` preserves the
 earlier normal and `--leaky-fixture` defaults. There is no implicit manifest
 discovery, latest-file search, session registry, or automatic session loop.
 The saved settings never carry a fixture reason: a successor must explicitly
-repeat both R004 fixture flags to run R004 again.
+repeat both fixture flags to run the same leaky fixture again.
 
 The saved bundle can later be rechecked offline from its manifest:
 
@@ -253,9 +294,11 @@ does not display hashes, local paths, answer-key data, diagnostic notes, or
 session/opponent identities. Without `--show-evaluation`, output and support for
 older bundles without a post-session artifact remain unchanged; requesting the
 extra display for such a bundle fails without partial success output. The
-display confirms the integrity and supported shape of already saved values. It
-does not rerun the evaluator, independently recompute the metrics, or provide a
-solver-convergence, GTO, strategy-safety, profitability, or real-play guarantee.
+display confirms the integrity and supported shape of already saved values.
+For R005, the verifier also reconstructs decisions and post-session metrics
+from the dedicated saved evidence; other routes do not rerun the evaluator.
+Verification provides no solver-convergence, GTO, strategy-safety,
+profitability, or real-play guarantee.
 
 Identify either command without starting a session or creating output files:
 
@@ -282,7 +325,8 @@ The manifest records `poker-xai-run-session` or `cli/run_session.py` as the
 actual entrypoint and preserves the complete argument vector after the
 entrypoint, before argument parsing. The default river path remains limited to
 facing an all-in. The explicit R007, R001, R002, R003, and R004 fixtures add only their
-bounded OOP `CHECK`/fixed-bet branches above. CFR+ defaults to 40 iterations,
+bounded OOP `CHECK`/fixed-bet branches above. R005 adds only the fixed
+raise-response experiment described above. CFR+ defaults to 40 iterations,
 which is not a convergence guarantee.
 
 ## Gate B v2 one-shot CLI
@@ -365,7 +409,8 @@ SafetyMixer convex mixing contract, synthetic HARD node-lock opponent synthesis,
 deterministic template explanations, source-DPL checks, Phase 6 evaluation, and
 Gate B v2 contracts are implemented. Convex mixing is not a strategy-safety
 proof. Arbitrary or additional no-facing sizes, non-all-in facing bets, and
-raises remain outside the adapter. Forty iterations is not a convergence guarantee.
+generic raises remain outside the adapter. R005 adds only the fixed raised
+episode described above. Forty iterations is not a convergence guarantee.
 
 ## Responsible use
 

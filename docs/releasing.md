@@ -18,7 +18,7 @@ or safety check does not match this checklist.
 - Confirm that the public runtime CLI, `poker-xai-run-session`, still selects
   R003 only with the explicit pair
   `--leaky-fixture --leaky-fixture-reason LEAK_R003`. The reason without the
-  fixture flag and an R005 selector must be rejected; generic synthetic
+  fixture flag and an R006 selector must be rejected; generic synthetic
   opponent config and Phase 6 catalogs must continue to reject R003 before a
   session starts or output is created. Omitting the selector must preserve the
   existing facing-all-in fixture.
@@ -50,7 +50,13 @@ or safety check does not match this checklist.
   DPL, RunManifest and Explanation schemas, solver public API, Phase 6, Gate B,
   entry points, defaults, workflow topology, release mechanism, and the exact
   four-asset release contract stay unchanged. Do not add arbitrary bet sizing,
-  raises, an automatic session loop, a registry, or another release asset.
+  generic raises, an automatic session loop, a registry, or another release asset.
+- Verify R005 only with `--leaky-fixture --leaky-fixture-reason LEAK_R005`.
+  Its fixed raised episodes must preserve the public-showdown observation
+  boundary, conditional bluff-rate baseline, HARD node-lock, exact action EV,
+  saved-evidence reconstruction and explicit successor handoff. The dedicated
+  observation evidence uses existing ArtifactRef outputs; the four release
+  assets and existing schemas remain unchanged.
 
 ## 2. Merge through a reviewed pull request
 
@@ -145,10 +151,12 @@ release:
 
 Identify the published-release four-asset verification workflow, continued
 required manual verification, release documentation contract test, and exact
-four-asset contract. State that there is no new dependency, entry point, schema,
-artifact, registry, file discovery, default, solver public API, workflow
+four-asset contract. State that existing schemas are unchanged and there is no
+new dependency, entry point, release artifact, registry, file discovery, default,
+solver public API, workflow
 topology, release mechanism, automatic handoff, session loop, arbitrary
-bet-size parameter, raise, or Phase 6 catalog content. Phase 6 and Gate B are
+bet-size parameter, generic raise, or Phase 6 catalog content. Describe R005's
+fixed raise and dedicated public-showdown evidence. Phase 6 and Gate B are
 unchanged. Preserve the default facing-all-in limitation and state that 40 CFR+
 iterations are a fixed alpha computation budget, not a convergence guarantee.
 Keep the simulation-only offline boundary and make no convergence, GTO,

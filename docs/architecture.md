@@ -121,6 +121,11 @@ legal-action surface for small-bet overfold and overcall; R001/R002 add only OOP
 0.75-pot `BET_75`. None adds an arbitrary size, multi-size tree, raise, or
 general no-facing session loop. The default CFR+ budget is 40 iterations with
 average delay 0 and no checkpoints.
+The separate opt-in R005 fixture conditions on a fixed OOP opening bet and IP
+all-in raise. Its polarized public support makes normally revealed showdown
+cards sufficient to classify bluffs. A dedicated evidence output preserves
+unknown outcomes and reconstructs each decision from earlier reveals; existing
+action-count contracts remain unchanged. See the [R005 example](../README.md).
 Forty iterations is an alpha default, not a convergence guarantee; the resulting
 policy has no exact-equilibrium or GTO certificate.
 

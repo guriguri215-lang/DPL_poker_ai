@@ -367,6 +367,8 @@ verification](explanation_bundle_verification.md).
 The default adapter remains limited to facing an all-in and therefore chooses
 only between `FOLD` and `CALL`; R007/R003/R004 are limited to OOP
 `CHECK`/`BET_33`, and R001/R002 to OOP `CHECK`/fixed 0.75-pot `BET_75`. Other
-sizes and raises remain unsupported.
+sizes and generic raises remain unsupported. The separate opt-in R005 fixed
+raise experiment uses only normally revealed showdown cards to estimate bluff
+composition; see the [R005 run and verification example](../README.md).
 The 40-iteration default is not a convergence guarantee.
 See [Responsible use](responsible_use.md) before using or sharing results.

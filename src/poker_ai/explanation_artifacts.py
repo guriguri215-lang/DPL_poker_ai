@@ -418,6 +418,19 @@ def _verify_saved_explanation_bundle_contents(
         snapshot,
         required=require_post_session,
     )
+    from ._r005_bundle import _is_r005, _validate_saved_post_session
+
+    if _is_r005(snapshot.manifest) and post_session is not None:
+        try:
+            _validate_saved_post_session(
+                snapshot.manifest,
+                {path: raw for path, (_ref, raw) in snapshot.artifacts.items()},
+                post_session,
+            )
+        except (ValueError, TypeError, KeyError) as exc:
+            raise SavedExplanationBundleVerificationError(
+                "r005-post-session-mismatch", snapshot.manifest_filename
+            ) from exc
     return verification, post_session
 
 
@@ -658,6 +671,18 @@ def _verify_saved_explanation_bundle_snapshot(
                 "dpl-version-unsupported", _artifact_filename(dpl_ref)
             )
         logs.append(loaded)
+
+    from ._r005_bundle import _is_r005, _validate_r005
+
+    if _is_r005(manifest, logs=logs):
+        try:
+            _validate_r005(
+                manifest, {path: raw for path, (_ref, raw) in artifacts.items()}, logs=logs
+            )
+        except (ValueError, TypeError, KeyError) as exc:
+            raise SavedExplanationBundleVerificationError(
+                "r005-public-evidence-invalid", manifest_filename
+            ) from exc
 
     explanations: list[object] = []
     for raw_line in _jsonl_lines(explanation_bytes, explanation_ref, "explanations-jsonl-invalid"):

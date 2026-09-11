@@ -582,7 +582,7 @@ import poker_ai.explanation_bundle_cli as explanation_bundle_cli
 assert Path(explanation_bundle_cli.__file__).resolve().is_relative_to(import_root)
 
 from opponents.model import leak_action_mapping
-for noncatalog_reason in ('LEAK_R003', 'LEAK_R004'):
+for noncatalog_reason in ('LEAK_R003', 'LEAK_R004', 'LEAK_R005'):
     try:
         leak_action_mapping(noncatalog_reason)
     except ValueError as rejected:
@@ -628,6 +628,7 @@ assert '--solver-iterations' in help_output.getvalue()
 assert '--leaky-fixture-reason' in help_output.getvalue()
 assert 'LEAK_R003' in help_output.getvalue()
 assert 'LEAK_R004' in help_output.getvalue()
+assert 'LEAK_R005' in help_output.getvalue()
 assert '--out-dir' in help_output.getvalue()
 assert '--version' in help_output.getvalue()
 assert not output_root.exists()
@@ -642,8 +643,12 @@ for invalid_argv, expected_error in (
         '--leaky-fixture-reason LEAK_R004 requires --leaky-fixture',
     ),
     (
-        ['--leaky-fixture', '--leaky-fixture-reason', 'LEAK_R005'],
-        "invalid choice: 'LEAK_R005'",
+        ['--leaky-fixture-reason', 'LEAK_R005'],
+        '--leaky-fixture-reason LEAK_R005 requires --leaky-fixture',
+    ),
+    (
+        ['--leaky-fixture', '--leaky-fixture-reason', 'LEAK_R006'],
+        "invalid choice: 'LEAK_R006'",
     ),
 ):
     selector_rejection_root = output_root / 'selector-rejection'
@@ -1391,6 +1396,58 @@ assert r004_successor_bundle.getvalue().splitlines() == [
     'artifact_integrity=passed references=5',
     'explanation_checker=passed total=1 summary=consistent',
 ]
+
+# R005 has its own public-showdown evidence, preserving action-only snapshots.
+r005_root = output_root / 'r005-source'
+r005_argv = [
+    '--seed', '20260704', '--hands', '100', '--leaky-fixture',
+    '--leaky-fixture-reason', 'LEAK_R005', '--explanations', '--out-dir', str(r005_root),
+]
+with contextlib.redirect_stdout(io.StringIO()):
+    assert loaded['poker-xai-run-session'](r005_argv) == 0
+r005_manifest_path = r005_root / 'S20260704.manifest.json'
+r005_manifest = RunManifest.model_validate_json(r005_manifest_path.read_bytes())
+assert r005_manifest.code.argv == r005_argv
+assert r005_manifest.code.package_version == EXPECTED_VERSION
+r005_dpls = [
+    DecisionProvenanceLog.model_validate_json(line)
+    for line in (r005_root / 'S20260704.dpl.jsonl').read_text(encoding='utf-8').splitlines()
+]
+assert len(r005_dpls) == 100 and not r005_dpls[0].detected_leaks
+assert all(set(dpl.final_policy) == {'CALL', 'FOLD'} for dpl in r005_dpls)
+r005_mixed = [dpl for dpl in r005_dpls if dpl.exploit_source == 'nodelock_solver']
+assert r005_mixed
+assert all(dpl.ev_estimate.exploit_ev > dpl.ev_estimate.base_ev for dpl in r005_mixed)
+assert all(dpl.exploit_policy['CALL'] < dpl.base_policy['CALL'] for dpl in r005_mixed)
+r005_evidence = json.loads((r005_root / 'provenance/r005_public_showdowns.json').read_bytes())
+assert r005_evidence['terminal']['revealed'] == sum(
+    dpl.selected_action == 'CALL' for dpl in r005_dpls
+)
+assert all(
+    event['revealed_combo'] is None for event in r005_evidence['events']
+    if event['selected_action'] == 'FOLD'
+)
+with contextlib.redirect_stdout(io.StringIO()):
+    assert loaded['poker-xai-verify-explanation-bundle'](
+        ['--manifest', str(r005_manifest_path), '--show-evaluation']
+    ) == 0
+r005_source_before = snapshot_files(r005_root)
+r005_successor_root = output_root / 'r005-successor'
+with contextlib.redirect_stdout(io.StringIO()):
+    assert loaded['poker-xai-run-session']([
+        '--seed', '20260705', '--hands', '1', '--leaky-fixture',
+        '--leaky-fixture-reason', 'LEAK_R005', '--explanations',
+        '--previous-session-manifest', str(r005_manifest_path),
+        '--out-dir', str(r005_successor_root),
+    ]) == 0
+    assert loaded['poker-xai-verify-explanation-bundle']([
+        '--manifest', str(r005_successor_root / 'S20260705.manifest.json'),
+    ]) == 0
+assert snapshot_files(r005_root) == r005_source_before
+r005_successor = DecisionProvenanceLog.model_validate_json(
+    (r005_successor_root / 'S20260705.dpl.jsonl').read_text(encoding='utf-8').strip()
+)
+assert r005_successor.detected_leaks == []
 """
     script = script.replace("EXPECTED_VERSION", repr(version)).replace(
         "EXPECTED_ENTRY_POINTS", repr(EXPECTED_ENTRY_POINTS)
@@ -1476,6 +1533,7 @@ def verify(
             "r004-explicit-cli-rejection-and-default-parity",
             "r004-solver-backed-release-surface-parity",
             "r004-verified-two-session-handoff",
+            "r005-public-showdown-fixed-raise-and-verified-handoff",
             "entry-point-metadata",
             "documentation-relative-links",
         ],

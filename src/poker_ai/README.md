@@ -130,8 +130,10 @@ R007/R003/R004 are limited to OOP `CHECK`/`BET_33`; R007 records a check-back on
 after Hero checks, while R003/R004 record `FOLD`/`CALL` only after Hero bets.
 R001/R002 are limited to OOP `CHECK`/fixed `BET_75` and also record `FOLD`/`CALL`
 only after Hero bets. No response is carried into the same decision. Arbitrary
-or additional no-facing sizes, raises, and an automatic session loop remain
-unsupported.
+or additional no-facing sizes, generic raises, and an automatic session loop remain
+unsupported. The opt-in R005 fixed raised episode has separate public-showdown
+evidence and reconstructs each saved DPL from earlier revealed cards; see the
+[R005 run and verification example](../../README.md).
 Exact action EV means exact traversal of the fixed current-node model for the
 current combo, not an exact strategy profile. The 40-iteration default is a
 bounded experiment setting, not a convergence, exact-equilibrium, or GTO

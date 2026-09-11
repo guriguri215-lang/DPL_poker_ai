@@ -160,3 +160,41 @@ def build_river_game(
 
     branches = tuple((weight / total_weight, subtree, label) for weight, subtree, label in deals)
     return Game(Chance(branches), name="river")
+
+
+def _build_r005_raise_game(oop_range: Range, ip_range: Range, board: tuple[Card, ...]) -> Game:
+    """R005 only: condition on OOP's fixed 3.3 bb bet into 10 bb.
+
+    Reuse the river deal weights and CALL/FOLD leaves. IP alone can also raise
+    all-in to 10 bb; OOP then calls the remaining 6.7 bb or folds. The public
+    opening bet is a fixture precondition, not an inferred Hero action.
+    """
+    config = RiverBettingConfig(pot=10.0, bet_fraction=0.33)
+    original = build_river_game(config, oop_range, ip_range, board)
+    branches = []
+    for probability, root, label in original.root.branches:
+        oop_key, ip_key = label.split("|")
+        oop = Combo.from_str(oop_key)
+        ip = Combo.from_str(ip_key)
+        response = root.child_of("BET")
+        vs_raise = Decision(
+            player=0,
+            infoset=f"OOP:{oop_key}:vs_raise",
+            actions=("CALL", "FOLD"),
+            children=(
+                _showdown_terminal(
+                    evaluate_best((*oop.cards, *board)),
+                    evaluate_best((*ip.cards, *board)),
+                    15.0,
+                ),
+                Terminal(-8.3),
+            ),
+        )
+        raised_response = Decision(
+            player=1,
+            infoset=response.infoset,
+            actions=(*response.actions, "RAISE_ALL_IN"),
+            children=(*response.children, vs_raise),
+        )
+        branches.append((probability, raised_response, label))
+    return Game(Chance(tuple(branches)), name="river-r005-fixed-raise")

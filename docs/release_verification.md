@@ -207,7 +207,7 @@ than relying only on its filename:
   next-session setting in the same fixed order. The smoke requires the display
   to leave its source bundle byte-for-byte unchanged.
   R004 smoke first confirms that the reason is rejected without
-  `--leaky-fixture`, that an unsupported R005 selector is still rejected, and
+  `--leaky-fixture`, that an unsupported R006 selector is still rejected, and
   that generic synthetic mapping remains closed to R004 while the omitted-selector
   default remains the facing-all-in `FOLD`/`CALL` route. It then runs the explicit
   seed-20260004, 160-hand R004 command on every
@@ -221,6 +221,11 @@ than relying only on its filename:
   surface and requires its visible inline `ConfigRef` to contain
   `reason=LEAK_R003`, `action=FOLD`, `phase=vs_bet`, and `solver=cfr_plus`.
   Its existing solver-backed checks and one-hand handoff remain in place.
+  R005 smoke runs 100 fixed raised episodes on each surface, requires public
+  showdown evidence, solver-backed underbluff adjustment, saved-bundle
+  reconstruction, and a verified one-hand successor with no inherited evidence.
+  Uncalled hole cards must stay absent from saved observations. R005 without
+  its fixture flag, R006, and generic synthetic R005 mapping remain rejected.
 
 These results verify the release bundle and basic offline execution; they are
 not a solver convergence guarantee. The default river adapter remains limited

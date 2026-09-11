@@ -280,8 +280,17 @@ def evaluate_post_session(
         next_safety_alpha = 0.0
         next_epsilon = 0.0
 
+    assumption_notes = _ASSUMPTION_NOTES
+    if opponent_model_id == "fixture-r005-polarized-raise-v1":
+        assumption_notes = (
+            assumption_notes[0],
+            "r005_assumption:estimation error compares revealed-raise bluff share with "
+            "environment-only conditional truth after all decisions",
+            *assumption_notes[2:],
+            "r005_scope:fixed polarized conditional raised episodes; uncalled cards stay unknown",
+        )
     notes = (
-        *_ASSUMPTION_NOTES,
+        *assumption_notes,
         f"outcome:false_positive_count={candidates.false_positive_count}",
         f"outcome:false_negative_count={candidates.false_negative_count}",
         f"outcome:next_settings={'conservative' if conservative else 'maintained'}",
@@ -313,6 +322,12 @@ def _candidate_metrics(
     answer_key: OpponentAnswerKey,
     opponent_model_id: str,
 ) -> _CandidateMetrics:
+    from ._r005 import _OPPONENT_ID
+
+    if opponent_model_id == _OPPONENT_ID:
+        from ._r005_bundle import _candidate_metrics as r005_metrics
+
+        return r005_metrics(records, answer_key)
     confusion = {"tp": 0, "fp": 0, "fn": 0, "tn": 0}
     errors: list[float] = []
     truth_by_key: dict[tuple[str, str], bool] = {}
@@ -447,6 +462,10 @@ def _snapshot_records(
     manifest: RunManifest,
     posterior_bundle: PosteriorBundleParts,
 ) -> list[Mapping[str, Any]]:
+    from ._r005_bundle import _is_r005, _terminal_records
+
+    if _is_r005(manifest):
+        return _terminal_records(manifest, posterior_bundle)
     matches = [output for output in manifest.outputs if output.name == SNAPSHOT_ARTIFACT_NAME]
     if len(matches) != 1 or matches[0] != posterior_bundle.snapshot_ref:
         raise ValueError("RunManifest terminal snapshot does not match the posterior bundle")
