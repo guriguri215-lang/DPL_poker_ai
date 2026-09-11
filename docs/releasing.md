@@ -3,14 +3,14 @@
 [Back to the documentation index](README.md).
 
 This maintainer checklist covers the complete GitHub-only publication path for
-`0.1.0a20`. It does not publish to PyPI or any other package index. Stop the
+`0.1.0a21`. It does not publish to PyPI or any other package index. Stop the
 publication process whenever an identity, CI, review, asset, checksum, manifest,
 or safety check does not match this checklist.
 
 ## 1. Update and review the version
 
 - Start a focused `agent/...` branch from the latest `main`.
-- Set the current project version in `pyproject.toml` to `0.1.0a20`.
+- Set the current project version in `pyproject.toml` to `0.1.0a21`.
 - Update only current-version workflow defaults, public examples, tests, and
   artifact names. Preserve historical descriptions of earlier alpha releases.
 - Run the release documentation contract test so the project version, workflow
@@ -76,11 +76,11 @@ The repository uses a lightweight tag whose name is the version without a `v`
 prefix. From the verified `main` commit:
 
 ```text
-git tag 0.1.0a20
-git push origin 0.1.0a20
+git tag 0.1.0a21
+git push origin 0.1.0a21
 ```
 
-Confirm that `0.1.0a20`, the project version, and the tagged commit agree. Never
+Confirm that `0.1.0a21`, the project version, and the tagged commit agree. Never
 move, replace, or delete an existing branch, tag, or release.
 
 ## 4. Manually approve and run the release workflow
@@ -88,7 +88,7 @@ move, replace, or delete an existing branch, tag, or release.
 - In GitHub Actions, select the existing **Release artifacts** workflow and
   explicitly choose **Run workflow** from `main`.
 - Review the manual inputs before approving the dispatch: both `tag` and
-  `expected_version` must be exactly `0.1.0a20`.
+  `expected_version` must be exactly `0.1.0a21`.
 - Wait for the Ubuntu build and Windows verification jobs to succeed. The
   workflow must report that the tag points at the requested source, both clean
   builds are reproducible, archive smoke checks are offline, and the final
@@ -103,7 +103,7 @@ archive extraction, or archive-contained code execution:
 ```text
 python scripts/verify_release_bundle.py \
   --bundle <workflow-bundle-directory> \
-  --expected-version 0.1.0a20
+  --expected-version 0.1.0a21
 ```
 
 ## 5. Check the exact publication set
@@ -111,8 +111,8 @@ python scripts/verify_release_bundle.py \
 The prerelease may receive only these four files from that one unchanged
 workflow bundle:
 
-- `poker_xai-0.1.0a20-py3-none-any.whl` from `dist/`
-- `poker_xai-0.1.0a20.tar.gz` from `dist/`
+- `poker_xai-0.1.0a21-py3-none-any.whl` from `dist/`
+- `poker_xai-0.1.0a21.tar.gz` from `dist/`
 - `artifact-manifest.json` from `evidence/`
 - `SHA256SUMS` from `evidence/`
 
@@ -132,20 +132,27 @@ Any remediation that requires history changes needs explicit human approval.
 The release notes must explain the user-facing correction since the preceding
 release:
 
-- R003's visible inline noncatalog provenance now names the existing values
-  `reason=LEAK_R003`, `action=FOLD`, `phase=vs_bet`, and `solver=cfr_plus` in a
-  form a person can read directly from the `ConfigRef`.
-- This is a provenance-visibility correction only. R003 still uses the explicit
-  `--leaky-fixture --leaky-fixture-reason LEAK_R003` route, the existing OOP
-  `CHECK`/fixed 0.33-pot `BET_33` branch, the pinned 40-iteration finite-CFR
-  profile, and causal post-bet `FOLD`/`CALL` observations.
-- Related documentation now matches the visible R003 identity, the existing
-  bounded no-facing source-session routes, and R004's canonical generated
-  display values. Solver calculations and solver inputs remain unchanged.
-- The release-artifact smoke explicitly checks all four visible R003 tokens on
-  the source checkout, unpacked wheel, and unpacked sdist. Existing ordinary,
-  R007/R008, R001/R002/R004, handoff, probability-validation, explanation, and
-  public Python API checks remain in place.
+- R005 adds the explicit
+  `--leaky-fixture --leaky-fixture-reason LEAK_R005` fixed river raise underbluff
+  experiment. The public history is fixed `BET_33` followed by `RAISE_ALL_IN`;
+  Hero chooses only `CALL` or `FOLD` at the raised node.
+- The estimand is the bluff proportion inside raises in one fixed public
+  context. Only normally revealed CALL showdowns enter the detector, and only
+  from the next hand. Uncalled cards remain unknown. A fixed Hero combo,
+  fully polarized public ranges and an independent current opponent deal make
+  CALL selection independent of the current hidden cards in this model.
+- Existing HARD node locks adjust bluff raise frequencies from the observed
+  composition. Positive exact current-node EV improvement is required before
+  the lower-call candidate reaches SafetyMixer, DPL and template explanations.
+  Dedicated public-showdown evidence uses existing ArtifactRef outputs; saved
+  verification reconstructs decisions, evaluation and explicit successor
+  settings without carrying prior observations or a fixture selector forward.
+- Source checkout, unpacked wheel and unpacked sdist smoke checks exercise
+  R005 and its verified handoff. Existing ordinary, R007/R008, R001/R002/R003/R004,
+  probability-validation, explanation and public Python API checks remain in
+  place, including R003's visible provenance and R004's canonical display values.
+- Generic raises, R006, multiple raise sizes, soft locks, training and new
+  dataset/model/profile artifacts remain outside this release.
 - The release remains GitHub-only and uses the existing exact four-asset
   contract.
 
@@ -162,7 +169,7 @@ iterations are a fixed alpha computation budget, not a convergence guarantee.
 Keep the simulation-only offline boundary and make no convergence, GTO,
 strategy-safety, profitability, or real-world performance claim.
 
-Create a GitHub prerelease for tag `0.1.0a20` and attach only the four verified
+Create a GitHub prerelease for tag `0.1.0a21` and attach only the four verified
 files above.
 
 ## 6. Re-download and verify the published assets
@@ -176,7 +183,7 @@ tag source checkout:
 python scripts/verify_release_bundle.py \
   --bundle <fresh-release-download-directory> \
   --layout flat \
-  --expected-version 0.1.0a20
+  --expected-version 0.1.0a21
 ```
 
 The flat mode enforces the same filenames, exact checksum targets and digests,
@@ -199,7 +206,7 @@ this checklist.
 The **Verify published release assets** workflow runs for the GitHub Release
 `published` event. A maintainer may rerun it manually from `main` with the
 `workflow_dispatch` inputs `tag` and `expected_version`, both set to
-`0.1.0a20`.
+`0.1.0a21`.
 
 The workflow has only `contents: read` permission and does not edit the Release,
 tag, assets, Issues, or pull requests. It fails unless the target is a published

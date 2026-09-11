@@ -179,3 +179,22 @@ def test_release_notes_contract_covers_r003_visible_provenance_and_limits() -> N
         "restored alpha and epsilon without carrying prior observations or a fixture selector",
     ):
         assert required in release_verification, required
+
+
+def test_release_notes_contract_covers_r005_public_observation_boundary() -> None:
+    runbook = _normalized("docs/releasing.md")
+    for required in (
+        "`--leaky-fixture --leaky-fixture-reason LEAK_R005`",
+        "fixed river raise underbluff",
+        "bluff proportion inside raises",
+        "Only normally revealed CALL showdowns enter the detector",
+        "only from the next hand",
+        "Uncalled cards remain unknown",
+        "CALL selection independent of the current hidden cards",
+        "Existing HARD node locks adjust bluff raise frequencies",
+        "Positive exact current-node EV improvement is required",
+        "saved verification reconstructs decisions, evaluation and explicit successor settings",
+        "Generic raises, R006, multiple raise sizes, soft locks, training",
+        "dataset/model/profile artifacts remain outside this release",
+    ):
+        assert required in runbook, required
